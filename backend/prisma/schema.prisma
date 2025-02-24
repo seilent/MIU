@@ -1,0 +1,144 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id // Discord user ID
+  username      String
+  discriminator String
+  avatar        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  requests      Request[]
+  roles         Role[]    @relation("UserRoles")
+  trackStats    UserTrackStats[]
+  webPresence   WebPresence?
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  permissions String[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  users       User[]   @relation("UserRoles")
+}
+
+enum RequestStatus {
+  PENDING
+  PLAYING
+  QUEUED
+  COMPLETED
+  DOWNLOADING
+  SKIPPED
+}
+
+model Track {
+  youtubeId     String    @id
+  title         String
+  thumbnail     String
+  duration      Int
+  globalScore   Float     @default(0)
+  playCount     Int       @default(0)
+  skipCount     Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  requests      Request[]
+  audioCache    AudioCache?
+  defaultPlaylistTracks DefaultPlaylistTrack[]
+  userStats     UserTrackStats[]
+}
+
+model Request {
+  youtubeId   String
+  userId      String
+  status      RequestStatus @default(PENDING)
+  requestedAt DateTime      @default(now())
+  playedAt    DateTime?
+  isAutoplay  Boolean       @default(false)
+  user        User          @relation(fields: [userId], references: [id])
+  track       Track         @relation(fields: [youtubeId], references: [youtubeId])
+
+  @@id([youtubeId, requestedAt])
+  @@index([status, requestedAt])
+  @@index([youtubeId])
+}
+
+model UserTrackStats {
+  userId         String
+  youtubeId      String
+  playCount      Int       @default(0)
+  skipCount      Int       @default(0)
+  totalListenTime Int      @default(0)
+  lastPlayed     DateTime  @default(now())
+  personalScore  Float     @default(0)
+  user           User      @relation(fields: [userId], references: [id])
+  track          Track     @relation(fields: [youtubeId], references: [youtubeId])
+
+  @@id([userId, youtubeId])
+  @@index([userId])
+  @@index([youtubeId])
+}
+
+model AudioCache {
+  youtubeId   String   @id
+  filePath    String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  track       Track    @relation(fields: [youtubeId], references: [youtubeId])
+}
+
+model ThumbnailCache {
+  youtubeId   String   @id
+  filePath    String
+  width       Int      @default(0)
+  height      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DefaultPlaylist {
+  id        String                 @id @default(cuid())
+  name      String                 @unique
+  active    Boolean                @default(true)
+  mode      PlaylistMode          @default(LINEAR)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  tracks    DefaultPlaylistTrack[]
+}
+
+enum PlaylistMode {
+  LINEAR
+  POOL
+}
+
+model DefaultPlaylistTrack {
+  playlistId String
+  trackId    String
+  position   Int
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  playlist   DefaultPlaylist @relation(fields: [playlistId], references: [id])
+  track      Track          @relation(fields: [trackId], references: [youtubeId])
+
+  @@id([playlistId, position])
+  @@index([trackId])
+}
+
+model WebPresence {
+  userId      String   @id // Discord user ID
+  lastSeen    DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+}

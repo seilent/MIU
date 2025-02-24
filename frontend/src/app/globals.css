@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Hex colors for fallback */
+  --color-primary: #4f46e5;
+  --color-secondary: #7c3aed;
+  --color-accent: #3b82f6;
+  --color-background: #1e293b;
+  
+  /* RGB values for opacity support */
+  --color-primary-rgb: 79, 70, 229;
+  --color-secondary-rgb: 124, 58, 237;
+  --color-accent-rgb: 59, 130, 246;
+  --color-background-rgb: 30, 41, 59;
+  
+  /* Chrome-specific fallbacks */
+  --theme-primary: #4f46e5;
+  --theme-secondary: #7c3aed;
+  --theme-accent: #3b82f6;
+  --theme-background: #1e293b;
+}
+
+@layer base {
+  :root {
+    --tw-bg-opacity: 1;
+    --tw-text-opacity: 1;
+    --tw-border-opacity: 1;
+  }
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  background: transparent !important; /* Force transparent background */
+}
+
+/* Apply transitions to elements using CSS variables */
+* {
+  transition: 
+    color 1s ease-out,
+    background-color 1s ease-out,
+    border-color 1s ease-out,
+    outline-color 1s ease-out,
+    box-shadow 1s ease-out;
+}
+
+/* Specific background transitions */
+[style*="--color-background"] {
+  transition: background-color 1s ease-out;
+}
+
+/* Apply background colors with opacity support */
+.bg-background {
+  background-color: rgb(var(--color-background-rgb) / var(--tw-bg-opacity));
+}
+
+.bg-primary {
+  background-color: rgb(var(--color-primary-rgb) / var(--tw-bg-opacity));
+}
+
+.bg-secondary {
+  background-color: rgb(var(--color-secondary-rgb) / var(--tw-bg-opacity));
+}
+
+.bg-accent {
+  background-color: rgb(var(--color-accent-rgb) / var(--tw-bg-opacity));
+}
+
+/* Apply text colors with opacity support */
+.text-background {
+  color: rgb(var(--color-background-rgb) / var(--tw-text-opacity));
+}
+
+.text-primary {
+  color: rgb(var(--color-primary-rgb) / var(--tw-text-opacity));
+}
+
+.text-secondary {
+  color: rgb(var(--color-secondary-rgb) / var(--tw-text-opacity));
+}
+
+.text-accent {
+  color: rgb(var(--color-accent-rgb) / var(--tw-text-opacity));
+}
+
+/* Chrome-specific theme classes */
+.bg-theme-primary {
+  background-color: var(--theme-primary, var(--color-primary));
+}
+
+.bg-theme-secondary {
+  background-color: var(--theme-secondary, var(--color-secondary));
+}
+
+.bg-theme-accent {
+  background-color: var(--theme-accent, var(--color-accent));
+}
+
+.bg-theme-background {
+  background-color: var(--theme-background, var(--color-background));
+}
+
+.text-theme-primary {
+  color: var(--theme-primary, var(--color-primary));
+}
+
+.text-theme-secondary {
+  color: var(--theme-secondary, var(--color-secondary));
+}
+
+.text-theme-accent {
+  color: var(--theme-accent, var(--color-accent));
+}
