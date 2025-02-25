@@ -132,6 +132,30 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Function to check if script is running with sudo
+check_sudo() {
+  if [ "$EUID" -ne 0 ]; then
+    echo -e "${YELLOW}This script is not running with sudo privileges.${NC}"
+    echo -e "${YELLOW}Some operations might fail due to permission issues.${NC}"
+    echo -e "${YELLOW}If you encounter permission errors, you can:${NC}"
+    echo -e "${YELLOW}1. Run the script with sudo: sudo ./deploy.sh [OPTIONS]${NC}"
+    echo -e "${YELLOW}2. Use local installations instead of global ones${NC}"
+    echo -e "${YELLOW}3. Configure npm to use a different directory for global packages:${NC}"
+    echo -e "${YELLOW}   mkdir -p ~/.npm-global${NC}"
+    echo -e "${YELLOW}   npm config set prefix '~/.npm-global'${NC}"
+    echo -e "${YELLOW}   Add to ~/.profile: export PATH=~/.npm-global/bin:\$PATH${NC}"
+    echo -e "${YELLOW}   source ~/.profile${NC}"
+    
+    read -p "Do you want to continue without sudo? (y/n): " CONTINUE_WITHOUT_SUDO
+    if [[ "$CONTINUE_WITHOUT_SUDO" != "y" ]]; then
+      echo -e "${RED}Deployment aborted. Please run with sudo or fix permissions.${NC}"
+      exit 1
+    fi
+    
+    echo -e "${YELLOW}Continuing without sudo...${NC}"
+  fi
+}
+
 # Function to install system dependencies
 install_system_dependencies() {
   echo -e "${BLUE}Checking and installing system dependencies...${NC}"
@@ -155,7 +179,36 @@ install_system_dependencies() {
   # Install PM2 if needed and not installed
   if [ "$USE_PM2" = true ] && ! command_exists pm2; then
     echo -e "${YELLOW}Installing PM2...${NC}"
-    sudo npm install -g pm2
+    
+    # Try installing PM2 with sudo first
+    if [ "$EUID" -eq 0 ]; then
+      npm install -g pm2
+    else
+      # Try with sudo
+      echo -e "${YELLOW}Attempting to install PM2 with sudo...${NC}"
+      sudo npm install -g pm2 || {
+        echo -e "${YELLOW}Sudo installation failed. Trying local installation...${NC}"
+        
+        # Create a directory for global npm packages in user's home
+        mkdir -p "$HOME/.npm-global"
+        npm config set prefix "$HOME/.npm-global"
+        
+        # Add to PATH temporarily
+        export PATH="$HOME/.npm-global/bin:$PATH"
+        
+        # Install PM2
+        npm install -g pm2
+        
+        # Add to .profile for persistence if not already there
+        if ! grep -q "PATH=\"\$HOME/.npm-global/bin:\$PATH\"" "$HOME/.profile"; then
+          echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.profile"
+          echo -e "${YELLOW}Added ~/.npm-global/bin to PATH in ~/.profile${NC}"
+          echo -e "${YELLOW}Run 'source ~/.profile' to update your current session${NC}"
+        fi
+        
+        echo -e "${YELLOW}PM2 installed in user's home directory.${NC}"
+      }
+    fi
   fi
   
   # Install Nginx if needed and not installed
@@ -364,17 +417,58 @@ update_env_files() {
     if [ -f "$PROJECT_ROOT/scripts/update-env.ts" ]; then
       echo -e "${YELLOW}Running environment updater script...${NC}"
       
-      # Check if ts-node is installed
-      if ! command_exists ts-node; then
-        echo -e "${YELLOW}Installing ts-node...${NC}"
-        npm install -g ts-node typescript
+      # Create a temporary directory for local installation
+      TEMP_DIR=$(mktemp -d)
+      cd "$TEMP_DIR"
+      
+      # Try to run with npx first (which avoids global installation)
+      echo -e "${YELLOW}Attempting to run with npx...${NC}"
+      cd "$PROJECT_ROOT"
+      if npx ts-node scripts/update-env.ts; then
+        echo -e "${GREEN}Environment files updated successfully with npx.${NC}"
+        rm -rf "$TEMP_DIR"
+        return 0
       fi
       
-      # Run the update-env.ts script
-      cd "$PROJECT_ROOT"
-      ts-node scripts/update-env.ts
+      # If npx fails, try local installation
+      echo -e "${YELLOW}Npx approach failed. Trying local installation...${NC}"
+      cd "$TEMP_DIR"
       
-      echo -e "${GREEN}Environment files updated successfully.${NC}"
+      # Create a minimal package.json
+      echo '{"name":"ts-node-temp","private":true}' > package.json
+      
+      # Install ts-node locally
+      if npm install ts-node typescript; then
+        echo -e "${GREEN}Successfully installed ts-node locally.${NC}"
+        
+        # Run the update-env.ts script with local ts-node
+        cd "$PROJECT_ROOT"
+        if "$TEMP_DIR/node_modules/.bin/ts-node" scripts/update-env.ts; then
+          echo -e "${GREEN}Environment files updated successfully with local ts-node.${NC}"
+          rm -rf "$TEMP_DIR"
+          return 0
+        fi
+      fi
+      
+      # If all automated approaches fail, guide the user
+      echo -e "${YELLOW}Automated environment update failed. You can try manually:${NC}"
+      echo -e "${YELLOW}1. Install ts-node with sudo: sudo npm install -g ts-node typescript${NC}"
+      echo -e "${YELLOW}2. Run the update script: ts-node $PROJECT_ROOT/scripts/update-env.ts${NC}"
+      echo -e "${YELLOW}Or alternatively:${NC}"
+      echo -e "${YELLOW}1. Install ts-node locally: npm install --save-dev ts-node typescript${NC}"
+      echo -e "${YELLOW}2. Run with npx: npx ts-node scripts/update-env.ts${NC}"
+      
+      # Clean up
+      rm -rf "$TEMP_DIR"
+      
+      # Ask if user wants to continue without environment update
+      read -p "Do you want to continue deployment without environment update? (y/n): " CONTINUE_DEPLOY
+      if [[ "$CONTINUE_DEPLOY" != "y" ]]; then
+        echo -e "${RED}Deployment aborted.${NC}"
+        exit 1
+      fi
+      
+      echo -e "${YELLOW}Continuing deployment without environment update...${NC}"
     else
       echo -e "${YELLOW}Environment updater script not found. Skipping environment update.${NC}"
     fi
@@ -415,6 +509,21 @@ pull_repository() {
   fi
 }
 
+# Function to run PM2 commands
+run_pm2() {
+  local command="$1"
+  local args="${@:2}"
+  
+  # Check if PM2 is in PATH
+  if command_exists pm2; then
+    pm2 $command $args
+  else
+    # Try with npx
+    echo -e "${YELLOW}PM2 not found in PATH. Trying with npx...${NC}"
+    npx pm2 $command $args
+  fi
+}
+
 # Function to deploy the backend
 deploy_backend() {
   echo -e "${BLUE}Deploying backend...${NC}"
@@ -439,8 +548,8 @@ deploy_backend() {
     
     # Approach 1: Try with prebuild-install
     echo -e "${YELLOW}Approach 1: Using prebuild-install...${NC}"
-    npm install -g prebuild-install
-    prebuild-install -r sharp || true
+    npm install --save-dev prebuild-install
+    npx prebuild-install -r sharp || true
     
     # Approach 2: Try with specific environment variables
     echo -e "${YELLOW}Approach 2: Using specific environment variables...${NC}"
@@ -564,13 +673,13 @@ EOF
   
   # Run database migrations
   echo -e "${YELLOW}Running database migrations...${NC}"
-  npm run prisma:migrate || {
+  npx prisma migrate deploy || {
     echo -e "${RED}Database migration failed. Retrying after a delay...${NC}"
     sleep 10
-    npm run prisma:migrate || {
+    npx prisma migrate deploy || {
       echo -e "${RED}Database migration failed again. Please check your database configuration.${NC}"
       echo -e "${YELLOW}You can try running migrations manually later with:${NC}"
-      echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npm run prisma:migrate${NC}"
+      echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npx prisma migrate deploy${NC}"
     }
   }
   
@@ -628,9 +737,9 @@ EOF
       fi
     fi
     
-    pm2 delete miu-backend 2>/dev/null || true
-    pm2 start dist/index.js --name miu-backend
-    pm2 save
+    run_pm2 delete miu-backend 2>/dev/null || true
+    run_pm2 start dist/index.js --name miu-backend
+    run_pm2 save
   else
     echo -e "${YELLOW}To start the backend manually, run:${NC}"
     echo "cd $PROJECT_ROOT/backend && npm run start"
@@ -685,9 +794,9 @@ deploy_frontend() {
   # Start the application with PM2 if enabled
   if [ "$USE_PM2" = true ]; then
     echo -e "${YELLOW}Starting frontend with PM2...${NC}"
-    pm2 delete miu-frontend 2>/dev/null || true
-    pm2 start npm --name miu-frontend -- start
-    pm2 save
+    run_pm2 delete miu-frontend 2>/dev/null || true
+    run_pm2 start npm --name miu-frontend -- start
+    run_pm2 save
   else
     echo -e "${YELLOW}To start the frontend manually, run:${NC}"
     echo "cd $PROJECT_ROOT/frontend && npm run start"
@@ -782,6 +891,11 @@ create_startup_script() {
 # MIU Startup Script
 # This script starts all required services for MIU
 
+# Add npm global bin to PATH if it exists
+if [ -d "\$HOME/.npm-global/bin" ]; then
+  export PATH="\$HOME/.npm-global/bin:\$PATH"
+fi
+
 # Start Docker services if using Docker
 if [ -f "$PROJECT_ROOT/docker-compose.db.yml" ]; then
   echo "Starting Docker services..."
@@ -792,6 +906,14 @@ fi
 if command -v pm2 >/dev/null 2>&1; then
   echo "Starting PM2 processes..."
   pm2 resurrect || pm2 start all
+else
+  # Try with npx
+  echo "PM2 not found in PATH. Trying with npx..."
+  if command -v npx >/dev/null 2>&1; then
+    npx pm2 resurrect || npx pm2 start all
+  else
+    echo "Neither PM2 nor npx found. Cannot start PM2 processes."
+  fi
 fi
 
 echo "MIU services started successfully!"
@@ -856,6 +978,9 @@ update_env_example() {
 
 # Main deployment process
 echo -e "${BOLD}Starting MIU deployment...${NC}"
+
+# Check if running with sudo
+check_sudo
 
 # Install system dependencies if needed
 if [ "$INSTALL_DEPS" = true ]; then
