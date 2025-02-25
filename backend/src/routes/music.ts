@@ -687,49 +687,87 @@ router.get('/stream', async (req, res) => {
       return res.status(404).json({ error: 'Audio not found' });
     }
 
-    // Set streaming headers
-    res.setHeader('Content-Type', 'audio/mp4; codecs=mp4a.40.2'); // Explicit codec specification
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Initial-Position', client.player.getPosition());
-    res.setHeader('X-Playback-Start', Date.now());
-    res.setHeader('X-Track-Id', currentTrack.track.youtubeId);
-    res.setHeader('X-Track-Duration', currentTrack.track.duration);
-    res.setHeader('Access-Control-Expose-Headers', 
-      'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length');
-      
-    // Get or create shared stream
-    const fileStream = getSharedStream(currentTrack.track.youtubeId, audioCache.filePath);
-      
-    // Track metrics
-    audioStreamRequestsCounter.inc({ type: 'stream' });
-    const startTime = Date.now();
+    const filePath = audioCache.filePath;
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
 
-    // Handle client disconnect
-    req.on('close', () => {
-      const streamData = activeStreams.get(currentTrack.track.youtubeId);
-      if (streamData) {
-        streamData.listeners--;
-        if (streamData.listeners === 0) {
-          streamData.stream.destroy();
-          activeStreams.delete(currentTrack.track.youtubeId);
-        }
-      }
-      
-      // Track latency
+    // Handle range requests
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'audio/mp4',
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Initial-Position': client.player.getPosition(),
+        'X-Playback-Start': Date.now(),
+        'X-Track-Id': currentTrack.track.youtubeId,
+        'X-Track-Duration': currentTrack.track.duration,
+        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length, Content-Range'
+      });
+
+      // Track metrics
+      audioStreamRequestsCounter.inc({ type: 'stream' });
+      const startTime = Date.now();
+
+      // Handle client disconnect
+      req.on('close', () => {
+        file.destroy();
         const latency = (Date.now() - startTime) / 1000;
         audioStreamLatencyHistogram.observe(latency);
       });
-      
-    // Pipe stream to response
-    fileStream.pipe(res);
 
+      file.pipe(res);
+    } else {
+      // No range requested - send entire file
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': 'audio/mp4',
+        'Content-Disposition': 'inline',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Initial-Position': client.player.getPosition(),
+        'X-Playback-Start': Date.now(),
+        'X-Track-Id': currentTrack.track.youtubeId,
+        'X-Track-Duration': currentTrack.track.duration,
+        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length'
+      });
+
+      // Track metrics
+      audioStreamRequestsCounter.inc({ type: 'stream' });
+      const startTime = Date.now();
+
+      // Create read stream with larger buffer for better performance
+      const file = fs.createReadStream(filePath, {
+        highWaterMark: 64 * 1024 // 64KB chunks
+      });
+
+      // Handle client disconnect
+      req.on('close', () => {
+        file.destroy();
+        const latency = (Date.now() - startTime) / 1000;
+        audioStreamLatencyHistogram.observe(latency);
+      });
+
+      file.pipe(res);
+    }
   } catch (error) {
-        console.error('Stream error:', error);
-        if (!res.headersSent) {
+    console.error('Stream error:', error);
+    if (!res.headersSent) {
       res.status(500).json({ error: 'Stream failed' });
     }
   }

@@ -31,18 +31,26 @@ interface PlayerStore extends PlayerState {
 
 // Helper function to transform YouTube video ID into our thumbnail URL
 const getThumbnailUrl = (youtubeId: string): string => {
-  return `${env.apiUrl}/api/albumart/${youtubeId}`;
+  // If env.apiUrl is undefined, use a relative URL
+  if (!env.apiUrl) {
+    return `/api/albumart/${youtubeId}`;
+  }
+  const baseUrl = env.apiUrl.endsWith('/') ? env.apiUrl.slice(0, -1) : env.apiUrl;
+  return `${baseUrl}/api/albumart/${youtubeId}`;
 };
 
 // Helper function to transform track data and ensure thumbnail uses our endpoint
-function transformTrack(track: Track): Track {
+function transformTrack<T extends { youtubeId: string; thumbnail: string }>(track: T): T {
   if (!track) return track;
+  
+  // If the thumbnail is already a full URL and not our albumart endpoint, use it directly
+  if (track.thumbnail.startsWith('http') && !track.thumbnail.includes('/api/albumart/')) {
+    return track;
+  }
   
   return {
     ...track,
-    thumbnail: track.thumbnail.startsWith('http') && !track.thumbnail.includes('/api/albumart/') 
-      ? track.thumbnail 
-      : getThumbnailUrl(track.youtubeId)
+    thumbnail: getThumbnailUrl(track.youtubeId)
   };
 }
 
@@ -56,11 +64,20 @@ export const usePlayerStore = create<PlayerStore>()(
       volume: 0.5,
       isLoading: true,
       history: [],
-      setPlayerState: (state) => set((prev) => ({ ...prev, ...state })),
+      setPlayerState: (state) => set((prev) => {
+        // Transform currentTrack if it exists
+        const transformedState = {
+          ...state,
+          currentTrack: state.currentTrack ? transformTrack(state.currentTrack) : state.currentTrack,
+          // Transform queue tracks if they exist
+          queue: state.queue ? state.queue.map(track => transformTrack(track)) : state.queue
+        };
+        return { ...prev, ...transformedState };
+      }),
       setPosition: (position) => set({ position }),
       setVolume: (volume) => set({ volume: Math.max(0, Math.min(1, volume)) }),
       setLoading: (loading) => set({ isLoading: loading }),
-      setHistory: (history) => set({ history }),
+      setHistory: (history) => set({ history: history.map(track => transformTrack(track)) }),
     }),
     {
       name: 'player-preferences',

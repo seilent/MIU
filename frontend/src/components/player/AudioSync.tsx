@@ -46,7 +46,8 @@ export default function AudioSync() {
         const audio = audioRef.current;
         if (!audio) return;
 
-        audio.preload = 'metadata';
+        // Configure audio element
+        audio.preload = 'auto'; // Changed from 'metadata' to 'auto'
         audio.setAttribute('playsinline', 'true');
         audio.setAttribute('webkit-playsinline', 'true');
         audio.setAttribute('x-webkit-airplay', 'allow');
@@ -63,8 +64,8 @@ export default function AudioSync() {
           globalAudioInstance = audio;
         }
         
-        // Add error handler with detailed logging
-        audio.addEventListener('error', (e) => {
+        // Add error handler with detailed logging and recovery
+        audio.addEventListener('error', async (e) => {
           const target = e.target as HTMLAudioElement;
           const error = target?.error;
           console.error('Audio error:', {
@@ -75,7 +76,56 @@ export default function AudioSync() {
             networkState: target.networkState,
             src: target.src
           });
+
+          // Try to recover from error
+          if (currentTrack) {
+            try {
+              // Get fresh position
+              const res = await fetch('/api/music/position');
+              if (!res.ok) throw new Error('Failed to fetch position');
+              const data = await res.json();
+              
+              // Reset audio context if needed
+              if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+              }
+              
+              // Create new stream URL with cache busting
+              const streamUrl = `/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
+              
+              // Set new source and try to play
+              target.src = streamUrl;
+              target.load(); // Important: explicitly load the new source
+              
+              if (status === 'playing') {
+                try {
+                  await target.play();
+                  setStreamError(false);
+                  return;
+                } catch (playError) {
+                  console.error('Recovery playback failed:', playError);
+                }
+              }
+            } catch (recoveryError) {
+              console.error('Stream recovery failed:', recoveryError);
+            }
+          }
+          
           setStreamError(true);
+        });
+
+        // Add canplay handler
+        audio.addEventListener('canplay', () => {
+          setStreamError(false);
+        });
+
+        // Add stalled/waiting handlers
+        audio.addEventListener('stalled', () => {
+          console.log('Playback stalled');
+        });
+
+        audio.addEventListener('waiting', () => {
+          console.log('Playback waiting for data');
         });
       } catch (error) {
         console.error('Audio initialization error:', error);
@@ -151,17 +201,26 @@ export default function AudioSync() {
             reject(new Error('Metadata loading failed'));
           };
 
-          if (audio.readyState >= 1) {
-            handleMetadata();
-          } else {
-            audio.addEventListener('loadedmetadata', handleMetadata, { once: true });
-            audio.addEventListener('error', handleError, { once: true });
-          }
+          audio.addEventListener('loadedmetadata', handleMetadata, { once: true });
+          audio.addEventListener('error', handleError, { once: true });
+          
+          // Set a timeout for metadata loading
+          const timeout = setTimeout(() => {
+            audio.removeEventListener('loadedmetadata', handleMetadata);
+            audio.removeEventListener('error', handleError);
+            reject(new Error('Metadata loading timeout'));
+          }, 5000);
+
+          // Clean up timeout on success or error
+          const cleanup = () => clearTimeout(timeout);
+          audio.addEventListener('loadedmetadata', cleanup, { once: true });
+          audio.addEventListener('error', cleanup, { once: true });
         });
 
-        // Set new source with cache-busting
+        // Set new source with cache-busting and track ID
         const streamUrl = `/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
         audio.src = streamUrl;
+        audio.load(); // Important: explicitly load the new source
         
         try {
           // Wait for metadata to load and position to be set
@@ -230,7 +289,7 @@ export default function AudioSync() {
       onError={() => setStreamError(true)}
       playsInline
       webkit-playsinline="true"
-      preload="metadata"
+      preload="auto"
     />
   );
 } 
