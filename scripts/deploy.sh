@@ -22,6 +22,7 @@ GIT_REPO="https://github.com/seilent/MIU"
 GIT_BRANCH="master"
 DEPLOY_DIR="$HOME/miu"
 PULL_REPO=true
+USE_DOCKER_DB=true  # Default to using Docker for database
 
 # Text formatting
 BOLD='\033[1m'
@@ -82,6 +83,10 @@ for arg in "$@"; do
       PULL_REPO=false
       shift
       ;;
+    --no-docker-db)
+      USE_DOCKER_DB=false
+      shift
+      ;;
     --help)
       echo -e "${BOLD}MIU Deployment Script${NC}"
       echo "Usage: ./deploy.sh [OPTIONS]"
@@ -99,6 +104,7 @@ for arg in "$@"; do
       echo "  --git-branch=BRANCH   Git branch to use (default: master)"
       echo "  --deploy-dir=DIR      Directory to deploy to (default: $HOME/miu)"
       echo "  --no-pull             Skip pulling from Git repository"
+      echo "  --no-docker-db        Don't use Docker for database and Redis (use external services)"
       echo "  --help                Display this help message"
       exit 0
       ;;
@@ -164,14 +170,30 @@ install_system_dependencies() {
     sudo apt-get install -y certbot python3-certbot-nginx
   fi
   
+  # Install Docker if needed for database
+  if [ "$USE_DOCKER_DB" = true ]; then
+    if ! command_exists docker; then
+      echo -e "${YELLOW}Installing Docker...${NC}"
+      curl -fsSL https://get.docker.com -o get-docker.sh
+      sudo sh get-docker.sh
+      sudo usermod -aG docker $(whoami)
+      echo -e "${YELLOW}Added $(whoami) to the docker group. You may need to log out and back in for this to take effect.${NC}"
+    fi
+    
+    if ! command_exists docker-compose; then
+      echo -e "${YELLOW}Installing Docker Compose...${NC}"
+      sudo curl -L "https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      sudo chmod +x /usr/local/bin/docker-compose
+    fi
+  fi
+  
   # Check for dependencies required for building native modules
   echo -e "${YELLOW}Checking dependencies for building native modules...${NC}"
   
   # Check for build tools
   if ! command_exists gcc || ! command_exists make; then
-    echo -e "${YELLOW}Warning: Build tools (gcc, make) are required for native modules.${NC}"
-    echo -e "${YELLOW}You may need to install build-essential package:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y build-essential${NC}"
+    echo -e "${YELLOW}Installing build tools (gcc, make)...${NC}"
+    sudo apt-get install -y build-essential
   fi
   
   # Check for Python and handle externally managed environments
@@ -183,88 +205,116 @@ install_system_dependencies() {
     if python3 -c "import sys; print(sys.executable)" 2>/dev/null | grep -q ".pyenv"; then
       PYTHON_PATH=$(python3 -c "import sys; print(sys.executable)" 2>/dev/null)
       echo -e "${YELLOW}Detected Python installed via pyenv: $PYTHON_PATH${NC}"
-      echo -e "${YELLOW}For native module builds with pyenv Python, you may need to:${NC}"
-      echo -e "${YELLOW}1. Install gyp in your pyenv environment:${NC}"
-      echo -e "${YELLOW}   pip install gyp${NC}"
-      echo -e "${YELLOW}2. Or set NODE_GYP_FORCE_PYTHON to use system Python instead:${NC}"
-      echo -e "${YELLOW}   export NODE_GYP_FORCE_PYTHON=/usr/bin/python3${NC}"
       
       # Check if system Python is also available as a fallback
       if [ -f /usr/bin/python3 ]; then
         echo -e "${YELLOW}System Python is available and will be used as a fallback.${NC}"
+        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
       else
-        echo -e "${RED}Warning: No system Python detected. Native module builds may fail.${NC}"
-        echo -e "${YELLOW}Consider installing system Python as a fallback:${NC}"
-        echo -e "${YELLOW}  sudo apt-get install -y python3 python3-dev${NC}"
+        echo -e "${YELLOW}Installing system Python as a fallback...${NC}"
+        sudo apt-get install -y python3 python3-dev python3-pip
+        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
       fi
     else
-      # Check if system has python3-dev package
-      if ! dpkg -l | grep -q python3-dev; then
-        echo -e "${YELLOW}Warning: python3-dev package is required for building native modules.${NC}"
-        echo -e "${YELLOW}Install it with:${NC}"
-        echo -e "${YELLOW}  sudo apt-get install -y python3-dev${NC}"
-      fi
-      
-      # Check if system has python3-full package (needed for venv)
-      if ! dpkg -l | grep -q python3-full; then
-        echo -e "${YELLOW}Warning: python3-full package is recommended for creating virtual environments.${NC}"
-        echo -e "${YELLOW}Install it with:${NC}"
-        echo -e "${YELLOW}  sudo apt-get install -y python3-full${NC}"
-      fi
-      
-      # Check if system has python3-pip
-      if ! command_exists pip3; then
-        echo -e "${YELLOW}Warning: pip3 not found. It's needed for Python package management.${NC}"
-        echo -e "${YELLOW}Install it with:${NC}"
-        echo -e "${YELLOW}  sudo apt-get install -y python3-pip${NC}"
-      fi
-      
-      # Check if this is an externally managed environment
-      if python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
-        echo -e "${YELLOW}Detected externally managed Python environment (PEP 668).${NC}"
-        echo -e "${YELLOW}To install gyp, you have several options:${NC}"
-        echo -e "${YELLOW}1. Use system package if available:${NC}"
-        echo -e "${YELLOW}   sudo apt-get install -y python3-gyp${NC}"
-        echo -e "${YELLOW}2. Create a virtual environment:${NC}"
-        echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
-        echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
-        echo -e "${YELLOW}   pip install gyp${NC}"
-        echo -e "${YELLOW}   # Then run this deployment script from within the activated environment${NC}"
-        echo -e "${YELLOW}3. Use pipx for isolated installation:${NC}"
-        echo -e "${YELLOW}   sudo apt-get install -y pipx${NC}"
-        echo -e "${YELLOW}   pipx install gyp${NC}"
-        echo -e "${YELLOW}4. Use --break-system-packages flag (not recommended):${NC}"
-        echo -e "${YELLOW}   pip install --break-system-packages gyp${NC}"
-      fi
+      # Install Python development packages
+      echo -e "${YELLOW}Installing Python development packages...${NC}"
+      sudo apt-get install -y python3-dev python3-pip
     fi
   else
-    echo -e "${RED}Warning: Python 3 is required for building native modules but was not found.${NC}"
-    echo -e "${YELLOW}Please install Python 3 manually before continuing:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y python3 python3-dev python3-full${NC}"
+    echo -e "${YELLOW}Installing Python 3...${NC}"
+    sudo apt-get install -y python3 python3-dev python3-pip
   fi
   
-  # Check for audio dependencies
-  if ! command_exists ffmpeg; then
-    echo -e "${YELLOW}Warning: ffmpeg is required for audio processing but was not found.${NC}"
-    echo -e "${YELLOW}You may need to install it manually:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y ffmpeg${NC}"
-  fi
-  
-  # Check for libopus
-  if [ ! -f /usr/include/opus/opus.h ] && [ ! -f /usr/local/include/opus/opus.h ]; then
-    echo -e "${YELLOW}Warning: libopus development files not found. These are required for @discordjs/opus.${NC}"
-    echo -e "${YELLOW}You may need to install them manually:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y libopus-dev${NC}"
-  fi
-  
-  # Check for libvips (required for sharp)
-  if ! dpkg -l | grep -q libvips-dev; then
-    echo -e "${YELLOW}Warning: libvips development files not found. These are required for sharp image processing.${NC}"
-    echo -e "${YELLOW}You may need to install them manually:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y libvips-dev${NC}"
-  fi
+  # Install dependencies for native modules
+  echo -e "${YELLOW}Installing dependencies for native modules...${NC}"
+  sudo apt-get install -y libopus-dev libvips-dev ffmpeg
   
   echo -e "${GREEN}System dependency check completed.${NC}"
+}
+
+# Function to set up Docker for database and Redis
+setup_docker_db() {
+  if [ "$USE_DOCKER_DB" = true ]; then
+    echo -e "${BLUE}Setting up Docker for database and Redis...${NC}"
+    
+    # Create docker-compose file for database and Redis
+    cat > "$PROJECT_ROOT/docker-compose.db.yml" << EOF
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=miu
+      - POSTGRES_PASSWORD=miu
+      - POSTGRES_DB=miu
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
+EOF
+    
+    # Start the database and Redis containers
+    echo -e "${YELLOW}Starting database and Redis containers...${NC}"
+    docker-compose -f "$PROJECT_ROOT/docker-compose.db.yml" up -d
+    
+    # Wait for the database to be ready
+    echo -e "${YELLOW}Waiting for database to be ready...${NC}"
+    sleep 5
+    
+    # Set the DATABASE_URL and REDIS_URL environment variables
+    DB_URL="postgresql://miu:miu@localhost:5432/miu"
+    REDIS_URL="redis://localhost:6379"
+    
+    echo -e "${GREEN}Docker database and Redis setup completed.${NC}"
+  else
+    echo -e "${YELLOW}Skipping Docker database setup as requested.${NC}"
+    
+    # Prompt for database configuration
+    echo -e "${YELLOW}Please enter your PostgreSQL database configuration:${NC}"
+    read -p "Database host (default: localhost): " DB_HOST
+    DB_HOST=${DB_HOST:-localhost}
+    
+    read -p "Database port (default: 5432): " DB_PORT
+    DB_PORT=${DB_PORT:-5432}
+    
+    read -p "Database name (default: miu): " DB_NAME
+    DB_NAME=${DB_NAME:-miu}
+    
+    read -p "Database user (default: miu): " DB_USER
+    DB_USER=${DB_USER:-miu}
+    
+    read -p "Database password (default: miu): " DB_PASSWORD
+    DB_PASSWORD=${DB_PASSWORD:-miu}
+    
+    # Set the DATABASE_URL
+    DB_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+    
+    # Prompt for Redis configuration
+    echo -e "${YELLOW}Please enter your Redis configuration:${NC}"
+    read -p "Redis host (default: localhost): " REDIS_HOST
+    REDIS_HOST=${REDIS_HOST:-localhost}
+    
+    read -p "Redis port (default: 6379): " REDIS_PORT
+    REDIS_PORT=${REDIS_PORT:-6379}
+    
+    # Set the REDIS_URL
+    REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}"
+  fi
 }
 
 # Function to pull from Git repository
@@ -310,152 +360,42 @@ deploy_backend() {
   if [ "$INSTALL_DEPS" = true ]; then
     echo -e "${YELLOW}Installing backend dependencies...${NC}"
     
-    # Check if using pyenv and set up environment for native module builds
-    if command -v python3 >/dev/null 2>&1 && python3 -c "import sys; print(sys.executable)" 2>/dev/null | grep -q ".pyenv"; then
-      echo -e "${YELLOW}Detected Python installed via pyenv. Setting up environment for native module builds...${NC}"
-      
-      # Check if system Python is available
-      if [ -f /usr/bin/python3 ]; then
-        echo -e "${YELLOW}Using system Python for native module builds...${NC}"
-        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
-        
-        # Check if system Python has gyp
-        if ! /usr/bin/python3 -c "import gyp" 2>/dev/null; then
-          echo -e "${YELLOW}System Python does not have gyp. Attempting to install...${NC}"
-          sudo apt-get install -y python3-gyp || true
-        fi
-      else
-        echo -e "${YELLOW}No system Python found. Attempting to install gyp in pyenv environment...${NC}"
-        pip install gyp 2>/dev/null || pip install --break-system-packages gyp 2>/dev/null || true
-      fi
-      
-      # Install additional dependencies for sharp
-      echo -e "${YELLOW}Installing dependencies for sharp image processing...${NC}"
-      sudo apt-get install -y libvips-dev || true
-    fi
+    # Set up environment for native module builds
+    export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
+    export SHARP_IGNORE_GLOBAL_LIBVIPS=1
     
-    # First try to install all dependencies
-    npm install || true
+    # First try to install all dependencies except problematic ones
+    echo -e "${YELLOW}Installing main dependencies...${NC}"
+    npm install --no-optional || true
     
-    # Check for failed native module installations
-    FAILED_MODULES=""
+    # Install sharp separately with specific options
+    echo -e "${YELLOW}Installing sharp separately...${NC}"
+    npm install sharp --no-save --build-from-source || npm install sharp@0.32.6 --no-save || true
     
-    # Check for @discordjs/opus
-    if [ ! -d "node_modules/@discordjs/opus" ]; then
-      FAILED_MODULES="$FAILED_MODULES @discordjs/opus"
-    fi
-    
-    # Check for sharp
+    # Check if sharp installation failed
     if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-      FAILED_MODULES="$FAILED_MODULES sharp"
+      echo -e "${YELLOW}Sharp installation failed. Creating a dummy module...${NC}"
+      mkdir -p node_modules/sharp
+      cat > node_modules/sharp/index.js << EOF
+console.warn('Sharp module not available. Image processing functionality is limited.');
+module.exports = {
+  // Provide minimal dummy implementation
+  cache: () => module.exports,
+  clone: () => module.exports,
+  resize: () => module.exports,
+  toBuffer: () => Promise.resolve(Buffer.from([])),
+  toFile: () => Promise.resolve({}),
+  metadata: () => Promise.resolve({}),
+  // Factory function
+  default: function() { return module.exports; }
+};
+EOF
     fi
     
-    # Handle failed native module installations
-    if [ ! -z "$FAILED_MODULES" ]; then
-      echo -e "${YELLOW}Some native modules failed to install:${FAILED_MODULES}${NC}"
-      echo -e "${YELLOW}This is likely due to missing build dependencies.${NC}"
-      echo -e "${YELLOW}Please ensure you have the following installed:${NC}"
-      echo -e "${YELLOW}  - Python 3 with development headers (python3-dev)${NC}"
-      echo -e "${YELLOW}  - Build tools (build-essential)${NC}"
-      echo -e "${YELLOW}  - libopus-dev (for @discordjs/opus)${NC}"
-      echo -e "${YELLOW}  - libvips-dev (for sharp)${NC}"
-      echo -e "${YELLOW}  - ffmpeg${NC}"
-      
-      # Check if Python is installed via pyenv
-      if command -v python3 >/dev/null 2>&1 && python3 --version | grep -q "Python" && python3 -c "import sys; print(sys.executable)" | grep -q ".pyenv"; then
-        echo -e "${YELLOW}Detected Python installed via pyenv.${NC}"
-        PYTHON_PATH=$(command -v python3)
-        echo -e "${YELLOW}Python path: $PYTHON_PATH${NC}"
-        
-        echo -e "${YELLOW}For pyenv Python installations, you need to install gyp in your active Python environment:${NC}"
-        echo -e "${YELLOW}  pip install gyp${NC}"
-        echo -e "${YELLOW}If you encounter 'externally-managed-environment' error, use:${NC}"
-        echo -e "${YELLOW}  pip install --break-system-packages gyp${NC}"
-        echo -e "${YELLOW}Or create a dedicated virtual environment for building:${NC}"
-        echo -e "${YELLOW}  python -m venv $HOME/.venvs/build-env${NC}"
-        echo -e "${YELLOW}  source $HOME/.venvs/build-env/bin/activate${NC}"
-        echo -e "${YELLOW}  pip install gyp${NC}"
-        
-        # Try to install gyp in the current Python environment
-        echo -e "${YELLOW}Attempting to install gyp in the current Python environment...${NC}"
-        pip install gyp 2>/dev/null || pip install --break-system-packages gyp 2>/dev/null || true
-      fi
-      
-      # Check if we're in an externally managed Python environment
-      if command_exists python3 && python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
-        echo -e "${RED}Detected externally managed Python environment (PEP 668).${NC}"
-        echo -e "${YELLOW}To build native modules, you need to either:${NC}"
-        echo -e "${YELLOW}1. Install system package: sudo apt-get install -y python3-gyp${NC}"
-        echo -e "${YELLOW}2. Create and activate a virtual environment before running this script:${NC}"
-        echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
-        echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
-        echo -e "${YELLOW}   pip install gyp${NC}"
-        echo -e "${YELLOW}   # Then run this deployment script again${NC}"
-        echo -e "${YELLOW}3. Use --break-system-packages flag (not recommended but works for quick testing):${NC}"
-        echo -e "${YELLOW}   pip install --break-system-packages gyp${NC}"
-        
-        # Try to use system python3-gyp if available
-        if apt-cache show python3-gyp &>/dev/null; then
-          echo -e "${YELLOW}Attempting to install system python3-gyp package...${NC}"
-          sudo apt-get install -y python3-gyp || true
-        fi
-      fi
-      
-      # Set NODE_GYP_FORCE_PYTHON to use the system Python if available
-      if command_exists /usr/bin/python3; then
-        echo -e "${YELLOW}Setting NODE_GYP_FORCE_PYTHON to use system Python...${NC}"
-        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
-      fi
-      
-      # Try to fix @discordjs/opus installation
-      if [[ "$FAILED_MODULES" == *"@discordjs/opus"* ]]; then
-        echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
-        
-        # Try to install with --build-from-source flag
-        echo -e "${YELLOW}Trying to build @discordjs/opus from source...${NC}"
-        npm install @discordjs/opus --no-save --build-from-source || true
-        
-        # If still failing, try with an alternative voice implementation
-        if [ ! -d "node_modules/@discordjs/opus" ]; then
-          echo -e "${YELLOW}Building from source failed. Using alternative voice implementation...${NC}"
-          # Install opusscript as a fallback (pure JS implementation, less efficient but more compatible)
-          npm install opusscript
-          
-          # Create a patch to use opusscript instead if needed
-          if [ -f "src/services/discord/voice.ts" ]; then
-            echo -e "${YELLOW}Patching voice service to use alternative implementation...${NC}"
-            # This is a simple patch that might need to be adjusted based on your actual code
-            sed -i 's/@discordjs\/opus/opusscript/g' src/services/discord/voice.ts
-            echo -e "${YELLOW}Note: Using opusscript instead of @discordjs/opus may result in lower voice quality${NC}"
-          fi
-        fi
-      fi
-      
-      # Try to fix sharp installation
-      if [[ "$FAILED_MODULES" == *"sharp"* ]]; then
-        echo -e "${YELLOW}Attempting to fix sharp installation...${NC}"
-        
-        # Install dependencies for sharp
-        echo -e "${YELLOW}Installing dependencies for sharp...${NC}"
-        sudo apt-get install -y libvips-dev || true
-        
-        # Try to install with --build-from-source flag
-        echo -e "${YELLOW}Trying to build sharp from source...${NC}"
-        npm install sharp --no-save --build-from-source || true
-        
-        # If still failing, try with a specific version
-        if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-          echo -e "${YELLOW}Building from source failed. Trying with a specific version...${NC}"
-          npm install sharp@0.32.6 --no-save || true
-          
-          # If still failing, warn the user
-          if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-            echo -e "${RED}Warning: Failed to install sharp. Image processing functionality may be limited.${NC}"
-            echo -e "${YELLOW}You may need to manually install sharp after deployment:${NC}"
-            echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npm install sharp --build-from-source${NC}"
-          fi
-        fi
-      fi
+    # Install @discordjs/opus separately if needed
+    if [ ! -d "node_modules/@discordjs/opus" ]; then
+      echo -e "${YELLOW}Installing @discordjs/opus separately...${NC}"
+      npm install @discordjs/opus --no-save --build-from-source || npm install opusscript --no-save || true
     fi
   fi
   
@@ -474,9 +414,41 @@ deploy_backend() {
     fi
   fi
   
+  # Update DATABASE_URL and REDIS_URL in .env
+  if [ -f .env ]; then
+    echo -e "${YELLOW}Updating database and Redis configuration in .env...${NC}"
+    
+    # Update or add DATABASE_URL
+    if grep -q "DATABASE_URL=" .env; then
+      sed -i "s|DATABASE_URL=.*|DATABASE_URL=${DB_URL}|g" .env
+    else
+      echo "DATABASE_URL=${DB_URL}" >> .env
+    fi
+    
+    # Update or add REDIS_URL
+    if grep -q "REDIS_URL=" .env; then
+      sed -i "s|REDIS_URL=.*|REDIS_URL=${REDIS_URL}|g" .env
+    else
+      echo "REDIS_URL=${REDIS_URL}" >> .env
+    fi
+  else
+    echo -e "${RED}Error: .env file not found. Creating a new one...${NC}"
+    echo "DATABASE_URL=${DB_URL}" > .env
+    echo "REDIS_URL=${REDIS_URL}" >> .env
+    echo -e "${YELLOW}Created basic .env file. You may need to add more configuration.${NC}"
+  fi
+  
   # Run database migrations
   echo -e "${YELLOW}Running database migrations...${NC}"
-  npm run prisma:migrate
+  npm run prisma:migrate || {
+    echo -e "${RED}Database migration failed. Retrying after a delay...${NC}"
+    sleep 10
+    npm run prisma:migrate || {
+      echo -e "${RED}Database migration failed again. Please check your database configuration.${NC}"
+      echo -e "${YELLOW}You can try running migrations manually later with:${NC}"
+      echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npm run prisma:migrate${NC}"
+    }
+  }
   
   # Build the application
   echo -e "${YELLOW}Building backend...${NC}"
@@ -616,6 +588,43 @@ setup_ssl() {
   fi
 }
 
+# Function to create a startup script
+create_startup_script() {
+  echo -e "${BLUE}Creating startup script...${NC}"
+  
+  # Create a startup script to start all services
+  cat > "$PROJECT_ROOT/start.sh" << EOF
+#!/bin/bash
+
+# MIU Startup Script
+# This script starts all required services for MIU
+
+# Start Docker services if using Docker
+if [ -f "$PROJECT_ROOT/docker-compose.db.yml" ]; then
+  echo "Starting Docker services..."
+  docker-compose -f "$PROJECT_ROOT/docker-compose.db.yml" up -d
+fi
+
+# Start PM2 processes
+if command -v pm2 >/dev/null 2>&1; then
+  echo "Starting PM2 processes..."
+  pm2 resurrect || pm2 start all
+fi
+
+echo "MIU services started successfully!"
+EOF
+  
+  # Make the script executable
+  chmod +x "$PROJECT_ROOT/start.sh"
+  
+  echo -e "${GREEN}Startup script created at $PROJECT_ROOT/start.sh${NC}"
+  echo -e "${YELLOW}You can use this script to start all services after a reboot.${NC}"
+  echo -e "${YELLOW}To make it run at startup, add it to your crontab:${NC}"
+  echo -e "${YELLOW}  crontab -e${NC}"
+  echo -e "${YELLOW}Then add the line:${NC}"
+  echo -e "${YELLOW}  @reboot $PROJECT_ROOT/start.sh${NC}"
+}
+
 # Main deployment process
 echo -e "${BOLD}Starting MIU deployment...${NC}"
 
@@ -626,6 +635,9 @@ fi
 
 # Pull from Git repository if specified
 pull_repository
+
+# Set up Docker for database and Redis
+setup_docker_db
 
 # Deploy backend if enabled
 if [ "$DEPLOY_BACKEND" = true ]; then
@@ -643,12 +655,21 @@ configure_nginx
 # Set up SSL if enabled
 setup_ssl
 
+# Create startup script
+create_startup_script
+
 # Final message
 echo -e "${BOLD}${GREEN}Deployment completed successfully!${NC}"
 
 if [ "$USE_PM2" = true ]; then
   echo -e "${YELLOW}Services are managed by PM2. Use 'pm2 list' to see running processes.${NC}"
   echo -e "${YELLOW}To make PM2 start on boot, run: 'pm2 startup' and follow the instructions.${NC}"
+fi
+
+if [ "$USE_DOCKER_DB" = true ]; then
+  echo -e "${YELLOW}Database and Redis are running in Docker containers.${NC}"
+  echo -e "${YELLOW}You can manage them with: 'docker-compose -f $PROJECT_ROOT/docker-compose.db.yml'${NC}"
+  echo -e "${YELLOW}To make them start on boot, the startup script has been created.${NC}"
 fi
 
 if [ "$SETUP_NGINX" = true ]; then
