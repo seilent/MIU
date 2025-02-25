@@ -19,8 +19,8 @@ DOMAIN_NAME=""
 BACKEND_PATH="backend"
 PROJECT_ROOT=$(pwd)
 GIT_REPO="https://github.com/seilent/MIU"
-GIT_BRANCH="main"
-DEPLOY_DIR="/var/www/miu"
+GIT_BRANCH="master"
+DEPLOY_DIR="$HOME/miu"
 PULL_REPO=true
 
 # Text formatting
@@ -96,8 +96,8 @@ for arg in "$@"; do
       echo "  --domain=DOMAIN       Set the domain name (required for Nginx and SSL)"
       echo "  --backend-path=PATH   Set the backend path (default: backend)"
       echo "  --git-repo=URL        Git repository URL to pull from (default: https://github.com/seilent/MIU)"
-      echo "  --git-branch=BRANCH   Git branch to use (default: main)"
-      echo "  --deploy-dir=DIR      Directory to deploy to (default: /var/www/miu)"
+      echo "  --git-branch=BRANCH   Git branch to use (default: master)"
+      echo "  --deploy-dir=DIR      Directory to deploy to (default: $HOME/miu)"
       echo "  --no-pull             Skip pulling from Git repository"
       echo "  --help                Display this help message"
       exit 0
@@ -164,16 +164,47 @@ install_system_dependencies() {
     sudo apt-get install -y certbot python3-certbot-nginx
   fi
   
-  # Install dependencies required for building @discordjs/opus
-  echo -e "${YELLOW}Installing dependencies for building native modules...${NC}"
-  sudo apt-get install -y python3-pip build-essential libtool autoconf automake python3-dev
-  sudo pip3 install gyp
+  # Check for dependencies required for building @discordjs/opus
+  echo -e "${YELLOW}Checking dependencies for building native modules...${NC}"
   
-  # Install dependencies for audio processing
-  echo -e "${YELLOW}Installing audio dependencies...${NC}"
-  sudo apt-get install -y ffmpeg libopus-dev
+  # Check for build tools
+  if ! command_exists gcc || ! command_exists make; then
+    echo -e "${YELLOW}Warning: Build tools (gcc, make) are required for native modules.${NC}"
+    echo -e "${YELLOW}You may need to install build-essential package:${NC}"
+    echo -e "${YELLOW}  sudo apt-get install -y build-essential${NC}"
+  fi
   
-  echo -e "${GREEN}System dependencies installed successfully.${NC}"
+  # Check for Python
+  if ! command_exists python3; then
+    echo -e "${RED}Warning: Python 3 is required for building native modules but was not found.${NC}"
+    echo -e "${YELLOW}Please install Python 3 manually before continuing:${NC}"
+    echo -e "${YELLOW}  sudo apt-get install -y python3 python3-pip${NC}"
+    echo -e "${YELLOW}After installing Python, you may need to install gyp:${NC}"
+    echo -e "${YELLOW}  pip3 install gyp${NC}"
+  else
+    # Check if gyp is installed
+    if ! python3 -c "import gyp" 2>/dev/null; then
+      echo -e "${YELLOW}Warning: Python gyp module not found. This is required for building native modules.${NC}"
+      echo -e "${YELLOW}Please install it manually:${NC}"
+      echo -e "${YELLOW}  pip3 install gyp${NC}"
+    fi
+  fi
+  
+  # Check for audio dependencies
+  if ! command_exists ffmpeg; then
+    echo -e "${YELLOW}Warning: ffmpeg is required for audio processing but was not found.${NC}"
+    echo -e "${YELLOW}You may need to install it manually:${NC}"
+    echo -e "${YELLOW}  sudo apt-get install -y ffmpeg${NC}"
+  fi
+  
+  # Check for libopus
+  if [ ! -f /usr/include/opus/opus.h ] && [ ! -f /usr/local/include/opus/opus.h ]; then
+    echo -e "${YELLOW}Warning: libopus development files not found. These are required for @discordjs/opus.${NC}"
+    echo -e "${YELLOW}You may need to install them manually:${NC}"
+    echo -e "${YELLOW}  sudo apt-get install -y libopus-dev${NC}"
+  fi
+  
+  echo -e "${GREEN}System dependency check completed.${NC}"
 }
 
 # Function to pull from Git repository
@@ -224,14 +255,23 @@ deploy_backend() {
     
     # Check if @discordjs/opus installation failed
     if [ ! -d "node_modules/@discordjs/opus" ]; then
+      echo -e "${YELLOW}@discordjs/opus installation failed. This is likely due to missing build dependencies.${NC}"
+      echo -e "${YELLOW}Please ensure you have the following installed:${NC}"
+      echo -e "${YELLOW}  - Python 3 and pip${NC}"
+      echo -e "${YELLOW}  - gyp (pip3 install gyp)${NC}"
+      echo -e "${YELLOW}  - build-essential (gcc, make, etc.)${NC}"
+      echo -e "${YELLOW}  - libopus-dev${NC}"
+      echo -e "${YELLOW}  - ffmpeg${NC}"
+      
       echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
       
-      # Install specific dependencies for @discordjs/opus
+      # Try to install with --build-from-source flag
+      echo -e "${YELLOW}Trying to build @discordjs/opus from source...${NC}"
       npm install @discordjs/opus --no-save --build-from-source || true
       
       # If still failing, try with an alternative voice implementation
       if [ ! -d "node_modules/@discordjs/opus" ]; then
-        echo -e "${YELLOW}Using alternative voice implementation...${NC}"
+        echo -e "${YELLOW}Building from source failed. Using alternative voice implementation...${NC}"
         # Install opusscript as a fallback (pure JS implementation, less efficient but more compatible)
         npm install opusscript
         
@@ -240,6 +280,7 @@ deploy_backend() {
           echo -e "${YELLOW}Patching voice service to use alternative implementation...${NC}"
           # This is a simple patch that might need to be adjusted based on your actual code
           sed -i 's/@discordjs\/opus/opusscript/g' src/services/discord/voice.ts
+          echo -e "${YELLOW}Note: Using opusscript instead of @discordjs/opus may result in lower voice quality${NC}"
         fi
       fi
     fi
