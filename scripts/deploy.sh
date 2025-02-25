@@ -174,20 +174,51 @@ install_system_dependencies() {
     echo -e "${YELLOW}  sudo apt-get install -y build-essential${NC}"
   fi
   
-  # Check for Python
-  if ! command_exists python3; then
+  # Check for Python and handle externally managed environments
+  if command_exists python3; then
+    PYTHON_VERSION=$(python3 --version 2>&1 | cut -d' ' -f2)
+    echo -e "${YELLOW}Found Python $PYTHON_VERSION${NC}"
+    
+    # Check if system has python3-dev package
+    if ! dpkg -l | grep -q python3-dev; then
+      echo -e "${YELLOW}Warning: python3-dev package is required for building native modules.${NC}"
+      echo -e "${YELLOW}Install it with:${NC}"
+      echo -e "${YELLOW}  sudo apt-get install -y python3-dev${NC}"
+    fi
+    
+    # Check if system has python3-full package (needed for venv)
+    if ! dpkg -l | grep -q python3-full; then
+      echo -e "${YELLOW}Warning: python3-full package is recommended for creating virtual environments.${NC}"
+      echo -e "${YELLOW}Install it with:${NC}"
+      echo -e "${YELLOW}  sudo apt-get install -y python3-full${NC}"
+    fi
+    
+    # Check if system has python3-pip
+    if ! command_exists pip3; then
+      echo -e "${YELLOW}Warning: pip3 not found. It's needed for Python package management.${NC}"
+      echo -e "${YELLOW}Install it with:${NC}"
+      echo -e "${YELLOW}  sudo apt-get install -y python3-pip${NC}"
+    fi
+    
+    # Check if this is an externally managed environment
+    if python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
+      echo -e "${YELLOW}Detected externally managed Python environment (PEP 668).${NC}"
+      echo -e "${YELLOW}To install gyp, you have several options:${NC}"
+      echo -e "${YELLOW}1. Use system package if available:${NC}"
+      echo -e "${YELLOW}   sudo apt-get install -y python3-gyp${NC}"
+      echo -e "${YELLOW}2. Create a virtual environment:${NC}"
+      echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
+      echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
+      echo -e "${YELLOW}   pip install gyp${NC}"
+      echo -e "${YELLOW}   # Then run this deployment script from within the activated environment${NC}"
+      echo -e "${YELLOW}3. Use pipx for isolated installation:${NC}"
+      echo -e "${YELLOW}   sudo apt-get install -y pipx${NC}"
+      echo -e "${YELLOW}   pipx install gyp${NC}"
+    fi
+  else
     echo -e "${RED}Warning: Python 3 is required for building native modules but was not found.${NC}"
     echo -e "${YELLOW}Please install Python 3 manually before continuing:${NC}"
-    echo -e "${YELLOW}  sudo apt-get install -y python3 python3-pip${NC}"
-    echo -e "${YELLOW}After installing Python, you may need to install gyp:${NC}"
-    echo -e "${YELLOW}  pip3 install gyp${NC}"
-  else
-    # Check if gyp is installed
-    if ! python3 -c "import gyp" 2>/dev/null; then
-      echo -e "${YELLOW}Warning: Python gyp module not found. This is required for building native modules.${NC}"
-      echo -e "${YELLOW}Please install it manually:${NC}"
-      echo -e "${YELLOW}  pip3 install gyp${NC}"
-    fi
+    echo -e "${YELLOW}  sudo apt-get install -y python3 python3-dev python3-full${NC}"
   fi
   
   # Check for audio dependencies
@@ -257,11 +288,28 @@ deploy_backend() {
     if [ ! -d "node_modules/@discordjs/opus" ]; then
       echo -e "${YELLOW}@discordjs/opus installation failed. This is likely due to missing build dependencies.${NC}"
       echo -e "${YELLOW}Please ensure you have the following installed:${NC}"
-      echo -e "${YELLOW}  - Python 3 and pip${NC}"
-      echo -e "${YELLOW}  - gyp (pip3 install gyp)${NC}"
-      echo -e "${YELLOW}  - build-essential (gcc, make, etc.)${NC}"
+      echo -e "${YELLOW}  - Python 3 with development headers (python3-dev)${NC}"
+      echo -e "${YELLOW}  - Build tools (build-essential)${NC}"
       echo -e "${YELLOW}  - libopus-dev${NC}"
       echo -e "${YELLOW}  - ffmpeg${NC}"
+      
+      # Check if we're in an externally managed Python environment
+      if command_exists python3 && python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
+        echo -e "${RED}Detected externally managed Python environment (PEP 668).${NC}"
+        echo -e "${YELLOW}To build native modules, you need to either:${NC}"
+        echo -e "${YELLOW}1. Install system package: sudo apt-get install -y python3-gyp${NC}"
+        echo -e "${YELLOW}2. Create and activate a virtual environment before running this script:${NC}"
+        echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
+        echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
+        echo -e "${YELLOW}   pip install gyp${NC}"
+        echo -e "${YELLOW}   # Then run this deployment script again${NC}"
+        
+        # Try to use system python3-gyp if available
+        if apt-cache show python3-gyp &>/dev/null; then
+          echo -e "${YELLOW}Attempting to install system python3-gyp package...${NC}"
+          sudo apt-get install -y python3-gyp || true
+        fi
+      fi
       
       echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
       
