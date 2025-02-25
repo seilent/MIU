@@ -91,7 +91,6 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     // Build where clause
     const where = {
       status: RequestStatus.COMPLETED,
-      isAutoplay: false,
       ...(userId ? { userId } : {}),
     };
 

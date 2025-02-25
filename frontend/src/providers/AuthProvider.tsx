@@ -50,9 +50,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Failed to fetch user data:', response.status, errorText);
-        throw new Error(`Failed to fetch user data: ${response.status}`);
+        // Failed to fetch user data
+        setUser(null);
+        setToken(null);
+        return;
       }
 
       const data = await response.json();
@@ -63,7 +64,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
       setUser(data.user);
       return data.user;
     } catch (error) {
-      console.error('Error fetching user data:', error);
+      // Error fetching user data
+      setUser(null);
+      setToken(null);
       return null;
     }
   };
@@ -110,11 +113,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
               }
             }
           } catch (err) {
-            console.error('Failed to read from localStorage:', err);
+            // Failed to read from localStorage
           }
         }
       } catch (err) {
-        console.error('Environment validation failed:', err);
+        // Environment validation failed
         setError('Application configuration error');
       } finally {
         setIsInitializing(false);
@@ -164,7 +167,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
       try {
         await fetchUserData(token);
       } catch (error) {
-        console.error('Token validation error:', error);
+        // Token validation error
+        setUser(null);
+        setToken(null);
         setError(error instanceof Error ? error.message : 'Authentication failed');
         setAuthError(null);
         router.replace('/login');
@@ -194,7 +199,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // Redirect to Discord OAuth
       window.location.href = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}`;
     } catch (err) {
-      console.error('Login failed:', err);
+      // Login failed
       setError('Failed to initialize login process');
     }
   };
@@ -222,7 +227,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     try {
       localStorage.removeItem('auth-storage');
     } catch (err) {
-      console.error('Failed to clear localStorage:', err);
+      // Failed to clear localStorage
     }
     
     // Clear auth store

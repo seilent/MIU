@@ -301,6 +301,11 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
       searchQuery = `${query} jpop japanese song`;
     }
 
+    // Note: We don't filter out covers, vocaloid, or live performances here
+    // since this is a manual search initiated by users. Filtering is only
+    // applied to autoplay and recommendation features to ensure better
+    // automatic mixes.
+
     const response = await youtube.search.list({
       key: apiKey,
       part: ['id', 'snippet'],
@@ -1156,4 +1161,115 @@ export async function getAudioFileDuration(filePath: string): Promise<number> {
             resolve(duration);
         });
     });
+}
+
+/**
+ * Get YouTube recommendations for a seed track
+ * @param seedTrackId The YouTube ID of the seed track
+ * @returns Array of recommended track IDs
+ */
+export async function getYoutubeRecommendations(seedTrackId: string): Promise<Array<{ youtubeId: string }>> {
+  try {
+    console.log(`Getting YouTube recommendations for ${seedTrackId}`);
+    
+    // Get API key
+    const apiKey = await getKeyManager().getCurrentKey('search.list');
+    
+    // Use the YouTube API to get related videos
+    // @ts-ignore - Ignore TypeScript errors for the YouTube API
+    const response = await youtube.search.list({
+      key: apiKey,
+      part: ['id', 'snippet'],
+      relatedToVideoId: seedTrackId,
+      type: ['video'],
+      maxResults: 25,
+      videoCategoryId: '10', // Music category
+      regionCode: 'JP', // Prioritize Japanese content
+      relevanceLanguage: 'ja' // Prefer Japanese results
+    });
+    
+    if (!response.data.items || response.data.items.length === 0) {
+      console.log('No related videos found, trying without region/language restrictions');
+      
+      // Try again without region/language restrictions
+      // @ts-ignore - Ignore TypeScript errors for the YouTube API
+      const fallbackResponse = await youtube.search.list({
+        key: apiKey,
+        part: ['id', 'snippet'],
+        relatedToVideoId: seedTrackId,
+        type: ['video'],
+        maxResults: 25,
+        videoCategoryId: '10' // Music category
+      });
+      
+      if (!fallbackResponse.data.items || fallbackResponse.data.items.length === 0) {
+        return [];
+      }
+      
+      response.data.items = fallbackResponse.data.items;
+    }
+    
+    // Filter out videos with blocked keywords
+    const blockedKeywords = [
+      'cover', 'カバー', // Cover in English and Japanese
+      '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
+      'vocaloid', 'ボーカロイド', 'ボカロ', // Vocaloid in English and Japanese
+      'hatsune', 'miku', '初音ミク', // Hatsune Miku
+      'live', 'ライブ', 'concert', 'コンサート', // Live performances
+      'remix', 'リミックス', // Remixes
+      'acoustic', 'アコースティック', // Acoustic versions
+      'instrumental', 'インストゥルメンタル', // Instrumental versions
+      'karaoke', 'カラオケ', // Karaoke versions
+      'nightcore', // Nightcore versions
+      'kagamine', 'rin', 'len', '鏡音リン', '鏡音レン', // Kagamine Rin/Len
+      'luka', 'megurine', '巡音ルカ', // Megurine Luka
+      'kaito', 'kaiko', 'meiko', 'gumi', 'gackpo', 'ia', // Other vocaloids
+      'utau', 'utauloid', 'utaite', // UTAU and utaite
+      'nico', 'niconico', 'ニコニコ' // NicoNico (often has covers)
+    ];
+    
+    const filteredItems = response.data.items?.filter(item => {
+      const title = (item.snippet?.title || '').toLowerCase();
+      return !blockedKeywords.some(keyword => title.includes(keyword.toLowerCase()));
+    }) || [];
+    
+    // Get video details for duration filtering
+    const videoIds = filteredItems
+      .map(item => item.id?.videoId)
+      .filter((id): id is string => !!id);
+      
+    if (videoIds.length === 0) {
+      return [];
+    }
+    
+    // @ts-ignore - Ignore TypeScript errors for the YouTube API
+    const videoDetails = await youtube.videos.list({
+      key: apiKey,
+      part: ['contentDetails'],
+      id: videoIds
+    });
+    
+    // Filter by duration (exclude videos longer than MAX_DURATION)
+    const MAX_DURATION = 420; // 7 minutes
+    
+    const validVideos = videoDetails.data.items?.filter(video => {
+      const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
+      return duration > 0 && duration <= MAX_DURATION;
+    }) || [];
+    
+    const validIds = new Set(validVideos.map(video => video.id));
+    
+    // Map to the required format
+    const recommendations = filteredItems
+      .filter(item => item.id?.videoId && validIds.has(item.id.videoId))
+      .map(item => ({
+        youtubeId: item.id!.videoId!
+      }));
+    
+    console.log(`Found ${recommendations.length} valid recommendations for ${seedTrackId}`);
+    return recommendations;
+  } catch (error) {
+    console.error('Error getting YouTube recommendations:', error);
+    return [];
+  }
 } 

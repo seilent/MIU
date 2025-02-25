@@ -50,6 +50,7 @@ interface PlayerProviderProps {
 export function PlayerProvider({ children }: PlayerProviderProps) {
   const { token } = useAuthStore();
   const pollTimeoutRef = useRef<number | undefined>(undefined);
+  const trackTransitionTimeoutRef = useRef<number | undefined>(undefined);
   const {
     setPlayerState,
     setHistory,
@@ -58,84 +59,94 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
   const router = useRouter();
   const [serverError, setServerError] = useState<string | null>(null);
   const [lastPingTime, setLastPingTime] = useState<number>(Date.now());
+  const [isConnected, setIsConnected] = useState<boolean>(true);
+  const [consecutiveErrors, setConsecutiveErrors] = useState<number>(0);
+  const [pollingInterval, setPollingInterval] = useState<number>(2000);
 
   const clearTimeouts = useCallback(() => {
     if (pollTimeoutRef.current !== undefined) {
       window.clearTimeout(pollTimeoutRef.current);
       pollTimeoutRef.current = undefined;
     }
+    
+    if (trackTransitionTimeoutRef.current !== undefined) {
+      window.clearTimeout(trackTransitionTimeoutRef.current);
+      trackTransitionTimeoutRef.current = undefined;
+    }
   }, []);
 
   const { logout } = useAuthStore();
 
   const fetchState = useCallback(async () => {
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+    if (!token) return;
     
     try {
+      setLoading(true);
+      
+      // Fetch state from API
       const response = await fetch(`${env.apiUrl}/api/music/state`, {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'X-Internal-Request': 'true'
+          'Authorization': `Bearer ${token}`
         }
       });
       
-      if (!response.ok) {
-        if (response.status === 401) {
-          setLoading(false);
-          logout();
-          return;
-        }
-        throw new Error('Failed to fetch state');
+      if (response.status === 401) {
+        // Authentication failed
+        logout();
+        return;
       }
-
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
       const data = await response.json();
       setPlayerState(data);
       setLoading(false);
+      setIsConnected(true);
+      setConsecutiveErrors(0);
     } catch (err) {
-      console.error('Failed to fetch state:', err);
       setLoading(false);
+      setConsecutiveErrors(prev => prev + 1);
     }
-  }, [token, logout, setPlayerState, setLoading]);
+  }, [token, logout]);
 
   const fetchHistory = useCallback(async () => {
     if (!token) return;
     
     try {
-      const response = await fetch(`${env.apiUrl}/api/history`, {
+      // Fetch history from API
+      const response = await fetch(`${env.apiUrl}/api/music/history`, {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'X-Internal-Request': 'true'
+          'Authorization': `Bearer ${token}`
         }
       });
       
-      if (!response.ok) {
-        if (response.status === 401) {
-          logout();
-          return;
-        }
-        throw new Error('Failed to fetch history');
-      }
-
-      const data = await response.json();
-      setHistory(data.tracks || []);
-    } catch (err) {
-      console.error('Failed to fetch history:', err);
-    }
-  }, [token, logout, setHistory]);
-
-  const startPolling = useCallback(() => {
-    const STATE_POLL_INTERVAL = 500; // Poll every 500ms for more responsiveness
-
-    const pollState = async () => {
-      if (!token) {
-        setLoading(false);
+      if (response.status === 401) {
+        // Authentication failed
+        logout();
         return;
       }
       
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      setHistory(data);
+    } catch (err) {
+      // Failed to fetch history
+    }
+  }, [token, logout]);
+
+  const startPolling = useCallback(() => {
+    const STATE_POLL_INTERVAL = 2000; // Poll every 2 seconds instead of 500ms
+    let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 3;
+    
+    const pollState = async () => {
       try {
+        // Poll state from API
         const response = await fetch(`${env.apiUrl}/api/music/state`, {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -145,40 +156,70 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
         
         if (!response.ok) {
           if (response.status === 401) {
-            setLoading(false);
+            // Authentication failed, logging out
             logout();
             return;
           }
-          throw new Error('Failed to fetch state');
+          throw new Error(`Failed to fetch state: ${response.status}`);
         }
-
+        
+        // Reset error counter on success
+        consecutiveErrors = 0;
+        
         const data = await response.json();
         const currentState = usePlayerStore.getState();
         
-        // Always update state if we have new data
-        if (data) {
+        // Check if this is a track transition
+        const isTrackTransition = 
+          data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId && 
+          data.currentTrack !== null && 
+          currentState.currentTrack !== undefined;
+        
+        // Update player state
+        if (isTrackTransition) {
+          // For continuous streaming, we don't need to delay the track update
+          // Just update the state immediately
           setPlayerState({
             ...data,
-            // Preserve current track during loading if new data doesn't have one
-            currentTrack: data.currentTrack || currentState.currentTrack,
-            // Ensure queue items have proper isAutoplay flag
             queue: data.queue?.map((track: QueueItem) => ({
               ...track,
               isAutoplay: track.isAutoplay ?? false
             })) || currentState.queue
           });
-
-          // If track changed or started playing, fetch history
-          if (data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId ||
-              (data.status === 'playing' && currentState.status !== 'playing')) {
+          
+          // Fetch history when track changes
+          if (data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId) {
             fetchHistory();
           }
+        } else {
+          setPlayerState({
+            ...data,
+            currentTrack: data.currentTrack || currentState.currentTrack,
+            queue: data.queue?.map((track: QueueItem) => ({
+              ...track,
+              isAutoplay: track.isAutoplay ?? false
+            })) || currentState.queue
+          });
         }
 
         setLoading(false);
       } catch (err) {
-        console.error('Failed to fetch state:', err);
         setLoading(false);
+        
+        // Increment error counter and implement backoff
+        consecutiveErrors++;
+        
+        // If we've had multiple consecutive errors, increase the polling interval temporarily
+        let currentInterval = STATE_POLL_INTERVAL;
+        if (consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
+          // Exponential backoff: double the interval for each consecutive error beyond the threshold
+          const backoffFactor = Math.min(Math.pow(2, consecutiveErrors - MAX_CONSECUTIVE_ERRORS), 10);
+          currentInterval = STATE_POLL_INTERVAL * backoffFactor;
+        }
+        
+        // Schedule next poll with potentially increased interval
+        pollTimeoutRef.current = window.setTimeout(pollState, currentInterval);
+        return; // Skip the normal scheduling below
       }
 
       // Schedule next poll
@@ -206,14 +247,13 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
 
   const sendCommand = useCallback(async (command: MusicCommand, payload?: CommandPayload) => {
     if (!token) {
-      console.error('Authentication required');
       return;
     }
 
     try {
       setLoading(true);
       
-      const response = await fetch(`/api/music/${command.toLowerCase()}`, {
+      const response = await fetch(`${env.apiUrl}/api/music/${command.toLowerCase()}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -239,7 +279,7 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
         await fetchHistory();
       }
     } catch (err) {
-      console.error('Failed to send command:', err);
+      // Failed to send command
     } finally {
       setLoading(false);
     }
@@ -249,32 +289,47 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
   useEffect(() => {
     let pingInterval: NodeJS.Timeout;
     let checkInterval: NodeJS.Timeout;
-
+    let lastConnectionState = true; // Track connection state to only log changes
+    
     const pingServer = async () => {
       try {
         const response = await fetch(`${env.apiUrl}/api/health`, {
           headers: {
-            'Authorization': `Bearer ${token}`,
+            'Authorization': token ? `Bearer ${token}` : '',
+            'X-Internal-Request': 'true'
           }
         });
+        
         if (response.ok) {
           setLastPingTime(Date.now());
+          
+          // Only update state if it changed
+          if (!lastConnectionState) {
+            lastConnectionState = true;
+          }
+          
           setServerError(null);
+        } else {
+          lastConnectionState = false;
         }
       } catch (error) {
-        console.error('Server ping failed:', error);
+        lastConnectionState = false;
       }
     };
 
     const checkConnection = () => {
       const timeSinceLastPing = Date.now() - lastPingTime;
       if (timeSinceLastPing > 10000) { // 10 seconds timeout
+        if (lastConnectionState) {
+          lastConnectionState = false;
+        }
         setServerError('Server connection lost');
-        router.push('/');
+        // Don't redirect immediately, allow for reconnection attempts
       }
     };
 
     if (token) {
+      pingServer(); // Ping immediately
       pingInterval = setInterval(pingServer, 5000); // Ping every 5 seconds
       checkInterval = setInterval(checkConnection, 2000); // Check every 2 seconds
     }

@@ -21,18 +21,6 @@ export const env: EnvConfig = {
   enableThemeSwitcher: process.env.NEXT_PUBLIC_ENABLE_THEME_SWITCHER !== 'false' // enabled by default
 };
 
-// Log environment configuration in development
-if (isDevelopment) {
-  console.log('Environment Configuration:', {
-    discordClientId: env.discordClientId ? '**present**' : '**missing**',
-    url: env.url || '**missing**',
-    apiUrl: env.apiUrl || '**missing**',
-    enableAnalytics: env.enableAnalytics,
-    defaultTheme: env.defaultTheme,
-    enableThemeSwitcher: env.enableThemeSwitcher
-  });
-}
-
 // Validate required environment variables
 export function validateEnv() {
   const requiredVars = ['discordClientId', 'url'] as const;
@@ -43,4 +31,8 @@ export function validateEnv() {
   }
 }
 
+// Validate environment variables
+validateEnv();
+
+// Return environment variables
 export default env; 

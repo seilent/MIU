@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import env from '@/utils/env';
+import { NextResponse } from 'next/server';
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   const { id } = params;
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       }
     });
   } catch (error) {
-    console.error('Album art fetch error:', error);
-    return new Response('Failed to fetch album art', { status: 500 });
+    // Album art fetch error
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 } 

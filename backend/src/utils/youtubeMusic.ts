@@ -74,8 +74,45 @@ export async function searchYoutubeMusic(query: string): Promise<SearchResult[]>
       return [];
     }
 
+    // Define blocked keywords for filtering
+    const blockedKeywords = [
+      'cover', 'カバー', // Cover in English and Japanese
+      '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
+      'vocaloid', 'ボーカロイド', 'ボカロ', // Vocaloid in English and Japanese
+      'hatsune', 'miku', '初音ミク', // Hatsune Miku
+      'live', 'ライブ', 'concert', 'コンサート', // Live performances
+      'remix', 'リミックス', // Remixes
+      'acoustic', 'アコースティック', // Acoustic versions
+      'instrumental', 'インストゥルメンタル', // Instrumental versions
+      'karaoke', 'カラオケ', // Karaoke versions
+      'nightcore', // Nightcore versions
+      'kagamine', 'rin', 'len', '鏡音リン', '鏡音レン', // Kagamine Rin/Len
+      'luka', 'megurine', '巡音ルカ', // Megurine Luka
+      'kaito', 'kaiko', 'meiko', 'gumi', 'gackpo', 'ia', // Other vocaloids
+      'utau', 'utauloid', 'utaite', // UTAU and utaite
+      'nico', 'niconico', 'ニコニコ', // NicoNico (often has covers)
+    ];
+
     // Process results
-    const results = await Promise.all(searchResults.content.map(async (item: any) => {
+    const filteredContent = searchResults.content.filter((item: any) => {
+      if (!item.videoId) return false;
+      
+      const title = (item.name || '').toLowerCase();
+      const artist = (item.artist?.name || '').toLowerCase();
+      const album = (item.album?.name || '').toLowerCase();
+      
+      // Check if any blocked keyword is in the title, artist, or album
+      return !blockedKeywords.some(keyword => 
+        title.includes(keyword) || 
+        artist.includes(keyword) || 
+        album.includes(keyword)
+      );
+    });
+    
+    console.log(`Found ${searchResults.content.length} results, ${filteredContent.length} after filtering`);
+
+    // Process results
+    const results = await Promise.all(filteredContent.map(async (item: any) => {
       if (!item.videoId) return null;
 
       const videoId = item.videoId;
@@ -133,6 +170,59 @@ export async function searchYoutubeMusic(query: string): Promise<SearchResult[]>
 }
 
 /**
+ * Check if a string likely contains Japanese text
+ * @param text Text to check
+ * @returns True if the text likely contains Japanese
+ */
+function containsJapanese(text: string): boolean {
+  if (!text) return false;
+  
+  // Japanese character ranges:
+  // Hiragana: \u3040-\u309F
+  // Katakana: \u30A0-\u30FF
+  // Kanji: \u4E00-\u9FAF
+  // Half-width katakana: \uFF65-\uFF9F
+  const japaneseRegex = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF65-\uFF9F]/;
+  
+  // Check if the text contains Japanese characters
+  return japaneseRegex.test(text);
+}
+
+/**
+ * Check if a track is likely Japanese based on title, artist, and album
+ * @param track Track to check
+ * @returns True if the track is likely Japanese
+ */
+function isLikelyJapanese(track: any): boolean {
+  const title = track.name || '';
+  const artist = track.artist?.name || '';
+  const album = track.album?.name || '';
+  
+  // Check if any field contains Japanese characters
+  if (containsJapanese(title) || containsJapanese(artist) || containsJapanese(album)) {
+    return true;
+  }
+  
+  // List of common Japanese artists/keywords that might not use Japanese characters
+  const japaneseKeywords = [
+    'jpop', 'j-pop', 'jrock', 'j-rock', 
+    'anime', 'ost', 'soundtrack',
+    'tokyo', 'japan', 'japanese',
+    'utada', 'hikaru', 'yonezu', 'kenshi', 
+    'radwimps', 'yorushika', 'yoasobi', 'lisa', 'ado',
+    'eve', 'reol', 'zutomayo', 'vaundy', 'tuyu', 'tsuyu',
+    'aimer', 'minami', 'mafumafu', 'kenshi', 'fujii', 'kana',
+    'daoko', 'aimyon', 'miku', 'hatsune', 'vocaloid',
+    'babymetal', 'kyary', 'pamyu', 'perfume', 'akb48',
+    'nogizaka', 'keyakizaka', 'sakurazaka', 'hinatazaka'
+  ];
+  
+  // Check if any field contains Japanese keywords
+  const allText = `${title} ${artist} ${album}`.toLowerCase();
+  return japaneseKeywords.some(keyword => allText.includes(keyword));
+}
+
+/**
  * Get recommendations from YouTube Music based on a seed track
  * @param seedTrackId YouTube video ID of the seed track
  * @returns Array of recommended track IDs
@@ -149,9 +239,38 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
       
       if (response && response.content && response.content.length > 0) {
         // Filter out the seed track and extract video IDs
-        return response.content
+        const recommendations = response.content
           .filter((track: any) => track.videoId && track.videoId !== seedTrackId)
+          // Filter out covers, vocaloid, and live performances
+          .filter((track: any) => {
+            const title = (track.name || '').toLowerCase();
+            const artist = (track.artist?.name || '').toLowerCase();
+            const album = (track.album?.name || '').toLowerCase();
+            
+            // Blocked keywords in title, artist, or album
+            const blockedKeywords = [
+              'cover', 'カバー', // Cover in English and Japanese
+              '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
+              'live', 'ライブ', 'concert', 'コンサート', // Live performances
+              'remix', 'リミックス', // Remixes
+              'acoustic', 'アコースティック', // Acoustic versions
+              'instrumental', 'インストゥルメンタル', // Instrumental versions
+              'karaoke', 'カラオケ', // Karaoke versions
+              'nightcore', // Nightcore versions
+            ];
+            
+            // Check if any blocked keyword is in the title, artist, or album
+            return !blockedKeywords.some(keyword => 
+              title.includes(keyword) || 
+              artist.includes(keyword) || 
+              album.includes(keyword)
+            );
+          })
+          // Filter for Japanese songs only
+          .filter(isLikelyJapanese)
           .map((track: any) => ({ youtubeId: track.videoId }));
+        
+        return recommendations;
       }
     } catch (error) {
       console.log(`Failed to get radio playlist for ${seedTrackId}, trying alternative method`);
@@ -172,15 +291,48 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
           .replace(/\(.*?\)/g, '')                     // Remove parentheses
           .trim();
         
+        // Add "Japanese" to the search query to bias towards Japanese results
+        const enhancedQuery = `${searchQuery} Japanese`;
+        
         // Search for similar songs
-        const searchResults = await api.search(searchQuery, 'song');
+        const searchResults = await api.search(enhancedQuery, 'song');
         
         if (searchResults && searchResults.content && searchResults.content.length > 0) {
           // Filter out the seed track and extract video IDs
-          return searchResults.content
+          const recommendations = searchResults.content
             .filter((track: any) => track.videoId && track.videoId !== seedTrackId)
+            // Filter out covers, vocaloid, and live performances
+            .filter((track: any) => {
+              const title = (track.name || '').toLowerCase();
+              const artist = (track.artist?.name || '').toLowerCase();
+              const album = (track.album?.name || '').toLowerCase();
+              
+              // Blocked keywords in title, artist, or album
+              const blockedKeywords = [
+                'cover', 'カバー', // Cover in English and Japanese
+                '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
+                'live', 'ライブ', 'concert', 'コンサート', // Live performances
+                'remix', 'リミックス', // Remixes
+                'acoustic', 'アコースティック', // Acoustic versions
+                'instrumental', 'インストゥルメンタル', // Instrumental versions
+                'karaoke', 'カラオケ', // Karaoke versions
+                'nightcore', // Nightcore versions
+              ];
+              
+              // Check if any blocked keyword is in the title, artist, or album
+              return !blockedKeywords.some(keyword => 
+                title.includes(keyword) || 
+                artist.includes(keyword) || 
+                album.includes(keyword)
+              );
+            })
+            // Filter for Japanese songs only
+            .filter(isLikelyJapanese)
             .slice(0, 10) // Limit to 10 results
             .map((track: any) => ({ youtubeId: track.videoId }));
+          
+          console.log(`Found ${searchResults.content.length} search results, ${recommendations.length} after filtering`);
+          return recommendations;
         }
       }
     } catch (searchError) {

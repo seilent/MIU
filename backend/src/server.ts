@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import swaggerUi from 'swagger-ui-express';
 import { createTRPCRouter } from './trpc.js';
 import { authRouter } from './routes/auth.js';
-import { musicRouter } from './routes/music.js';
+import { musicRouter, setupWebSocketAudio } from './routes/music.js';
 import { adminRouter } from './routes/admin.js';
 import { healthRouter } from './routes/health.js';
 import historyRouter from './routes/history.js';
@@ -18,11 +18,13 @@ import cors from 'cors';
 import { albumArtRouter } from './routes/albumart.js';
 import { initializeDiscordClient } from './discord/client.js';
 import getEnv from './utils/env.js';
+import http from 'http';
 
 const env = getEnv();
 
 export async function createServer() {
   const app = express();
+  const server = http.createServer(app);
 
   // Initialize Discord client
   try {
@@ -31,6 +33,10 @@ export async function createServer() {
   } catch (error) {
     logger.error('Failed to initialize Discord client:', error);
   }
+
+  // Set up WebSocket server for audio streaming
+  const wss = setupWebSocketAudio(server);
+  logger.info('WebSocket server for audio streaming initialized');
 
   // CORS configuration
   const corsOrigins = env.getString('CORS_ORIGIN', 'http://localhost:3300').split(',').map(origin => origin.trim());
@@ -132,5 +138,5 @@ export async function createServer() {
   // Log server startup
   logger.info('Server created and configured');
 
-  return app;
+  return { app, server };
 }

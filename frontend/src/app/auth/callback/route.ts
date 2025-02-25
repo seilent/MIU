@@ -1,6 +1,7 @@
 import { headers } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import env from '@/utils/env';
+import { cookies } from 'next/headers';
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -8,125 +9,84 @@ export async function GET(request: NextRequest) {
   const error = searchParams.get('error');
   const errorDescription = searchParams.get('error_description');
 
-  // Handle Discord OAuth errors
-  if (error) {
-    console.error('Discord OAuth error:', error, errorDescription);
+  if (error || errorDescription) {
+    // Discord OAuth error
     return NextResponse.redirect(
-      new URL(`/login?error=${error}&description=${encodeURIComponent(errorDescription || '')}`, env.url)
+      new URL(`/login?error=${error || 'oauth'}&description=${encodeURIComponent(errorDescription || '')}`, env.url)
     );
   }
-
+  
   if (!code) {
-    console.error('No code provided in callback');
+    // No code provided in callback
     return NextResponse.redirect(new URL('/login?error=no_code', env.url));
   }
-
+  
   try {
-    const headersList = headers();
-    const requestHeaders = new Headers();
-    requestHeaders.set('Accept', 'application/json');
-    requestHeaders.set('X-Internal-Request', 'true');
-    
-    // Forward necessary headers
-    const origin = headersList.get('origin');
-    const cookie = headersList.get('cookie');
-    const host = headersList.get('host');
-    
-    if (origin) requestHeaders.set('Origin', origin);
-    if (cookie) requestHeaders.set('Cookie', cookie);
-    if (host) requestHeaders.set('Host', host);
-
-    // Use the configured API URL for token exchange
-    const backendUrl = `${env.apiUrl}/api/auth/callback`;
-
-    // Add retry logic for rate limiting
-    let retryCount = 0;
-    const maxRetries = 3;
+    // Exchange code for token
     let response = null;
-    let backoff = 1000; // Start with 1 second backoff
-
-    while (retryCount < maxRetries) {
-      response = await fetch(`${backendUrl}?code=${code}`, {
-        method: 'GET',
-        headers: requestHeaders,
-        credentials: 'include'
-      });
-
-      // If we got a successful response or it's not a rate limit error, break out of the loop
-      if (response.ok || response.status !== 429) {
-        break;
-      }
-
-      // If we're rate limited, wait and retry
-      console.log(`Rate limited, retrying in ${backoff}ms...`);
-      await new Promise(resolve => setTimeout(resolve, backoff));
-      backoff *= 2; // Exponential backoff
-      retryCount++;
-    }
-
-    // If we didn't get a response after all retries, redirect to login with error
-    if (!response) {
-      console.error('Auth callback failed: No response after retries');
-      return NextResponse.redirect(
-        new URL(`/login?error=no_response`, env.url)
-      );
-    }
-
-    // If response is not ok, redirect to login with error
-    if (!response.ok) {
-      let errorText;
+    let retries = 0;
+    const maxRetries = 3;
+    
+    while (!response && retries < maxRetries) {
       try {
-        const errorData = await response.json();
-        errorText = JSON.stringify(errorData);
-      } catch (e) {
-        errorText = await response.text();
+        response = await fetch(`${env.apiUrl}/api/auth/callback?code=${code}`, {
+          method: 'GET',
+          headers: {
+            'X-Internal-Request': 'true'
+          }
+        });
+      } catch (err) {
+        retries++;
+        if (retries >= maxRetries) throw err;
+        
+        // Rate limited, retrying
+        const backoff = Math.pow(2, retries) * 1000;
+        await new Promise(resolve => setTimeout(resolve, backoff));
       }
-      
-      console.error('Auth callback failed:', errorText);
+    }
+    
+    if (!response) {
+      // Auth callback failed: No response after retries
+      return NextResponse.redirect(new URL('/login?error=server_error', env.url));
+    }
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      // Auth callback failed
       return NextResponse.redirect(
         new URL(`/login?error=auth_failed&status=${response.status}`, env.url)
       );
     }
-
+    
     const data = await response.json();
-
-    // Parse the response data
-    const { token, user } = data;
-
-    if (!token) {
-      console.error('No token received from backend');
+    
+    if (!data.token) {
+      // No token received from backend
       return NextResponse.redirect(new URL('/login?error=no_token', env.url));
     }
-
-    // Create the response with redirect to the public URL
-    const redirectResponse = NextResponse.redirect(new URL('/', env.url));
     
-    // Use the hostname from the configured URL
-    const cookieDomain = new URL(env.url).hostname;
-
-    // Set a single cookie for the token to avoid duplicates
-    redirectResponse.cookies.set('auth_token', token, {
-      domain: cookieDomain,
-      path: '/',
-      secure: true,
-      httpOnly: false,
-      sameSite: 'none',
-      maxAge: 7 * 24 * 60 * 60 // 7 days
+    // Set cookies
+    cookies().set('token', data.token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60, // 30 days
+      path: '/'
     });
-
-    // Copy any additional cookies from the API response
-    const apiCookies = response.headers.getSetCookie();
     
-    // Only add API cookies that aren't for auth_token to avoid duplicates
-    apiCookies
-      .filter(cookie => !cookie.startsWith('auth_token='))
-      .forEach(cookie => {
-        redirectResponse.headers.append('Set-Cookie', cookie);
-      });
-
-    return redirectResponse;
+    // Also set a client-accessible cookie for the frontend
+    cookies().set('auth_token', data.token, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60, // 30 days
+      path: '/'
+    });
+    
+    // Redirect to home page
+    return NextResponse.redirect(new URL('/', env.url));
   } catch (error) {
-    console.error('Auth callback error:', error);
+    // Auth callback error
     return NextResponse.redirect(new URL('/login?error=server_error', env.url));
   }
 }

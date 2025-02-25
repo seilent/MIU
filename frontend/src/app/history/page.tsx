@@ -8,6 +8,7 @@ import { ArrowPathIcon } from '@heroicons/react/24/outline';
 import Image from 'next/image';
 import { HistoryTrack } from '@/lib/types';
 import env from '@/utils/env';
+import { toast } from 'react-hot-toast';
 
 export default function HistoryPage() {
   const { token } = useAuthStore();
@@ -41,8 +42,7 @@ export default function HistoryPage() {
       setHistory(data.tracks || []);
       setError(null);
     } catch (err) {
-      console.error('Failed to fetch history:', err);
-      setError('Failed to fetch history');
+      // Failed to fetch history
     } finally {
       setIsLoading(false);
     }
@@ -72,8 +72,8 @@ export default function HistoryPage() {
 
       setError(null);
     } catch (err) {
-      console.error('Failed to add track to queue:', err);
-      setError('Failed to add track to queue');
+      // Failed to add track to queue
+      toast.error('Failed to add track to queue');
     }
   };
 

@@ -133,8 +133,8 @@ export function AppShell({ children }: AppShellProps) {
       setSearchResults(validResults);
       setShowResults(true);
     } catch (error) {
-      console.error('Search/Queue failed:', error);
-      setSearchResults([]);
+      // Search/Queue failed
+      toast.error('Failed to search or queue item');
     } finally {
       setIsSearching(false);
     }
@@ -169,8 +169,8 @@ export function AppShell({ children }: AppShellProps) {
       setQuery('');
       setShowResults(false);
     } catch (error) {
-      console.error('Failed to add to queue:', error);
-      toast.error(error instanceof Error ? error.message : 'Failed to add to queue');
+      // Failed to add to queue
+      toast.error('Failed to add to queue');
     } finally {
       // Remove from loading state
       setLoadingItems(prev => {

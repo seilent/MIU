@@ -31,12 +31,7 @@ try {
 const JWT_SECRET = env.getString('JWT_SECRET');
 
 if (process.env.NODE_ENV === 'development') {
-  console.log('Auth Configuration:', {
-    CLIENT_ID: '**present**',
-    FRONTEND_URL,
-    REDIRECT_URI,
-    NODE_ENV: process.env.NODE_ENV
-  });
+  console.log(`Auth Configuration: CLIENT_ID=**present**, FRONTEND_URL=${FRONTEND_URL}, REDIRECT_URI=${REDIRECT_URI}, NODE_ENV=${process.env.NODE_ENV}`);
 }
 
 function getCookieDomain(req: any): string | undefined {
@@ -99,22 +94,8 @@ router.get('/callback', async (req, res) => {
   }
 
   try {
-    // Log incoming request details
-    console.log('Auth callback: Request received', {
-      code: code.substring(0, 5) + '...',
-      origin: req.headers.origin,
-      referer: req.headers.referer,
-      host: req.get('host'),
-      url: req.url,
-      method: req.method,
-      redirect_uri: REDIRECT_URI,
-      headers: {
-        'x-internal-request': req.headers['x-internal-request'],
-        'x-forwarded-for': req.headers['x-forwarded-for'],
-        'x-forwarded-host': req.headers['x-forwarded-host'],
-        'x-forwarded-proto': req.headers['x-forwarded-proto']
-      }
-    });
+    // Log minimal request info
+    console.log('Auth callback: Request received');
 
     // Exchange code for access token
     const tokenRequestBody = new URLSearchParams({
@@ -125,12 +106,7 @@ router.get('/callback', async (req, res) => {
       redirect_uri: REDIRECT_URI,
     });
 
-    console.log('Auth callback: Exchanging code with Discord', {
-      url: `${DISCORD_API_URL}/oauth2/token`,
-      redirect_uri: REDIRECT_URI,
-      code: code.substring(0, 5) + '...',
-      body: tokenRequestBody.toString()
-    });
+    console.log('Auth callback: Exchanging code with Discord');
 
     const tokenResponse = await fetch(`${DISCORD_API_URL}/oauth2/token`, {
       method: 'POST',
@@ -142,17 +118,14 @@ router.get('/callback', async (req, res) => {
     });
 
     const tokenData = await tokenResponse.text();
-    console.log('Auth callback: Raw token response:', tokenData);
     
     let parsedTokenData;
     try {
       parsedTokenData = JSON.parse(tokenData);
-      console.log('Auth callback: Parsed token response:', {
-        ...parsedTokenData,
-        access_token: parsedTokenData.access_token ? '**present**' : undefined,
-        error: parsedTokenData.error,
-        error_description: parsedTokenData.error_description
-      });
+      // Only log error information if there is an error
+      if (parsedTokenData.error) {
+        console.log(`Auth callback: Error in response: error=${parsedTokenData.error}, error_description=${parsedTokenData.error_description}`);
+      }
     } catch (e) {
       console.error('Failed to parse token response:', e);
       return res.status(400).json({ error: 'Invalid response from Discord' });
@@ -260,8 +233,6 @@ router.get('/callback', async (req, res) => {
         ...cookieOptions,
         httpOnly: false
       });
-
-      console.log('Auth cookies set with domain:', cookieDomain, 'Token present:', !!token);
 
       return res.json({
         token,

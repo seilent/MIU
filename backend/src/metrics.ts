@@ -34,12 +34,34 @@ const cacheHitRatio = new client.Gauge({
   help: 'Ratio of cache hits to total requests'
 });
 
+// Audio streaming metrics
+const audioStreamRequestsCounter = new client.Counter({
+  name: 'miu_audio_stream_requests_total',
+  help: 'Total number of audio streaming requests',
+  labelNames: ['type'] // 'range', 'full'
+});
+
+const audioStreamBytesCounter = new client.Counter({
+  name: 'miu_audio_stream_bytes_total',
+  help: 'Total bytes streamed for audio',
+  labelNames: ['type'] // 'range', 'full'
+});
+
+const audioStreamLatencyHistogram = new client.Histogram({
+  name: 'miu_audio_stream_latency_seconds',
+  help: 'Latency of audio streaming requests',
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5]
+});
+
 // Register custom metrics
 register.registerMetric(songsPlayedCounter);
 register.registerMetric(queueLengthGauge);
 register.registerMetric(activeListenersGauge);
 register.registerMetric(requestLatencyHistogram);
 register.registerMetric(cacheHitRatio);
+register.registerMetric(audioStreamRequestsCounter);
+register.registerMetric(audioStreamBytesCounter);
+register.registerMetric(audioStreamLatencyHistogram);
 
 export {
   register,
@@ -47,5 +69,8 @@ export {
   queueLengthGauge,
   activeListenersGauge,
   requestLatencyHistogram,
-  cacheHitRatio
+  cacheHitRatio,
+  audioStreamRequestsCounter,
+  audioStreamBytesCounter,
+  audioStreamLatencyHistogram
 };

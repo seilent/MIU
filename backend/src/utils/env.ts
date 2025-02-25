@@ -47,13 +47,7 @@ class EnvironmentManager {
 
     // Log environment status in development
     if (process.env.NODE_ENV === 'development') {
-      console.log('Environment Configuration:', {
-        NODE_ENV: process.env.NODE_ENV,
-        DISCORD_CLIENT_ID: '**present**',
-        DISCORD_CLIENT_SECRET: '**present**',
-        JWT_SECRET: '**present**',
-        FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3300'
-      });
+      console.log(`Environment Configuration: NODE_ENV=${process.env.NODE_ENV}, DISCORD_CLIENT_ID=**present**, DISCORD_CLIENT_SECRET=**present**, JWT_SECRET=**present**, FRONTEND_URL=${process.env.FRONTEND_URL || 'http://localhost:3300'}`);
     }
   }
 

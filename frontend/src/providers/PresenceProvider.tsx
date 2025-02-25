@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect } from 'react';
 import { useAuthStore } from '@/lib/store/authStore';
 import { usePlayerStore } from '@/lib/store/playerStore';
+import env from '@/utils/env';
 
 interface PresenceProviderProps {
   children: React.ReactNode;
@@ -22,7 +23,7 @@ export function PresenceProvider({ children }: PresenceProviderProps) {
     // Send heartbeat immediately
     const sendHeartbeat = async () => {
       try {
-        await fetch(`/api/presence/heartbeat`, {
+        await fetch(`${env.apiUrl}/api/presence/heartbeat`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -31,7 +32,7 @@ export function PresenceProvider({ children }: PresenceProviderProps) {
           }
         });
       } catch (error) {
-        console.error('Failed to send heartbeat:', error);
+        // Failed to send heartbeat
       }
     };
 

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { getCookie, setCookie, deleteCookie } from '../utils/cookies';
 
 interface User {
   id: string;
@@ -31,36 +32,18 @@ export const useAuthStore = create<AuthState>()(
       setUser: (user) => {
         set({ user });
       },
-      setToken: (token) => {
-        // Set token in store
+      setToken: (token: string | null) => {
         set({ token });
-        
-        // Also set token in cookie for API requests
         if (token) {
+          // Also set token in cookie for API requests
           try {
-            // Get the domain from the current URL
-            const domain = window.location.hostname;
-            const isSecure = window.location.protocol === 'https:';
-            
-            // Clear any existing cookies first to avoid duplicates
-            document.cookie = `auth_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-            if (domain) {
-              document.cookie = `auth_token=; path=/; domain=${domain}; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-            }
-            
-            // Set the cookie with the appropriate domain and security settings
-            const cookieValue = `auth_token=${token}; path=/; max-age=2592000; domain=${domain}; ${isSecure ? 'secure; ' : ''}SameSite=Lax`;
-            document.cookie = cookieValue;
+            setCookie('auth_token', token, { maxAge: 2592000 });
           } catch (err) {
-            console.error('Auth Store: Failed to set cookie:', err);
+            // Failed to set cookie
           }
         } else {
           // Clear cookies
-          document.cookie = 'auth_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-          const domain = window.location.hostname;
-          if (domain) {
-            document.cookie = `auth_token=; path=/; domain=${domain}; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-          }
+          deleteCookie('auth_token');
         }
       },
       setLoading: (isLoading) => set({ isLoading }),
@@ -68,16 +51,9 @@ export const useAuthStore = create<AuthState>()(
         set({ error });
       },
       logout: () => {
-        // Clear store state
-        set({ user: null, token: null, error: null });
+        set({ user: null, token: null });
         // Clear cookie
-        document.cookie = 'auth_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-        // Clear localStorage
-        try {
-          localStorage.removeItem('auth-storage');
-        } catch (err) {
-          console.error('Auth Store: Failed to clear localStorage:', err);
-        }
+        deleteCookie('auth_token');
       },
     }),
     {
@@ -87,24 +63,17 @@ export const useAuthStore = create<AuthState>()(
         user: state.user
       }),
       version: 1,
-      onRehydrateStorage: () => (state) => {
+      onRehydrateStorage: () => (state, error) => {
         if (state?.token) {
           try {
-            // Get the domain from the current URL
-            const domain = window.location.hostname;
-            const isSecure = window.location.protocol === 'https:';
-            
-            // Clear any existing cookies first to avoid duplicates
-            document.cookie = `auth_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-            if (domain) {
-              document.cookie = `auth_token=; path=/; domain=${domain}; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            const token = getCookie('auth_token');
+            if (token) {
+              // We need to access the store's set function
+              const { setToken } = useAuthStore.getState();
+              setToken(token);
             }
-            
-            // Ensure cookie is set after rehydration
-            const cookieValue = `auth_token=${state.token}; path=/; max-age=2592000; domain=${domain}; ${isSecure ? 'secure; ' : ''}SameSite=Lax`;
-            document.cookie = cookieValue;
           } catch (err) {
-            console.error('Auth Store: Failed to restore cookie:', err);
+            // Failed to restore cookie
           }
         }
       }

@@ -14,9 +14,9 @@ import {
 import path from 'path';
 import ffmpeg from 'ffmpeg-static';
 import { createReadStream } from 'fs';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 import { prisma } from '../db.js';
-import { getYoutubeInfo, downloadYoutubeAudio, getAudioFileDuration } from '../utils/youtube.js';
+import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
 import fs from 'fs';
 import { youtube } from '../utils/youtube.js';
 import type { 
@@ -33,7 +33,7 @@ import jwt from 'jsonwebtoken';
 import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
-import { getYoutubeMusicRecommendations } from '../utils/youtubeMusic.js';
+import { ChildProcessWithoutNullStreams } from 'child_process';
 
 // Define RequestStatus enum to match Prisma schema
 const RequestStatus: Record<keyof typeof PrismaRequestStatus, PrismaRequestStatus> = {
@@ -130,12 +130,15 @@ export class Player {
   private autoplayEnabled: boolean = true;
   private playedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for ALL tracks
   private readonly PLAYED_TRACKS_EXPIRY = 3600000; // 1 hour in milliseconds
-  private readonly AUTOPLAY_TRACKS_EXPIRY = 18000000; // 5 hours in milliseconds
-  private readonly MAX_DURATION = 600; // 10 minutes in seconds
+  private readonly AUTOPLAY_TRACKS_EXPIRY = 18000000; // 5 hours in milliseconds (reverted back to 5 hours)
+  private readonly MAX_DURATION = 420; // 7 minutes in seconds
   private retryCount: number = 0;
   private maxRetries: number = 3;
   private retryDelay: number = 1000;
   private readonly AUTOPLAY_QUEUE_SIZE = 5;
+  private readonly AUTOPLAY_BUFFER_SIZE = 3;
+  private readonly AUTOPLAY_PREFETCH_THRESHOLD = 2;
+  private readonly PLAYLIST_EXHAUSTED_THRESHOLD = 0.8;
   private _youtubeApiCalls?: {
     count: number;
     resetTime: number;
@@ -154,6 +157,7 @@ export class Player {
   private hasWebPresence: boolean = false;
   private isPlayerPaused: boolean = false;
   private downloadingTracks = new Set<string>();
+  private activeAudioStreams: Set<NodeJS.WritableStream> = new Set();
 
   constructor(
     client: Client,
@@ -720,6 +724,54 @@ export class Player {
     return [...this.queue, ...this.autoplayQueue];
   }
 
+  removeFromQueue(position: number): boolean {
+    try {
+      const combinedQueue = [...this.queue, ...this.autoplayQueue];
+      if (position < 0 || position >= combinedQueue.length) {
+        return false;
+      }
+
+      const trackToRemove = combinedQueue[position];
+      
+      // Check if the track is in the user queue
+      const userQueueIndex = this.queue.findIndex(
+        item => item.youtubeId === trackToRemove.youtubeId && 
+                item.requestedAt.getTime() === trackToRemove.requestedAt.getTime()
+      );
+      
+      if (userQueueIndex !== -1) {
+        // Remove from user queue
+        this.queue.splice(userQueueIndex, 1);
+        // Update player state
+        this.updatePlayerState().catch(error => {
+          console.error('Failed to update player state after removing track:', error);
+        });
+        return true;
+      }
+      
+      // If not in user queue, check autoplay queue
+      const autoplayQueueIndex = this.autoplayQueue.findIndex(
+        item => item.youtubeId === trackToRemove.youtubeId && 
+                item.requestedAt.getTime() === trackToRemove.requestedAt.getTime()
+      );
+      
+      if (autoplayQueueIndex !== -1) {
+        // Remove from autoplay queue
+        this.autoplayQueue.splice(autoplayQueueIndex, 1);
+        // Update player state
+        this.updatePlayerState().catch(error => {
+          console.error('Failed to update player state after removing track:', error);
+        });
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error removing track from queue:', error);
+      return false;
+    }
+  }
+
   getCurrentTrack(): QueueItem | undefined {
     return this.currentTrack;
   }
@@ -802,7 +854,11 @@ export class Player {
       const elapsed = now - timestamp;
       // For autoplay, use 5-hour cooldown
       if (isAutoplay) {
-        return elapsed < this.AUTOPLAY_TRACKS_EXPIRY;
+        const isDuplicate = elapsed < this.AUTOPLAY_TRACKS_EXPIRY;
+        if (isDuplicate) {
+          console.log(`Track ${youtubeId} blocked by autoplay cooldown (played ${Math.floor(elapsed/60000)} minutes ago, cooldown: ${Math.floor(this.AUTOPLAY_TRACKS_EXPIRY/60000)} minutes)`);
+        }
+        return isDuplicate;
       }
       // For user requests, use 1-hour cooldown
       return elapsed < this.PLAYED_TRACKS_EXPIRY;
@@ -871,8 +927,13 @@ export class Player {
           this.currentPlaylistId = defaultPlaylist.id;
         }
 
+        // Track how many playlist tracks we've checked
+        let checkedTracks = 0;
+        let totalTracks = defaultPlaylist.tracks.length;
+        
         // Start from current position and loop through tracks
         for (let i = this.currentPlaylistPosition; i < defaultPlaylist.tracks.length; i++) {
+          checkedTracks++;
           const playlistTrack = defaultPlaylist.tracks[i];
           if (!this.isTrackDuplicate(playlistTrack.track.youtubeId, undefined, true)) {
             selectedTrack = playlistTrack;
@@ -887,8 +948,8 @@ export class Player {
 
         // If we've gone through all tracks, reset position and try from beginning
         if (!selectedTrack && this.currentPlaylistPosition > 0) {
-          this.currentPlaylistPosition = 0;
-          for (let i = 0; i < defaultPlaylist.tracks.length; i++) {
+          for (let i = 0; i < this.currentPlaylistPosition; i++) {
+            checkedTracks++;
             const playlistTrack = defaultPlaylist.tracks[i];
             if (!this.isTrackDuplicate(playlistTrack.track.youtubeId, undefined, true)) {
               selectedTrack = playlistTrack;
@@ -899,6 +960,61 @@ export class Player {
             }
             // Update position even if track is duplicate
             this.currentPlaylistPosition = (i + 1) % defaultPlaylist.tracks.length;
+          }
+        }
+        
+        // Check if we've exhausted the playlist (checked most tracks and found none available)
+        if (!selectedTrack && checkedTracks >= totalTracks * this.PLAYLIST_EXHAUSTED_THRESHOLD) {
+          // Switch to POOL mode temporarily to get fresh tracks
+          // This will automatically switch back to LINEAR mode on the next track
+          // We're just borrowing the POOL mode logic for one track
+          
+          // Store that we're in LINEAR mode but temporarily using POOL
+          const tempMode = 'POOL';
+          
+          // Use POOL mode logic
+          const voiceChannel = this.connection?.joinConfig.channelId;
+          if (voiceChannel && this.connection) {
+            const guild = this.client.guilds.cache.get(this.connection.joinConfig.guildId);
+            if (guild) {
+              const channel = guild.channels.cache.get(voiceChannel);
+              if (channel?.isVoiceBased()) {
+                // Get members in voice channel
+                const members = channel.members.filter(member => !member.user.bot);
+                
+                // If no members, use a default user ID
+                const userIds = members.size > 0
+                  ? members.map(member => member.id)
+                  : [this.client.user!.id];
+                
+                // Get available tracks from the playlist that aren't duplicates
+                const availablePlaylistTracks = defaultPlaylist.tracks
+                  .filter(pt => !this.isTrackDuplicate(pt.track.youtubeId, undefined, true))
+                  .map(pt => ({
+                    track: pt.track,
+                    weight: 1,
+                    source: 'Pool: Playlist (Exhausted Linear)'
+                  }));
+                
+                // If we have available tracks, select one randomly
+                if (availablePlaylistTracks.length > 0) {
+                  const randomIndex = Math.floor(Math.random() * availablePlaylistTracks.length);
+                  selectedTrack = {
+                    ...availablePlaylistTracks[randomIndex],
+                    addedAt: new Date(),
+                    order: 0
+                  };
+                  sourceType = 'Pool (Exhausted Linear)';
+                } else {
+                  // If no tracks available, try to get recommendations
+                  const autoplayTrack = await this.getAutoplayTrack();
+                  if (autoplayTrack) {
+                    selectedTrack = autoplayTrack;
+                    sourceType = 'Autoplay (Exhausted Linear)';
+                  }
+                }
+              }
+            }
           }
         }
       } else {
@@ -1006,22 +1122,22 @@ export class Player {
               }
             }
 
-            // Get recommendations from YouTube Music instead of regular YouTube
-            youtubeRecommendations = await getYoutubeMusicRecommendations(seedTrackId);
-            console.log(`Got ${youtubeRecommendations.length} recommendations from YouTube Music for ${seedTrackId}`);
+            // Get recommendations from YouTube instead of YouTube Music
+            youtubeRecommendations = await getYoutubeRecommendations(seedTrackId);
+            console.log(`Got ${youtubeRecommendations.length} recommendations from YouTube for ${seedTrackId}`);
           } catch (error) {
-            console.error(`YouTube Music API Error:`, error);
+            console.error(`YouTube API Error:`, error);
           }
         }
 
         // Weighted selection pool with adjusted weights
         const selectionPool: Array<{ track: { youtubeId: string }, weight: number, source: string }> = [];
 
-        // Add playlist tracks (15% weight)
+        // Add playlist tracks (25% weight)
         if (availablePlaylistTracks.length > 0) {
           selectionPool.push(...availablePlaylistTracks.map(track => ({
             track: track.track,
-            weight: 15 / availablePlaylistTracks.length,
+            weight: 25 / availablePlaylistTracks.length,
             source: 'Pool: Playlist'
           })));
         }
@@ -1045,16 +1161,16 @@ export class Player {
           })));
         }
 
-        // Add YouTube recommendations (25% weight)
+        // Add YouTube recommendations (20% weight)
         if (youtubeRecommendations.length > 0) {
           selectionPool.push(...youtubeRecommendations.map(rec => ({
             track: { youtubeId: rec.youtubeId },
-            weight: 25 / youtubeRecommendations.length,
+            weight: 20 / youtubeRecommendations.length,
             source: 'Pool: YouTube Mix'
           })));
         }
 
-        // Add random tracks from database (15% weight)
+        // Add random tracks from database (10% weight)
         const randomTracks = await prisma.track.findMany({
           where: {
             NOT: {
@@ -1075,7 +1191,7 @@ export class Player {
         if (randomTracks.length > 0) {
           selectionPool.push(...randomTracks.map(track => ({
             track: { youtubeId: track.youtubeId },
-            weight: 15 / randomTracks.length,
+            weight: 10 / randomTracks.length,
             source: 'Pool: Random'
           })));
         }
@@ -1110,6 +1226,12 @@ export class Player {
           // Get track info first
           const info = await getYoutubeInfo(selectedTrack.track.youtubeId);
           
+          // Final duplicate check before returning the track
+          if (this.isTrackDuplicate(selectedTrack.track.youtubeId, undefined, true)) {
+            console.log(`Track ${selectedTrack.track.youtubeId} (${info.title}) is a duplicate, skipping`);
+            return null;
+          }
+          
           // Create/update track entry
           await prisma.track.upsert({
             where: { youtubeId: selectedTrack.track.youtubeId },
@@ -1141,6 +1263,9 @@ export class Player {
           this.youtubeRecommendationsPool = this.youtubeRecommendationsPool.filter(
             rec => rec.youtubeId !== selectedTrack.track.youtubeId
           );
+
+          // DO NOT mark as played immediately - only mark when actually played and finished
+          // this.playedTracks.set(`yt_${selectedTrack.track.youtubeId}`, Date.now());
 
           return {
             youtubeId: selectedTrack.track.youtubeId,
@@ -1238,9 +1363,19 @@ export class Player {
           nextTrack = await this.getAutoplayTrack();
         }
         
-        if (!nextTrack || this.isTrackDuplicate(nextTrack.youtubeId)) {
+        if (!nextTrack) {
           if (attempts >= maxAttempts) {
             console.log(`No suitable tracks found after ${maxAttempts} attempts, will try again later`);
+            return;
+          }
+          continue;
+        }
+
+        // Double-check that the track isn't a duplicate before adding to queue
+        if (this.isTrackDuplicate(nextTrack.youtubeId, undefined, true)) {
+          console.log(`Skipping duplicate track in prefetch: ${nextTrack.youtubeId}`);
+          if (attempts >= maxAttempts) {
+            console.log(`Too many duplicate tracks found, will try again later`);
             return;
           }
           continue;
@@ -1264,7 +1399,8 @@ export class Player {
           this.autoplayQueue.push(nextTrack);
           console.log(`Queue: Added [${nextTrack.requestedBy.username}] ${info.title}`);
           
-          this.playedTracks.set(`yt_${nextTrack.youtubeId}`, Date.now());
+          // DO NOT mark as played here - only mark when actually played and finished
+          // this.playedTracks.set(`yt_${nextTrack.youtubeId}`, Date.now());
           await this.updatePlayerState();
           
           // Start downloading audio for this track in the background
@@ -1304,6 +1440,11 @@ export class Player {
     // Update current track and start playback
     this.currentTrack = nextTrack;
     this.audioPlayer.play(resource);
+
+    // Stream to all connected clients
+    for (const stream of this.activeAudioStreams) {
+      this.streamCurrentTrackToClient(stream);
+    }
 
     // Update request status
     await prisma.request.updateMany({
@@ -1360,15 +1501,15 @@ export class Player {
             const userIds = Array.from(channel.members.keys());
             // Update user stats for completion if tracking service exists
             if (this.trackingService) {
-            for (const userId of userIds) {
+              for (const userId of userIds) {
                 try {
-              await this.trackingService.trackUserLeave(
-                userId,
-                this.currentTrack.youtubeId,
-                this.currentTrack.duration,
-                this.currentTrack.duration,
-                false // Not skipped
-              );
+                  await this.trackingService.trackUserLeave(
+                    userId,
+                    this.currentTrack.youtubeId,
+                    this.currentTrack.duration,
+                    this.currentTrack.duration,
+                    false // Not skipped
+                  );
                 } catch (error) {
                   console.error('Error tracking user leave:', error);
                 }
@@ -1378,7 +1519,7 @@ export class Player {
         }
       }
 
-      // Mark the current track as completed
+      // Mark the current track as completed in the database
       await prisma.request.updateMany({
         where: {
           youtubeId: this.currentTrack.youtubeId,
@@ -1389,6 +1530,14 @@ export class Player {
           playedAt: new Date()
         }
       });
+
+      // THIS is where we should mark the track as played for the cooldown system
+      // Mark the track as played in our internal tracking
+      const ytKey = `yt_${this.currentTrack.youtubeId}`;
+      const now = Date.now();
+      this.playedTracks.set(ytKey, now);
+      console.log(`Marked track ${this.currentTrack.youtubeId} (${this.currentTrack.title}) as played at ${new Date(now).toISOString()}`);
+      console.log(`This track will be available for autoplay again after ${new Date(now + this.AUTOPLAY_TRACKS_EXPIRY).toISOString()}`);
 
       // Clear current track reference
       this.currentTrack = undefined;
@@ -1670,13 +1819,13 @@ export class Player {
         const seedTrack = popularTracks[attempts];
         
         try {
-          console.log(`Trying to get YouTube Music recommendations for ${seedTrack.youtubeId} (attempt ${attempts + 1})`);
-          // Get recommendations from YouTube Music
-          const recommendations = await getYoutubeMusicRecommendations(seedTrack.youtubeId);
+          console.log(`Trying to get YouTube recommendations for ${seedTrack.youtubeId} (attempt ${attempts + 1})`);
+          // Get recommendations from YouTube
+          const recommendations = await getYoutubeRecommendations(seedTrack.youtubeId);
           
           if (recommendations.length > 0) {
             newRecommendations = recommendations;
-            console.log(`Got ${recommendations.length} recommendations from YouTube Music for ${seedTrack.youtubeId}`);
+            console.log(`Got ${recommendations.length} recommendations from YouTube for ${seedTrack.youtubeId}`);
             break;
           }
         } catch (error) {
@@ -1687,7 +1836,7 @@ export class Player {
       }
       
       if (newRecommendations.length === 0) {
-        console.log('Could not get any YouTube Music recommendations after multiple attempts');
+        console.log('Could not get any YouTube recommendations after multiple attempts');
         return;
       }
       
@@ -1696,9 +1845,9 @@ export class Player {
       const uniqueNewRecommendations = newRecommendations.filter(r => !existingIds.has(r.youtubeId));
       
       this.youtubeRecommendationsPool.push(...uniqueNewRecommendations);
-      console.log(`YouTube Music Mix pool size: ${this.youtubeRecommendationsPool.length}`);
+      console.log(`YouTube Mix pool size: ${this.youtubeRecommendationsPool.length}`);
     } catch (error) {
-      console.error('Failed to refresh YouTube Music recommendations:', error);
+      console.error('Failed to refresh YouTube recommendations:', error);
     }
   }
 
@@ -1850,5 +1999,63 @@ export class Player {
       console.error(`Unhandled error in prefetch for ${youtubeId}:`, error);
       this.downloadingTracks.delete(youtubeId);
     });
+  }
+
+  // New method to set up audio pipeline for continuous streaming
+  setupAudioPipeline(outputStream: NodeJS.WritableStream): void {
+    console.log('Setting up audio pipeline for client');
+    
+    // Add this stream to active streams
+    this.activeAudioStreams.add(outputStream);
+    
+    // Handle stream end/error
+    outputStream.on('close', () => {
+      this.activeAudioStreams.delete(outputStream);
+      console.log('Audio stream closed, removed from active streams');
+    });
+    
+    outputStream.on('error', (error) => {
+      console.error('Audio stream error:', error);
+      this.activeAudioStreams.delete(outputStream);
+    });
+    
+    // If we have a current track, start streaming it immediately
+    if (this.currentTrack && this.audioPlayer.state.status === AudioPlayerStatus.Playing) {
+      this.streamCurrentTrackToClient(outputStream);
+    }
+  }
+  
+  // Helper method to stream current track to a client
+  private async streamCurrentTrackToClient(outputStream: NodeJS.WritableStream): Promise<void> {
+    if (!this.currentTrack || !outputStream.writable) return;
+    
+    try {
+      // Get audio file path from cache
+      const audioCache = await prisma.audioCache.findUnique({
+        where: { youtubeId: this.currentTrack.youtubeId }
+      });
+      
+      if (!audioCache || !fs.existsSync(audioCache.filePath)) {
+        console.error('Audio file not found for streaming:', this.currentTrack.youtubeId);
+        return;
+      }
+      
+      // Create a read stream for the audio file
+      const audioReadStream = fs.createReadStream(audioCache.filePath);
+      
+      // Pipe directly to output stream but don't end it when this file ends
+      audioReadStream.pipe(outputStream, { end: false });
+      
+      // When the audio file ends, don't close the output stream
+      audioReadStream.on('end', () => {
+        const trackTitle = this.currentTrack?.title || 'Unknown';
+        console.log(`Finished streaming track: ${trackTitle}`);
+        // Don't end the output stream, it will be used for the next track
+      });
+      
+      console.log(`Streaming track to client: ${this.currentTrack.title}`);
+    } catch (error) {
+      console.error('Error streaming track to client:', error);
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Collection } from 'discord.js';
+import { Client, GatewayIntentBits, Collection, ActivityType } from 'discord.js';
 import { initializePlayer } from './player.js';
 import { registerCommands } from './commands/index.js';
 import { handleVoiceStateUpdate } from './events/voiceStateUpdate.js';
@@ -44,8 +44,28 @@ export async function setupDiscordBot() {
 
   // Auto-join voice channel when ready
   client.on('ready', async () => {
-    const targetChannelId = process.env.DEFAULT_VOICE_CHANNEL_ID || '267922584123867137';
+    const targetChannelId = process.env.DISCORD_DEFAULT_VOICE_CHANNEL_ID;
+    
+    if (!targetChannelId) {
+      console.warn('No default voice channel configured. Set DISCORD_DEFAULT_VOICE_CHANNEL_ID in .env');
+      return;
+    }
+    
     const channel = client.channels.cache.get(targetChannelId);
+    
+    // Set bot status to STREAMING with the URL
+    if (client.user) {
+      client.user.setPresence({
+        activities: [{
+          name: 'https://miu.gacha.boo',
+          type: ActivityType.Streaming,
+          url: 'https://miu.gacha.boo'
+        }],
+        status: 'online'
+      });
+      
+      console.log(`🤖 Bot is ready as ${client.user.tag} with STREAMING status`);
+    }
     
     if (channel?.isVoiceBased()) {
       const connection = joinVoiceChannel({

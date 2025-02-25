@@ -1,6 +1,9 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { createServer } from './server.js';
+import logger from './utils/logger.js';
+import getEnv from './utils/env.js';
 
 // Load environment variables first, before any other imports
 const rootDir = path.resolve(process.cwd(), '..');
@@ -55,24 +58,32 @@ console.log('- YouTube API:', process.env.YOUTUBE_API_KEYS || process.env.YOUTUB
 console.log('- NODE_ENV:', process.env.NODE_ENV);
 console.log('- Database:', process.env.DATABASE_URL ? 'Configured' : 'Not configured');
 
-// Import the rest of the dependencies after environment variables are loaded
-import { createServer } from './server.js';
-import { createServer as createHttpServer } from 'http';
-import logger from './utils/logger.js';
+const env = getEnv();
+const PORT = env.getNumber('PORT', 3000);
 
 async function startServer() {
   try {
-    // Initialize Express app
-    const app = await createServer();
+    const { app, server } = await createServer();
     
-    // Create HTTP server
-    const server = createHttpServer(app);
+    server.listen(PORT, () => {
+      logger.info(`Server is running on port ${PORT}`);
+    });
     
-    // Start server
-    const port = process.env.PORT || 3000;
-    server.listen(port, () => {
-      logger.info(`Server is running on port ${port}`);
-      logger.info('Discord bot is online');
+    // Handle graceful shutdown
+    process.on('SIGTERM', () => {
+      logger.info('SIGTERM signal received: closing HTTP server');
+      server.close(() => {
+        logger.info('HTTP server closed');
+        process.exit(0);
+      });
+    });
+    
+    process.on('SIGINT', () => {
+      logger.info('SIGINT signal received: closing HTTP server');
+      server.close(() => {
+        logger.info('HTTP server closed');
+        process.exit(0);
+      });
     });
   } catch (error) {
     logger.error('Failed to start server:', error);
@@ -80,8 +91,4 @@ async function startServer() {
   }
 }
 
-startServer()
-  .catch((err) => {
-    logger.error('Unhandled error:', err);
-    process.exit(1);
-  });
+startServer();

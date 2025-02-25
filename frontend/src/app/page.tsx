@@ -2,7 +2,7 @@
 
 import { usePlayerStore } from '@/lib/store/playerStore';
 import { useAuthStore } from '@/lib/store/authStore';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { usePlayerProvider } from '@/providers/PlayerProvider';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { PlayerControls } from '@/components/player/PlayerControls';
@@ -11,6 +11,9 @@ import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useView } from '@/components/layout/AppShell';
 import env from '@/utils/env';
+import { AnimatedQueueItem } from '@/components/player/AnimatedQueueItem';
+import { AnimatedNowPlaying } from '@/components/player/AnimatedNowPlaying';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export default function Home() {
   const router = useRouter();
@@ -21,11 +24,74 @@ export default function Home() {
   const { showHistory, toggleView } = useView();
   const [history, setHistory] = useState<any[]>([]);
   const [connectionError, setConnectionError] = useState(false);
+  const [previousTrack, setPreviousTrack] = useState<any>(null);
+  const [animatingQueue, setAnimatingQueue] = useState(false);
+  const [previousQueue, setPreviousQueue] = useState<any[]>([]);
+  const [transitioningTrackId, setTransitioningTrackId] = useState<string | null>(null);
+  const queueAnimationCompleteCount = useRef(0);
+  const [showHomeTimeout, setShowHomeTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [shouldShowPlayer, setShouldShowPlayer] = useState(!!currentTrack);
 
   // Separate user requests from autoplay tracks
   const userRequests = queue.filter(track => !track.isAutoplay);
   const autoplayTracks = queue.filter(track => track.isAutoplay);
   const displayQueue = [...userRequests, ...autoplayTracks];
+
+  // Track transitions with a delay to prevent UI flicker
+  useEffect(() => {
+    if (currentTrack) {
+      // If we have a current track, clear any pending timeout and show the player
+      if (showHomeTimeout) {
+        clearTimeout(showHomeTimeout);
+        setShowHomeTimeout(null);
+      }
+      setShouldShowPlayer(true);
+      
+      // If we have a current track and it's different from the previous one
+      if (previousTrack && previousTrack.youtubeId !== currentTrack.youtubeId) {
+        // Store the transitioning track ID
+        setTransitioningTrackId(previousTrack.youtubeId);
+        
+        // Store the previous queue for animation
+        setPreviousQueue([previousTrack, ...queue]);
+        
+        // Start queue animation
+        setAnimatingQueue(true);
+        
+        // Reset animation completion counter
+        queueAnimationCompleteCount.current = 0;
+      }
+      
+      // Update previous track
+      setPreviousTrack(currentTrack);
+    } else if (previousTrack && !showHomeTimeout) {
+      // If we had a track but now it's null, start a timeout before hiding the player
+      const timeout = setTimeout(() => {
+        setShouldShowPlayer(false);
+        setShowHomeTimeout(null);
+      }, 5000); // 5 second delay before showing homescreen
+      
+      setShowHomeTimeout(timeout);
+    }
+    
+    // Cleanup function to clear timeout on unmount
+    return () => {
+      if (showHomeTimeout) {
+        clearTimeout(showHomeTimeout);
+      }
+    };
+  }, [currentTrack, queue, previousTrack, showHomeTimeout]);
+
+  // Handle queue animation completion
+  const handleQueueItemAnimationComplete = () => {
+    queueAnimationCompleteCount.current += 1;
+    
+    // When all items have completed their animation
+    if (queueAnimationCompleteCount.current >= previousQueue.length) {
+      setAnimatingQueue(false);
+      setTransitioningTrackId(null);
+    }
+  };
 
   // Auth check effect
   useEffect(() => {
@@ -54,7 +120,7 @@ export default function Home() {
         // Reset connection error if successful
         setConnectionError(false);
       } catch (error) {
-        console.error('Backend connection error:', error);
+        // Backend connection error
         setConnectionError(true);
         
         // If we're on the player page and there's a connection error, redirect to main
@@ -92,7 +158,7 @@ export default function Home() {
         // Ensure we're getting the tracks array from the response
         setHistory(Array.isArray(data) ? data : (data.tracks || []));
       } catch (error) {
-        console.error('Failed to fetch history:', error);
+        // Failed to fetch history
       }
     };
 
@@ -122,23 +188,13 @@ export default function Home() {
     };
   }, [currentTrack, token]); // Re-run when track or auth changes
 
-  // Show loading state while checking auth or fetching initial state
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[calc(100vh-11rem)]">
-        <LoadingSpinner size="lg" className="text-theme-accent" />
-      </div>
-    );
-  }
+  // Use previousTrack as a fallback during track transitions
+  const displayTrack = currentTrack || previousTrack;
 
-  // Don't render anything if not authenticated
-  if (!token) {
-    return null;
-  }
-
+  // Function to handle play/pause
   const handlePlayPause = async () => {
     const audio = document.querySelector('audio');
-    if (!audio || !token || !currentTrack) return;
+    if (!audio || !token || !displayTrack) return;
     
     if (audio.paused) {
       try {
@@ -158,13 +214,13 @@ export default function Home() {
         
         // Now play from the synced position
         await audio.play().catch(err => {
-          console.error('Failed to play audio:', err);
+          // Failed to play audio
         });
       } catch (err) {
-        console.error('Failed to sync position:', err);
+        // Failed to sync position
         // Still try to play even if sync fails
         await audio.play().catch(err => {
-          console.error('Failed to play audio:', err);
+          // Failed to play audio
         });
       }
     } else {
@@ -172,12 +228,205 @@ export default function Home() {
     }
   };
 
+  // Show loading state while checking auth or fetching initial state
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[calc(100vh-11rem)]">
+        <LoadingSpinner size="lg" className="text-theme-accent" />
+      </div>
+    );
+  }
+
+  // Don't render anything if not authenticated
+  if (!token) {
+    return null;
+  }
+
+  // Show player if we have a track or are in the delay period
+  if (displayTrack && (shouldShowPlayer || currentTrack)) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        {/* Now Playing Section */}
+        <AnimatePresence mode="wait">
+          <AnimatedNowPlaying 
+            key={displayTrack.youtubeId} 
+            track={displayTrack} 
+            isPlaying={isPlaying} 
+            onPlayPause={handlePlayPause} 
+          />
+        </AnimatePresence>
+
+        {/* Queue/History Section */}
+        <div className="mt-8">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-x-2">
+              <h2 className="text-2xl font-bold text-white">{showHistory ? "History" : "Queue"}</h2>
+              <button
+                onClick={toggleView}
+                className="p-2 rounded-full hover:bg-theme-accent/10 transition-colors flex-shrink-0"
+                title={showHistory ? "Show Queue" : "Show History"}
+              >
+                <ClockIcon className="h-5 w-5 text-theme-accent transform rotate-135" />
+              </button>
+            </div>
+          </div>
+          <div className="relative">
+            <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
+              {animatingQueue ? (
+                <div>
+                  {previousQueue.map((track, index) => (
+                    <AnimatedQueueItem
+                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      track={track}
+                      index={index}
+                      isRemoving={track.youtubeId === transitioningTrackId}
+                      onAnimationComplete={handleQueueItemAnimationComplete}
+                    />
+                  ))}
+                </div>
+              ) : displayQueue.length > 0 ? (
+                <div className="space-y-4">
+                  {displayQueue.map((track, index) => (
+                    <motion.div
+                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, delay: index * 0.05 }}
+                      className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
+                               hover:bg-white/10 transition-all duration-200 
+                               border border-white/5 hover:border-white/10
+                               relative group"
+                    >
+                      {/* Track content */}
+                      <div className="relative h-16 w-16 flex-shrink-0">
+                        <Image
+                          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
+                          alt={track.title}
+                          fill
+                          className="object-cover rounded-md"
+                          unoptimized={track.thumbnail.startsWith('http')}
+                        />
+                        {track.isAutoplay && (
+                          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
+                            Auto
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-white font-medium truncate">{track.title}</h3>
+                        <div className="flex items-center space-x-2 text-sm mt-1">
+                          <span className="text-white/30">by</span>
+                          <span className="text-white/50">{track.requestedBy.username}</span>
+                          {track.requestedBy.avatar && (
+                            <img
+                              src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
+                              alt={track.requestedBy.username}
+                              className="h-4 w-4 rounded-full opacity-50"
+                            />
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-sm text-white/40">
+                        #{index + 1}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.5 }}
+                  className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+                >
+                  No tracks in queue
+                </motion.div>
+              )}
+            </div>
+            <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
+              {history.length > 0 ? (
+                <div className="space-y-4">
+                  {history.map((track, index) => (
+                    <motion.div
+                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, delay: index * 0.05 }}
+                      className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
+                               hover:bg-white/10 transition-all duration-200 
+                               border border-white/5 hover:border-white/10
+                               relative group"
+                    >
+                      {/* Track content */}
+                      <div className="relative h-16 w-16 flex-shrink-0">
+                        <Image
+                          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
+                          alt={track.title}
+                          fill
+                          className="object-cover rounded-md"
+                          unoptimized={track.thumbnail.startsWith('http')}
+                        />
+                        {track.isAutoplay && (
+                          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
+                            Auto
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-white font-medium truncate">{track.title}</h3>
+                        <div className="flex items-center space-x-2 text-sm mt-1">
+                          <span className="text-white/30">by</span>
+                          <span className="text-white/50">{track.requestedBy.username}</span>
+                          {track.requestedBy.avatar && (
+                            <img
+                              src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
+                              alt={track.requestedBy.username}
+                              className="h-4 w-4 rounded-full opacity-50"
+                            />
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-sm text-white/40">
+                        {new Date(track.requestedAt).toLocaleDateString()}
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              ) : (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.5 }}
+                  className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+                >
+                  No history
+                </motion.div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Show default homepage only when explicitly in stopped state or no track
-  if (!currentTrack || status === 'stopped') {
+  if (!displayTrack || status === 'stopped') {
     return (
       <div className="container mx-auto px-4 py-8 flex flex-col items-center justify-center min-h-[calc(100vh-11rem)]">
-        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-theme-accent mb-12">MIU</h1>
-        <div className="relative w-[16rem] h-[16rem] sm:w-[24rem] sm:h-[24rem] lg:w-[32rem] lg:h-[32rem] mb-8">
+        <motion.h1 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="text-4xl sm:text-5xl lg:text-6xl font-bold text-theme-accent mb-12"
+        >
+          MIU
+        </motion.h1>
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+          className="relative w-[16rem] h-[16rem] sm:w-[24rem] sm:h-[24rem] lg:w-[32rem] lg:h-[32rem] mb-8"
+        >
           <Image
             src="/images/DEFAULT.jpg"
             alt="休み"
@@ -185,85 +434,36 @@ export default function Home() {
             className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
             priority
           />
-        </div>
-        <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-theme-accent mb-4">休み</h2>
+        </motion.div>
+        <motion.h2 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.4 }}
+          className="text-2xl sm:text-3xl lg:text-4xl font-bold text-theme-accent mb-4"
+        >
+          休み
+        </motion.h2>
       </div>
     );
   }
 
-  const items = showHistory ? history : displayQueue;
-  const title = showHistory ? "History" : "Queue";
-
   return (
     <div className="container mx-auto px-4 py-8">
       {/* Now Playing Section */}
-      <div className="flex flex-col md:flex-row items-center md:items-start gap-4 md:gap-1 mb-12">
-        {/* Album art with play/pause */}
-        <div className="relative w-[16rem] h-[16rem] md:w-[24rem] md:h-[24rem] flex-shrink-0 group cursor-pointer"
-          onClick={handlePlayPause}>
-          <Image
-            src={currentTrack.thumbnail}
-            alt={currentTrack.title}
-            fill
-            className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
-            priority
-          />
-          {/* Play/Pause Overlay */}
-          <div className="absolute inset-0 bg-theme-primary/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center">
-            {isPlaying ? (
-              <PauseIcon className="h-16 w-16 text-theme-accent" />
-            ) : (
-              <PlayIcon className="h-16 w-16 text-theme-accent" />
-            )}
-          </div>
-        </div>
-
-        {/* Volume control - mobile only */}
-        <div className="w-full md:hidden -mt-5">
-          <PlayerControls 
-            showVolume={true} 
-            vertical={false} 
-            size="md" 
-            className="w-full h-1 bg-theme-accent/20"
-          />
-        </div>
-
-        {/* Volume control - desktop only */}
-        <div className="hidden md:block flex-shrink-0">
-          <div className="h-[24rem] flex items-center overflow-hidden">
-            <div className="h-full flex items-center">
-              <PlayerControls 
-                showVolume={true} 
-                vertical={true} 
-                size="md" 
-                className="h-full w-0.5 mx-4 max-h-[24rem]"
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-col items-center md:items-start flex-grow mt-3 md:mt-0">
-          <h1 className="text-3xl md:text-4xl font-bold text-white mb-4">Now Playing</h1>
-          <h2 className="text-xl md:text-2xl font-bold text-white/90 mb-2">{currentTrack.title}</h2>
-          <div className="flex items-center space-x-2 text-sm">
-            <span className="text-white/40">Requested by</span>
-            <span className="text-white/60">{currentTrack.requestedBy.username}</span>
-            {currentTrack.requestedBy.avatar && (
-              <img
-                src={`https://cdn.discordapp.com/avatars/${currentTrack.requestedBy.id}/${currentTrack.requestedBy.avatar}.png`}
-                alt={currentTrack.requestedBy.username}
-                className="h-4 w-4 rounded-full opacity-60"
-              />
-            )}
-          </div>
-        </div>
-      </div>
+      <AnimatePresence mode="wait">
+        <AnimatedNowPlaying 
+          key={displayTrack.youtubeId} 
+          track={displayTrack} 
+          isPlaying={isPlaying} 
+          onPlayPause={handlePlayPause} 
+        />
+      </AnimatePresence>
 
       {/* Queue/History Section */}
       <div className="mt-8">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-x-2">
-            <h2 className="text-2xl font-bold text-white">{title}</h2>
+            <h2 className="text-2xl font-bold text-white">{showHistory ? "History" : "Queue"}</h2>
             <button
               onClick={toggleView}
               className="p-2 rounded-full hover:bg-theme-accent/10 transition-colors flex-shrink-0"
@@ -275,11 +475,26 @@ export default function Home() {
         </div>
         <div className="relative">
           <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
-            {displayQueue.length > 0 ? (
+            {animatingQueue ? (
+              <div>
+                {previousQueue.map((track, index) => (
+                  <AnimatedQueueItem
+                    key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                    track={track}
+                    index={index}
+                    isRemoving={track.youtubeId === transitioningTrackId}
+                    onAnimationComplete={handleQueueItemAnimationComplete}
+                  />
+                ))}
+              </div>
+            ) : displayQueue.length > 0 ? (
               <div className="space-y-4">
                 {displayQueue.map((track, index) => (
-                  <div
+                  <motion.div
                     key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.05 }}
                     className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
                              hover:bg-white/10 transition-all duration-200 
                              border border-white/5 hover:border-white/10
@@ -317,21 +532,29 @@ export default function Home() {
                     <div className="text-sm text-white/40">
                       #{index + 1}
                     </div>
-                  </div>
+                  </motion.div>
                 ))}
               </div>
             ) : (
-              <div className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.5 }}
+                className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+              >
                 No tracks in queue
-              </div>
+              </motion.div>
             )}
           </div>
           <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
             {history.length > 0 ? (
               <div className="space-y-4">
                 {history.map((track, index) => (
-                  <div
+                  <motion.div
                     key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.05 }}
                     className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
                              hover:bg-white/10 transition-all duration-200 
                              border border-white/5 hover:border-white/10
@@ -346,6 +569,11 @@ export default function Home() {
                         className="object-cover rounded-md"
                         unoptimized={track.thumbnail.startsWith('http')}
                       />
+                      {track.isAutoplay && (
+                        <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
+                          Auto
+                        </div>
+                      )}
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 className="text-white font-medium truncate">{track.title}</h3>
@@ -364,13 +592,18 @@ export default function Home() {
                     <div className="text-sm text-white/40">
                       {new Date(track.requestedAt).toLocaleDateString()}
                     </div>
-                  </div>
+                  </motion.div>
                 ))}
               </div>
             ) : (
-              <div className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.5 }}
+                className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+              >
                 No history
-              </div>
+              </motion.div>
             )}
           </div>
         </div>

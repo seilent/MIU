@@ -62,7 +62,7 @@ export async function authMiddleware(
 
     next();
   } catch (error) {
-    console.error('Auth middleware error:', error);
+    console.error('Auth middleware error - authentication failed');
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
