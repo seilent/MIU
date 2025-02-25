@@ -179,41 +179,63 @@ install_system_dependencies() {
     PYTHON_VERSION=$(python3 --version 2>&1 | cut -d' ' -f2)
     echo -e "${YELLOW}Found Python $PYTHON_VERSION${NC}"
     
-    # Check if system has python3-dev package
-    if ! dpkg -l | grep -q python3-dev; then
-      echo -e "${YELLOW}Warning: python3-dev package is required for building native modules.${NC}"
-      echo -e "${YELLOW}Install it with:${NC}"
-      echo -e "${YELLOW}  sudo apt-get install -y python3-dev${NC}"
-    fi
-    
-    # Check if system has python3-full package (needed for venv)
-    if ! dpkg -l | grep -q python3-full; then
-      echo -e "${YELLOW}Warning: python3-full package is recommended for creating virtual environments.${NC}"
-      echo -e "${YELLOW}Install it with:${NC}"
-      echo -e "${YELLOW}  sudo apt-get install -y python3-full${NC}"
-    fi
-    
-    # Check if system has python3-pip
-    if ! command_exists pip3; then
-      echo -e "${YELLOW}Warning: pip3 not found. It's needed for Python package management.${NC}"
-      echo -e "${YELLOW}Install it with:${NC}"
-      echo -e "${YELLOW}  sudo apt-get install -y python3-pip${NC}"
-    fi
-    
-    # Check if this is an externally managed environment
-    if python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
-      echo -e "${YELLOW}Detected externally managed Python environment (PEP 668).${NC}"
-      echo -e "${YELLOW}To install gyp, you have several options:${NC}"
-      echo -e "${YELLOW}1. Use system package if available:${NC}"
-      echo -e "${YELLOW}   sudo apt-get install -y python3-gyp${NC}"
-      echo -e "${YELLOW}2. Create a virtual environment:${NC}"
-      echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
-      echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
+    # Check if Python is from pyenv
+    if python3 -c "import sys; print(sys.executable)" 2>/dev/null | grep -q ".pyenv"; then
+      PYTHON_PATH=$(python3 -c "import sys; print(sys.executable)" 2>/dev/null)
+      echo -e "${YELLOW}Detected Python installed via pyenv: $PYTHON_PATH${NC}"
+      echo -e "${YELLOW}For native module builds with pyenv Python, you may need to:${NC}"
+      echo -e "${YELLOW}1. Install gyp in your pyenv environment:${NC}"
       echo -e "${YELLOW}   pip install gyp${NC}"
-      echo -e "${YELLOW}   # Then run this deployment script from within the activated environment${NC}"
-      echo -e "${YELLOW}3. Use pipx for isolated installation:${NC}"
-      echo -e "${YELLOW}   sudo apt-get install -y pipx${NC}"
-      echo -e "${YELLOW}   pipx install gyp${NC}"
+      echo -e "${YELLOW}2. Or set NODE_GYP_FORCE_PYTHON to use system Python instead:${NC}"
+      echo -e "${YELLOW}   export NODE_GYP_FORCE_PYTHON=/usr/bin/python3${NC}"
+      
+      # Check if system Python is also available as a fallback
+      if [ -f /usr/bin/python3 ]; then
+        echo -e "${YELLOW}System Python is available and will be used as a fallback.${NC}"
+      else
+        echo -e "${RED}Warning: No system Python detected. Native module builds may fail.${NC}"
+        echo -e "${YELLOW}Consider installing system Python as a fallback:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install -y python3 python3-dev${NC}"
+      fi
+    else
+      # Check if system has python3-dev package
+      if ! dpkg -l | grep -q python3-dev; then
+        echo -e "${YELLOW}Warning: python3-dev package is required for building native modules.${NC}"
+        echo -e "${YELLOW}Install it with:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install -y python3-dev${NC}"
+      fi
+      
+      # Check if system has python3-full package (needed for venv)
+      if ! dpkg -l | grep -q python3-full; then
+        echo -e "${YELLOW}Warning: python3-full package is recommended for creating virtual environments.${NC}"
+        echo -e "${YELLOW}Install it with:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install -y python3-full${NC}"
+      fi
+      
+      # Check if system has python3-pip
+      if ! command_exists pip3; then
+        echo -e "${YELLOW}Warning: pip3 not found. It's needed for Python package management.${NC}"
+        echo -e "${YELLOW}Install it with:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install -y python3-pip${NC}"
+      fi
+      
+      # Check if this is an externally managed environment
+      if python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
+        echo -e "${YELLOW}Detected externally managed Python environment (PEP 668).${NC}"
+        echo -e "${YELLOW}To install gyp, you have several options:${NC}"
+        echo -e "${YELLOW}1. Use system package if available:${NC}"
+        echo -e "${YELLOW}   sudo apt-get install -y python3-gyp${NC}"
+        echo -e "${YELLOW}2. Create a virtual environment:${NC}"
+        echo -e "${YELLOW}   python3 -m venv $HOME/.venvs/miu-build${NC}"
+        echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
+        echo -e "${YELLOW}   pip install gyp${NC}"
+        echo -e "${YELLOW}   # Then run this deployment script from within the activated environment${NC}"
+        echo -e "${YELLOW}3. Use pipx for isolated installation:${NC}"
+        echo -e "${YELLOW}   sudo apt-get install -y pipx${NC}"
+        echo -e "${YELLOW}   pipx install gyp${NC}"
+        echo -e "${YELLOW}4. Use --break-system-packages flag (not recommended):${NC}"
+        echo -e "${YELLOW}   pip install --break-system-packages gyp${NC}"
+      fi
     fi
   else
     echo -e "${RED}Warning: Python 3 is required for building native modules but was not found.${NC}"
@@ -293,6 +315,26 @@ deploy_backend() {
       echo -e "${YELLOW}  - libopus-dev${NC}"
       echo -e "${YELLOW}  - ffmpeg${NC}"
       
+      # Check if Python is installed via pyenv
+      if command -v python3 >/dev/null 2>&1 && python3 --version | grep -q "Python" && python3 -c "import sys; print(sys.executable)" | grep -q ".pyenv"; then
+        echo -e "${YELLOW}Detected Python installed via pyenv.${NC}"
+        PYTHON_PATH=$(command -v python3)
+        echo -e "${YELLOW}Python path: $PYTHON_PATH${NC}"
+        
+        echo -e "${YELLOW}For pyenv Python installations, you need to install gyp in your active Python environment:${NC}"
+        echo -e "${YELLOW}  pip install gyp${NC}"
+        echo -e "${YELLOW}If you encounter 'externally-managed-environment' error, use:${NC}"
+        echo -e "${YELLOW}  pip install --break-system-packages gyp${NC}"
+        echo -e "${YELLOW}Or create a dedicated virtual environment for building:${NC}"
+        echo -e "${YELLOW}  python -m venv $HOME/.venvs/build-env${NC}"
+        echo -e "${YELLOW}  source $HOME/.venvs/build-env/bin/activate${NC}"
+        echo -e "${YELLOW}  pip install gyp${NC}"
+        
+        # Try to install gyp in the current Python environment
+        echo -e "${YELLOW}Attempting to install gyp in the current Python environment...${NC}"
+        pip install gyp 2>/dev/null || pip install --break-system-packages gyp 2>/dev/null || true
+      fi
+      
       # Check if we're in an externally managed Python environment
       if command_exists python3 && python3 -m pip --version 2>&1 | grep -q "externally-managed-environment"; then
         echo -e "${RED}Detected externally managed Python environment (PEP 668).${NC}"
@@ -303,12 +345,20 @@ deploy_backend() {
         echo -e "${YELLOW}   source $HOME/.venvs/miu-build/bin/activate${NC}"
         echo -e "${YELLOW}   pip install gyp${NC}"
         echo -e "${YELLOW}   # Then run this deployment script again${NC}"
+        echo -e "${YELLOW}3. Use --break-system-packages flag (not recommended but works for quick testing):${NC}"
+        echo -e "${YELLOW}   pip install --break-system-packages gyp${NC}"
         
         # Try to use system python3-gyp if available
         if apt-cache show python3-gyp &>/dev/null; then
           echo -e "${YELLOW}Attempting to install system python3-gyp package...${NC}"
           sudo apt-get install -y python3-gyp || true
         fi
+      fi
+      
+      # Set NODE_GYP_FORCE_PYTHON to use the system Python if available
+      if command_exists /usr/bin/python3; then
+        echo -e "${YELLOW}Setting NODE_GYP_FORCE_PYTHON to use system Python...${NC}"
+        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
       fi
       
       echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
