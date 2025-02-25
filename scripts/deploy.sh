@@ -237,6 +237,37 @@ setup_docker_db() {
   if [ "$USE_DOCKER_DB" = true ]; then
     echo -e "${BLUE}Setting up Docker for database and Redis...${NC}"
     
+    # Check if Docker containers are already running
+    if command_exists docker; then
+      # Check if PostgreSQL is already running on port 5432
+      if lsof -i:5432 >/dev/null 2>&1 || nc -z localhost 5432 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: Port 5432 (PostgreSQL) is already in use.${NC}"
+        read -p "Do you want to continue with Docker setup? This might cause conflicts. (y/n): " CONTINUE_DOCKER
+        if [[ "$CONTINUE_DOCKER" != "y" ]]; then
+          echo -e "${YELLOW}Skipping Docker database setup.${NC}"
+          USE_DOCKER_DB=false
+          
+          # Prompt for database configuration
+          setup_external_db
+          return
+        fi
+      fi
+      
+      # Check if Redis is already running on port 6379
+      if lsof -i:6379 >/dev/null 2>&1 || nc -z localhost 6379 >/dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: Port 6379 (Redis) is already in use.${NC}"
+        read -p "Do you want to continue with Docker setup? This might cause conflicts. (y/n): " CONTINUE_DOCKER
+        if [[ "$CONTINUE_DOCKER" != "y" ]]; then
+          echo -e "${YELLOW}Skipping Docker database setup.${NC}"
+          USE_DOCKER_DB=false
+          
+          # Prompt for database configuration
+          setup_external_db
+          return
+        fi
+      fi
+    fi
+    
     # Create docker-compose file for database and Redis
     cat > "$PROJECT_ROOT/docker-compose.db.yml" << EOF
 version: '3.8'
@@ -285,35 +316,70 @@ EOF
     echo -e "${YELLOW}Skipping Docker database setup as requested.${NC}"
     
     # Prompt for database configuration
-    echo -e "${YELLOW}Please enter your PostgreSQL database configuration:${NC}"
-    read -p "Database host (default: localhost): " DB_HOST
-    DB_HOST=${DB_HOST:-localhost}
-    
-    read -p "Database port (default: 5432): " DB_PORT
-    DB_PORT=${DB_PORT:-5432}
-    
-    read -p "Database name (default: miu): " DB_NAME
-    DB_NAME=${DB_NAME:-miu}
-    
-    read -p "Database user (default: miu): " DB_USER
-    DB_USER=${DB_USER:-miu}
-    
-    read -p "Database password (default: miu): " DB_PASSWORD
-    DB_PASSWORD=${DB_PASSWORD:-miu}
-    
-    # Set the DATABASE_URL
-    DB_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
-    
-    # Prompt for Redis configuration
-    echo -e "${YELLOW}Please enter your Redis configuration:${NC}"
-    read -p "Redis host (default: localhost): " REDIS_HOST
-    REDIS_HOST=${REDIS_HOST:-localhost}
-    
-    read -p "Redis port (default: 6379): " REDIS_PORT
-    REDIS_PORT=${REDIS_PORT:-6379}
-    
-    # Set the REDIS_URL
-    REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}"
+    setup_external_db
+  fi
+}
+
+# Function to set up external database configuration
+setup_external_db() {
+  # Prompt for database configuration
+  echo -e "${YELLOW}Please enter your PostgreSQL database configuration:${NC}"
+  read -p "Database host (default: localhost): " DB_HOST
+  DB_HOST=${DB_HOST:-localhost}
+  
+  read -p "Database port (default: 5432): " DB_PORT
+  DB_PORT=${DB_PORT:-5432}
+  
+  read -p "Database name (default: miu): " DB_NAME
+  DB_NAME=${DB_NAME:-miu}
+  
+  read -p "Database user (default: miu): " DB_USER
+  DB_USER=${DB_USER:-miu}
+  
+  read -p "Database password (default: miu): " DB_PASSWORD
+  DB_PASSWORD=${DB_PASSWORD:-miu}
+  
+  # Set the DATABASE_URL
+  DB_URL="postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+  
+  # Prompt for Redis configuration
+  echo -e "${YELLOW}Please enter your Redis configuration:${NC}"
+  read -p "Redis host (default: localhost): " REDIS_HOST
+  REDIS_HOST=${REDIS_HOST:-localhost}
+  
+  read -p "Redis port (default: 6379): " REDIS_PORT
+  REDIS_PORT=${REDIS_PORT:-6379}
+  
+  # Set the REDIS_URL
+  REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}"
+}
+
+# Function to update environment files
+update_env_files() {
+  echo -e "${BLUE}Updating environment files...${NC}"
+  
+  # Check if Node.js is installed
+  if command_exists node; then
+    # Check if the update-env.ts script exists
+    if [ -f "$PROJECT_ROOT/scripts/update-env.ts" ]; then
+      echo -e "${YELLOW}Running environment updater script...${NC}"
+      
+      # Check if ts-node is installed
+      if ! command_exists ts-node; then
+        echo -e "${YELLOW}Installing ts-node...${NC}"
+        npm install -g ts-node typescript
+      fi
+      
+      # Run the update-env.ts script
+      cd "$PROJECT_ROOT"
+      ts-node scripts/update-env.ts
+      
+      echo -e "${GREEN}Environment files updated successfully.${NC}"
+    else
+      echo -e "${YELLOW}Environment updater script not found. Skipping environment update.${NC}"
+    fi
+  else
+    echo -e "${YELLOW}Node.js not found. Skipping environment update.${NC}"
   fi
 }
 
@@ -368,9 +434,30 @@ deploy_backend() {
     echo -e "${YELLOW}Installing main dependencies...${NC}"
     npm install --no-optional || true
     
-    # Install sharp separately with specific options
-    echo -e "${YELLOW}Installing sharp separately...${NC}"
-    npm install sharp --no-save --build-from-source || npm install sharp@0.32.6 --no-save || true
+    # Install sharp separately with multiple approaches
+    echo -e "${YELLOW}Installing sharp with multiple approaches...${NC}"
+    
+    # Approach 1: Try with prebuild-install
+    echo -e "${YELLOW}Approach 1: Using prebuild-install...${NC}"
+    npm install -g prebuild-install
+    prebuild-install -r sharp || true
+    
+    # Approach 2: Try with specific environment variables
+    echo -e "${YELLOW}Approach 2: Using specific environment variables...${NC}"
+    export SHARP_DIST_BASE_URL=https://sharp.pixelplumbing.com/vendor/
+    npm install sharp --no-save || true
+    
+    # Approach 3: Try with build from source
+    if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+      echo -e "${YELLOW}Approach 3: Building from source...${NC}"
+      npm install sharp --no-save --build-from-source || true
+    fi
+    
+    # Approach 4: Try with a specific version
+    if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+      echo -e "${YELLOW}Approach 4: Trying with a specific version...${NC}"
+      npm install sharp@0.32.6 --no-save || true
+    fi
     
     # Check if sharp installation failed
     if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
@@ -390,6 +477,8 @@ module.exports = {
   default: function() { return module.exports; }
 };
 EOF
+    else
+      echo -e "${GREEN}Sharp installed successfully.${NC}"
     fi
     
     # Install @discordjs/opus separately if needed
@@ -399,8 +488,21 @@ EOF
     fi
   fi
   
+  # Check if .env.example exists and copy to .env if needed
+  if [ ! -f .env ] && [ -f "$PROJECT_ROOT/.env.example" ]; then
+    echo -e "${YELLOW}Creating .env from .env.example...${NC}"
+    cp "$PROJECT_ROOT/.env.example" .env
+    
+    # Update environment variables if domain is provided
+    if [ ! -z "$DOMAIN_NAME" ]; then
+      # Updated to use path-based approach
+      sed -i "s|API_URL=.*|API_URL=https://${DOMAIN_NAME}/${BACKEND_PATH}|g" .env
+      sed -i "s|CORS_ORIGIN=.*|CORS_ORIGIN=https://${DOMAIN_NAME}|g" .env
+      sed -i "s|FRONTEND_URL=.*|FRONTEND_URL=https://${DOMAIN_NAME}|g" .env
+      sed -i "s|URL=.*|URL=https://${DOMAIN_NAME}/${BACKEND_PATH}|g" .env
+    fi
   # Check if .env.production exists and copy to .env if needed
-  if [ -f .env.production ] && [ ! -f .env ]; then
+  elif [ ! -f .env ] && [ -f .env.production ]; then
     echo -e "${YELLOW}Creating .env from .env.production...${NC}"
     cp .env.production .env
     
@@ -438,6 +540,28 @@ EOF
     echo -e "${YELLOW}Created basic .env file. You may need to add more configuration.${NC}"
   fi
   
+  # Check if Prisma schema exists
+  if [ ! -d "prisma" ]; then
+    echo -e "${RED}Error: Prisma schema directory not found.${NC}"
+    echo -e "${YELLOW}Creating Prisma directory structure...${NC}"
+    mkdir -p prisma/migrations
+    
+    # Create a basic schema.prisma file if it doesn't exist
+    if [ ! -f "prisma/schema.prisma" ]; then
+      echo -e "${YELLOW}Creating basic schema.prisma file...${NC}"
+      cat > prisma/schema.prisma << EOF
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+EOF
+    fi
+  fi
+  
   # Run database migrations
   echo -e "${YELLOW}Running database migrations...${NC}"
   npm run prisma:migrate || {
@@ -450,13 +574,60 @@ EOF
     }
   }
   
+  # Generate Prisma client
+  echo -e "${YELLOW}Generating Prisma client...${NC}"
+  
+  # Check if @prisma/client is installed
+  if [ ! -d "node_modules/@prisma" ]; then
+    echo -e "${YELLOW}@prisma/client not found. Installing...${NC}"
+    npm install @prisma/client prisma --save
+  fi
+  
+  npx prisma generate || {
+    echo -e "${RED}Failed to generate Prisma client. Retrying...${NC}"
+    sleep 5
+    npx prisma generate || {
+      echo -e "${RED}Failed to generate Prisma client again. This may cause build errors.${NC}"
+      echo -e "${YELLOW}You can try generating the Prisma client manually with:${NC}"
+      echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npx prisma generate${NC}"
+    }
+  }
+  
   # Build the application
   echo -e "${YELLOW}Building backend...${NC}"
-  npm run build
+  npm run build || {
+    echo -e "${RED}Build failed. This might be due to TypeScript errors.${NC}"
+    echo -e "${YELLOW}You can try fixing the errors and building manually:${NC}"
+    echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npm run build${NC}"
+    
+    # Continue deployment despite build errors if the user wants to
+    read -p "Do you want to continue deployment despite build errors? (y/n): " CONTINUE_DEPLOY
+    if [[ "$CONTINUE_DEPLOY" != "y" ]]; then
+      echo -e "${RED}Deployment aborted due to build errors.${NC}"
+      exit 1
+    fi
+    
+    echo -e "${YELLOW}Continuing deployment despite build errors...${NC}"
+  }
   
   # Start the application with PM2 if enabled
   if [ "$USE_PM2" = true ]; then
     echo -e "${YELLOW}Starting backend with PM2...${NC}"
+    
+    # Check if Prisma client is properly generated
+    if [ ! -d "node_modules/.prisma/client" ]; then
+      echo -e "${RED}Warning: Prisma client may not be properly generated.${NC}"
+      echo -e "${YELLOW}This might cause runtime errors. Consider regenerating the Prisma client:${NC}"
+      echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npx prisma generate${NC}"
+      
+      # Ask if user wants to continue
+      read -p "Do you want to continue starting the application? (y/n): " CONTINUE_START
+      if [[ "$CONTINUE_START" != "y" ]]; then
+        echo -e "${RED}Application startup aborted.${NC}"
+        return 1
+      fi
+    fi
+    
     pm2 delete miu-backend 2>/dev/null || true
     pm2 start dist/index.js --name miu-backend
     pm2 save
@@ -481,8 +652,20 @@ deploy_frontend() {
     npm install
   fi
   
+  # Check if .env.example exists and copy to .env.local if needed
+  if [ ! -f .env.local ] && [ -f "$PROJECT_ROOT/.env.example" ]; then
+    echo -e "${YELLOW}Creating .env.local from .env.example...${NC}"
+    cp "$PROJECT_ROOT/.env.example" .env.local
+    
+    # Update environment variables if domain is provided
+    if [ ! -z "$DOMAIN_NAME" ]; then
+      # Updated to use path-based approach
+      sed -i "s|NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=https://${DOMAIN_NAME}/${BACKEND_PATH}|g" .env.local
+      sed -i "s|NEXT_PUBLIC_URL=.*|NEXT_PUBLIC_URL=https://${DOMAIN_NAME}|g" .env.local
+      sed -i "s|NEXT_PUBLIC_DISCORD_REDIRECT_URI=.*|NEXT_PUBLIC_DISCORD_REDIRECT_URI=https://${DOMAIN_NAME}/auth/callback|g" .env.local
+    fi
   # Check if .env.production exists and copy to .env.local if needed
-  if [ -f .env.production ] && [ ! -f .env.local ]; then
+  elif [ ! -f .env.local ] && [ -f .env.production ]; then
     echo -e "${YELLOW}Creating .env.local from .env.production...${NC}"
     cp .env.production .env.local
     
@@ -625,6 +808,52 @@ EOF
   echo -e "${YELLOW}  @reboot $PROJECT_ROOT/start.sh${NC}"
 }
 
+# Function to update .env.example based on current .env
+update_env_example() {
+  echo -e "${BLUE}Updating .env.example file...${NC}"
+  
+  # Check if .env and .env.example exist
+  if [ -f "$PROJECT_ROOT/.env" ] && [ -f "$PROJECT_ROOT/.env.example" ]; then
+    echo -e "${YELLOW}Creating updated .env.example from .env...${NC}"
+    
+    # Create a temporary file
+    TEMP_FILE=$(mktemp)
+    
+    # Read .env.example to get structure and comments
+    cat "$PROJECT_ROOT/.env.example" > "$TEMP_FILE"
+    
+    # Update values from .env but keep structure and comments
+    while IFS='=' read -r key value; do
+      # Skip comments and empty lines
+      if [[ "$key" =~ ^#.*$ ]] || [[ -z "$key" ]]; then
+        continue
+      fi
+      
+      # Replace the value in .env.example
+      if grep -q "^$key=" "$TEMP_FILE"; then
+        # For sensitive values, use placeholders instead of actual values
+        if [[ "$key" == *"TOKEN"* ]] || [[ "$key" == *"SECRET"* ]] || [[ "$key" == *"PASSWORD"* ]] || [[ "$key" == *"KEY"* ]]; then
+          # Keep the example placeholder
+          continue
+        else
+          # Update with actual value
+          sed -i "s|^$key=.*|$key=$value|g" "$TEMP_FILE"
+        fi
+      fi
+    done < "$PROJECT_ROOT/.env"
+    
+    # Backup the original .env.example
+    cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env.example.bak"
+    
+    # Replace .env.example with the updated file
+    mv "$TEMP_FILE" "$PROJECT_ROOT/.env.example"
+    
+    echo -e "${GREEN}.env.example updated successfully. Original backed up to .env.example.bak${NC}"
+  else
+    echo -e "${YELLOW}Either .env or .env.example not found. Skipping update.${NC}"
+  fi
+}
+
 # Main deployment process
 echo -e "${BOLD}Starting MIU deployment...${NC}"
 
@@ -638,6 +867,9 @@ pull_repository
 
 # Set up Docker for database and Redis
 setup_docker_db
+
+# Update environment files
+update_env_files
 
 # Deploy backend if enabled
 if [ "$DEPLOY_BACKEND" = true ]; then
@@ -657,6 +889,9 @@ setup_ssl
 
 # Create startup script
 create_startup_script
+
+# Update .env.example based on current .env
+update_env_example
 
 # Final message
 echo -e "${BOLD}${GREEN}Deployment completed successfully!${NC}"
