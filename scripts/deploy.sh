@@ -164,7 +164,7 @@ install_system_dependencies() {
     sudo apt-get install -y certbot python3-certbot-nginx
   fi
   
-  # Check for dependencies required for building @discordjs/opus
+  # Check for dependencies required for building native modules
   echo -e "${YELLOW}Checking dependencies for building native modules...${NC}"
   
   # Check for build tools
@@ -257,6 +257,13 @@ install_system_dependencies() {
     echo -e "${YELLOW}  sudo apt-get install -y libopus-dev${NC}"
   fi
   
+  # Check for libvips (required for sharp)
+  if ! dpkg -l | grep -q libvips-dev; then
+    echo -e "${YELLOW}Warning: libvips development files not found. These are required for sharp image processing.${NC}"
+    echo -e "${YELLOW}You may need to install them manually:${NC}"
+    echo -e "${YELLOW}  sudo apt-get install -y libvips-dev${NC}"
+  fi
+  
   echo -e "${GREEN}System dependency check completed.${NC}"
 }
 
@@ -303,16 +310,55 @@ deploy_backend() {
   if [ "$INSTALL_DEPS" = true ]; then
     echo -e "${YELLOW}Installing backend dependencies...${NC}"
     
+    # Check if using pyenv and set up environment for native module builds
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import sys; print(sys.executable)" 2>/dev/null | grep -q ".pyenv"; then
+      echo -e "${YELLOW}Detected Python installed via pyenv. Setting up environment for native module builds...${NC}"
+      
+      # Check if system Python is available
+      if [ -f /usr/bin/python3 ]; then
+        echo -e "${YELLOW}Using system Python for native module builds...${NC}"
+        export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
+        
+        # Check if system Python has gyp
+        if ! /usr/bin/python3 -c "import gyp" 2>/dev/null; then
+          echo -e "${YELLOW}System Python does not have gyp. Attempting to install...${NC}"
+          sudo apt-get install -y python3-gyp || true
+        fi
+      else
+        echo -e "${YELLOW}No system Python found. Attempting to install gyp in pyenv environment...${NC}"
+        pip install gyp 2>/dev/null || pip install --break-system-packages gyp 2>/dev/null || true
+      fi
+      
+      # Install additional dependencies for sharp
+      echo -e "${YELLOW}Installing dependencies for sharp image processing...${NC}"
+      sudo apt-get install -y libvips-dev || true
+    fi
+    
     # First try to install all dependencies
     npm install || true
     
-    # Check if @discordjs/opus installation failed
+    # Check for failed native module installations
+    FAILED_MODULES=""
+    
+    # Check for @discordjs/opus
     if [ ! -d "node_modules/@discordjs/opus" ]; then
-      echo -e "${YELLOW}@discordjs/opus installation failed. This is likely due to missing build dependencies.${NC}"
+      FAILED_MODULES="$FAILED_MODULES @discordjs/opus"
+    fi
+    
+    # Check for sharp
+    if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+      FAILED_MODULES="$FAILED_MODULES sharp"
+    fi
+    
+    # Handle failed native module installations
+    if [ ! -z "$FAILED_MODULES" ]; then
+      echo -e "${YELLOW}Some native modules failed to install:${FAILED_MODULES}${NC}"
+      echo -e "${YELLOW}This is likely due to missing build dependencies.${NC}"
       echo -e "${YELLOW}Please ensure you have the following installed:${NC}"
       echo -e "${YELLOW}  - Python 3 with development headers (python3-dev)${NC}"
       echo -e "${YELLOW}  - Build tools (build-essential)${NC}"
-      echo -e "${YELLOW}  - libopus-dev${NC}"
+      echo -e "${YELLOW}  - libopus-dev (for @discordjs/opus)${NC}"
+      echo -e "${YELLOW}  - libvips-dev (for sharp)${NC}"
       echo -e "${YELLOW}  - ffmpeg${NC}"
       
       # Check if Python is installed via pyenv
@@ -361,24 +407,53 @@ deploy_backend() {
         export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
       fi
       
-      echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
-      
-      # Try to install with --build-from-source flag
-      echo -e "${YELLOW}Trying to build @discordjs/opus from source...${NC}"
-      npm install @discordjs/opus --no-save --build-from-source || true
-      
-      # If still failing, try with an alternative voice implementation
-      if [ ! -d "node_modules/@discordjs/opus" ]; then
-        echo -e "${YELLOW}Building from source failed. Using alternative voice implementation...${NC}"
-        # Install opusscript as a fallback (pure JS implementation, less efficient but more compatible)
-        npm install opusscript
+      # Try to fix @discordjs/opus installation
+      if [[ "$FAILED_MODULES" == *"@discordjs/opus"* ]]; then
+        echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
         
-        # Create a patch to use opusscript instead if needed
-        if [ -f "src/services/discord/voice.ts" ]; then
-          echo -e "${YELLOW}Patching voice service to use alternative implementation...${NC}"
-          # This is a simple patch that might need to be adjusted based on your actual code
-          sed -i 's/@discordjs\/opus/opusscript/g' src/services/discord/voice.ts
-          echo -e "${YELLOW}Note: Using opusscript instead of @discordjs/opus may result in lower voice quality${NC}"
+        # Try to install with --build-from-source flag
+        echo -e "${YELLOW}Trying to build @discordjs/opus from source...${NC}"
+        npm install @discordjs/opus --no-save --build-from-source || true
+        
+        # If still failing, try with an alternative voice implementation
+        if [ ! -d "node_modules/@discordjs/opus" ]; then
+          echo -e "${YELLOW}Building from source failed. Using alternative voice implementation...${NC}"
+          # Install opusscript as a fallback (pure JS implementation, less efficient but more compatible)
+          npm install opusscript
+          
+          # Create a patch to use opusscript instead if needed
+          if [ -f "src/services/discord/voice.ts" ]; then
+            echo -e "${YELLOW}Patching voice service to use alternative implementation...${NC}"
+            # This is a simple patch that might need to be adjusted based on your actual code
+            sed -i 's/@discordjs\/opus/opusscript/g' src/services/discord/voice.ts
+            echo -e "${YELLOW}Note: Using opusscript instead of @discordjs/opus may result in lower voice quality${NC}"
+          fi
+        fi
+      fi
+      
+      # Try to fix sharp installation
+      if [[ "$FAILED_MODULES" == *"sharp"* ]]; then
+        echo -e "${YELLOW}Attempting to fix sharp installation...${NC}"
+        
+        # Install dependencies for sharp
+        echo -e "${YELLOW}Installing dependencies for sharp...${NC}"
+        sudo apt-get install -y libvips-dev || true
+        
+        # Try to install with --build-from-source flag
+        echo -e "${YELLOW}Trying to build sharp from source...${NC}"
+        npm install sharp --no-save --build-from-source || true
+        
+        # If still failing, try with a specific version
+        if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+          echo -e "${YELLOW}Building from source failed. Trying with a specific version...${NC}"
+          npm install sharp@0.32.6 --no-save || true
+          
+          # If still failing, warn the user
+          if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+            echo -e "${RED}Warning: Failed to install sharp. Image processing functionality may be limited.${NC}"
+            echo -e "${YELLOW}You may need to manually install sharp after deployment:${NC}"
+            echo -e "${YELLOW}  cd $PROJECT_ROOT/backend && npm install sharp --build-from-source${NC}"
+          fi
         fi
       fi
     fi
