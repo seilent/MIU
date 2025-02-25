@@ -40,7 +40,6 @@ export default function Home() {
   // Track transitions with a delay to prevent UI flicker
   useEffect(() => {
     if (currentTrack) {
-      // If we have a current track, clear any pending timeout and show the player
       if (showHomeTimeout) {
         clearTimeout(showHomeTimeout);
         setShowHomeTimeout(null);
@@ -52,7 +51,8 @@ export default function Home() {
         // Store the transitioning track ID
         setTransitioningTrackId(previousTrack.youtubeId);
         
-        // Store the previous queue for animation
+        // Store the previous queue for animation, but only include the transitioning track
+        // and the current queue to ensure proper indexing
         setPreviousQueue([previousTrack, ...queue]);
         
         // Start queue animation
@@ -65,16 +65,14 @@ export default function Home() {
       // Update previous track
       setPreviousTrack(currentTrack);
     } else if (previousTrack && !showHomeTimeout) {
-      // If we had a track but now it's null, start a timeout before hiding the player
       const timeout = setTimeout(() => {
         setShouldShowPlayer(false);
         setShowHomeTimeout(null);
-      }, 5000); // 5 second delay before showing homescreen
+      }, 5000);
       
       setShowHomeTimeout(timeout);
     }
     
-    // Cleanup function to clear timeout on unmount
     return () => {
       if (showHomeTimeout) {
         clearTimeout(showHomeTimeout);
@@ -88,8 +86,12 @@ export default function Home() {
     
     // When all items have completed their animation
     if (queueAnimationCompleteCount.current >= previousQueue.length) {
-      setAnimatingQueue(false);
-      setTransitioningTrackId(null);
+      // Small delay before resetting animation state to ensure smooth transition
+      setTimeout(() => {
+        setAnimatingQueue(false);
+        setTransitioningTrackId(null);
+        setPreviousQueue([]);
+      }, 100);
     }
   };
 
@@ -252,7 +254,7 @@ export default function Home() {
             key={displayTrack.youtubeId} 
             track={displayTrack} 
             isPlaying={isPlaying} 
-            onPlayPause={handlePlayPause} 
+            onPlayPause={handlePlayPause}
           />
         </AnimatePresence>
 
@@ -272,76 +274,51 @@ export default function Home() {
           </div>
           <div className="relative">
             <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
-              {animatingQueue ? (
-                <div>
-                  {previousQueue.map((track, index) => (
+              <AnimatePresence mode="sync">
+                {animatingQueue ? (
+                  // During track transition, show previous queue with animations
+                  previousQueue.map((track, index) => {
+                    const isTransitioning = track.youtubeId === transitioningTrackId;
+                    // Adjust index to reflect new position in queue
+                    const adjustedIndex = isTransitioning ? index : index - 1;
+                    
+                    return (
+                      <AnimatedQueueItem
+                        key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                        track={track}
+                        index={adjustedIndex}
+                        isRemoving={isTransitioning}
+                        onAnimationComplete={handleQueueItemAnimationComplete}
+                      />
+                    );
+                  })
+                ) : displayQueue.length > 0 ? (
+                  // Normal queue display
+                  displayQueue.map((track, index) => (
                     <AnimatedQueueItem
                       key={`${track.youtubeId}-${track.requestedAt}-${index}`}
                       track={track}
                       index={index}
-                      isRemoving={track.youtubeId === transitioningTrackId}
-                      onAnimationComplete={handleQueueItemAnimationComplete}
+                      isRemoving={false}
                     />
-                  ))}
-                </div>
-              ) : displayQueue.length > 0 ? (
-                <div className="space-y-4">
-                  {displayQueue.map((track, index) => (
-                    <motion.div
-                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.3, delay: index * 0.05 }}
-                      className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
-                               hover:bg-white/10 transition-all duration-200 
-                               border border-white/5 hover:border-white/10
-                               relative group"
-                    >
-                      {/* Track content */}
-                      <div className="relative h-16 w-16 flex-shrink-0">
-                        <Image
-                          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
-                          alt={track.title}
-                          fill
-                          className="object-cover rounded-md"
-                          unoptimized={track.thumbnail.startsWith('http')}
-                        />
-                        {track.isAutoplay && (
-                          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
-                            Auto
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-white font-medium truncate">{track.title}</h3>
-                        <div className="flex items-center space-x-2 text-sm mt-1">
-                          <span className="text-white/30">by</span>
-                          <span className="text-white/50">{track.requestedBy.username}</span>
-                          {track.requestedBy.avatar && (
-                            <img
-                              src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
-                              alt={track.requestedBy.username}
-                              className="h-4 w-4 rounded-full opacity-50"
-                            />
-                          )}
-                        </div>
-                      </div>
-                      <div className="text-sm text-white/40">
-                        #{index + 1}
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              ) : (
-                <motion.div 
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.5 }}
-                  className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
-                >
-                  No tracks in queue
-                </motion.div>
-              )}
+                  ))
+                ) : (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ 
+                      duration: 0.5, 
+                      delay: 0.2,
+                      type: "spring",
+                      stiffness: 100,
+                      damping: 20
+                    }}
+                    className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+                  >
+                    No tracks in queue
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
             <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
               {history.length > 0 ? (
@@ -349,46 +326,83 @@ export default function Home() {
                   {history.map((track, index) => (
                     <motion.div
                       key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      layout="position"
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.3, delay: index * 0.05 }}
+                      transition={{ 
+                        type: "spring", 
+                        stiffness: 300, 
+                        damping: 25,
+                        delay: index * 0.05,
+                        layout: { duration: 0.3 }
+                      }}
                       className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
                                hover:bg-white/10 transition-all duration-200 
                                border border-white/5 hover:border-white/10
                                relative group"
                     >
-                      {/* Track content */}
+                      {/* Track thumbnail with loading animation */}
                       <div className="relative h-16 w-16 flex-shrink-0">
-                        <Image
-                          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
-                          alt={track.title}
-                          fill
-                          className="object-cover rounded-md"
-                          unoptimized={track.thumbnail.startsWith('http')}
-                        />
+                        <motion.div
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          transition={{ duration: 0.3 }}
+                        >
+                          <Image
+                            src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
+                            alt={track.title}
+                            fill
+                            className="object-cover rounded-md"
+                            unoptimized={track.thumbnail.startsWith('http')}
+                          />
+                        </motion.div>
                         {track.isAutoplay && (
-                          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
+                          <motion.div
+                            initial={{ scale: 0 }}
+                            animate={{ scale: 1 }}
+                            transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                            className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90"
+                          >
                             Auto
-                          </div>
+                          </motion.div>
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h3 className="text-white font-medium truncate">{track.title}</h3>
+                        <motion.h3 
+                          layout
+                          className="text-white font-medium truncate"
+                        >
+                          {track.title}
+                        </motion.h3>
                         <div className="flex items-center space-x-2 text-sm mt-1">
                           <span className="text-white/30">by</span>
-                          <span className="text-white/50">{track.requestedBy.username}</span>
+                          <motion.span 
+                            layout
+                            className="text-white/50"
+                          >
+                            {track.requestedBy.username}
+                          </motion.span>
                           {track.requestedBy.avatar && (
-                            <img
+                            <motion.img
+                              initial={{ scale: 0.8, opacity: 0 }}
+                              animate={{ scale: 1, opacity: 0.5 }}
                               src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
                               alt={track.requestedBy.username}
-                              className="h-4 w-4 rounded-full opacity-50"
+                              className="h-4 w-4 rounded-full"
                             />
                           )}
                         </div>
                       </div>
-                      <div className="text-sm text-white/40">
-                        {new Date(track.requestedAt).toLocaleDateString()}
-                      </div>
+                      <motion.div 
+                        layout
+                        className="text-sm text-white/40"
+                        whileHover={{ scale: 1.05, opacity: 1 }}
+                      >
+                        {new Date(track.requestedAt).toLocaleDateString([], { 
+                          hour: '2-digit', 
+                          minute: '2-digit' 
+                        })}
+                      </motion.div>
                     </motion.div>
                   ))}
                 </div>
@@ -455,7 +469,7 @@ export default function Home() {
           key={displayTrack.youtubeId} 
           track={displayTrack} 
           isPlaying={isPlaying} 
-          onPlayPause={handlePlayPause} 
+          onPlayPause={handlePlayPause}
         />
       </AnimatePresence>
 
@@ -475,76 +489,51 @@ export default function Home() {
         </div>
         <div className="relative">
           <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
-            {animatingQueue ? (
-              <div>
-                {previousQueue.map((track, index) => (
+            <AnimatePresence mode="sync">
+              {animatingQueue ? (
+                // During track transition, show previous queue with animations
+                previousQueue.map((track, index) => {
+                  const isTransitioning = track.youtubeId === transitioningTrackId;
+                  // Adjust index to reflect new position in queue
+                  const adjustedIndex = isTransitioning ? index : index - 1;
+                  
+                  return (
+                    <AnimatedQueueItem
+                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      track={track}
+                      index={adjustedIndex}
+                      isRemoving={isTransitioning}
+                      onAnimationComplete={handleQueueItemAnimationComplete}
+                    />
+                  );
+                })
+              ) : displayQueue.length > 0 ? (
+                // Normal queue display
+                displayQueue.map((track, index) => (
                   <AnimatedQueueItem
                     key={`${track.youtubeId}-${track.requestedAt}-${index}`}
                     track={track}
                     index={index}
-                    isRemoving={track.youtubeId === transitioningTrackId}
-                    onAnimationComplete={handleQueueItemAnimationComplete}
+                    isRemoving={false}
                   />
-                ))}
-              </div>
-            ) : displayQueue.length > 0 ? (
-              <div className="space-y-4">
-                {displayQueue.map((track, index) => (
-                  <motion.div
-                    key={`${track.youtubeId}-${track.requestedAt}-${index}`}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.05 }}
-                    className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
-                             hover:bg-white/10 transition-all duration-200 
-                             border border-white/5 hover:border-white/10
-                             relative group"
-                  >
-                    {/* Track content */}
-                    <div className="relative h-16 w-16 flex-shrink-0">
-                      <Image
-                        src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
-                        alt={track.title}
-                        fill
-                        className="object-cover rounded-md"
-                        unoptimized={track.thumbnail.startsWith('http')}
-                      />
-                      {track.isAutoplay && (
-                        <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
-                          Auto
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h3 className="text-white font-medium truncate">{track.title}</h3>
-                      <div className="flex items-center space-x-2 text-sm mt-1">
-                        <span className="text-white/30">by</span>
-                        <span className="text-white/50">{track.requestedBy.username}</span>
-                        {track.requestedBy.avatar && (
-                          <img
-                            src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
-                            alt={track.requestedBy.username}
-                            className="h-4 w-4 rounded-full opacity-50"
-                          />
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-sm text-white/40">
-                      #{index + 1}
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
-            ) : (
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ duration: 0.5 }}
-                className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
-              >
-                No tracks in queue
-              </motion.div>
-            )}
+                ))
+              ) : (
+                <motion.div 
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ 
+                    duration: 0.5, 
+                    delay: 0.2,
+                    type: "spring",
+                    stiffness: 100,
+                    damping: 20
+                  }}
+                  className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
+                >
+                  No tracks in queue
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
           <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
             {history.length > 0 ? (
@@ -552,46 +541,83 @@ export default function Home() {
                 {history.map((track, index) => (
                   <motion.div
                     key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                    layout="position"
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.05 }}
+                    transition={{ 
+                      type: "spring", 
+                      stiffness: 300, 
+                      damping: 25,
+                      delay: index * 0.05,
+                      layout: { duration: 0.3 }
+                    }}
                     className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 
                              hover:bg-white/10 transition-all duration-200 
                              border border-white/5 hover:border-white/10
                              relative group"
                   >
-                    {/* Track content */}
+                    {/* Track thumbnail with loading animation */}
                     <div className="relative h-16 w-16 flex-shrink-0">
-                      <Image
-                        src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
-                        alt={track.title}
-                        fill
-                        className="object-cover rounded-md"
-                        unoptimized={track.thumbnail.startsWith('http')}
-                      />
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        <Image
+                          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
+                          alt={track.title}
+                          fill
+                          className="object-cover rounded-md"
+                          unoptimized={track.thumbnail.startsWith('http')}
+                        />
+                      </motion.div>
                       {track.isAutoplay && (
-                        <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
+                        <motion.div
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1 }}
+                          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                          className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90"
+                        >
                           Auto
-                        </div>
+                        </motion.div>
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 className="text-white font-medium truncate">{track.title}</h3>
+                      <motion.h3 
+                        layout
+                        className="text-white font-medium truncate"
+                      >
+                        {track.title}
+                      </motion.h3>
                       <div className="flex items-center space-x-2 text-sm mt-1">
                         <span className="text-white/30">by</span>
-                        <span className="text-white/50">{track.requestedBy.username}</span>
+                        <motion.span 
+                          layout
+                          className="text-white/50"
+                        >
+                          {track.requestedBy.username}
+                        </motion.span>
                         {track.requestedBy.avatar && (
-                          <img
+                          <motion.img
+                            initial={{ scale: 0.8, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 0.5 }}
                             src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
                             alt={track.requestedBy.username}
-                            className="h-4 w-4 rounded-full opacity-50"
+                            className="h-4 w-4 rounded-full"
                           />
                         )}
                       </div>
                     </div>
-                    <div className="text-sm text-white/40">
-                      {new Date(track.requestedAt).toLocaleDateString()}
-                    </div>
+                    <motion.div 
+                      layout
+                      className="text-sm text-white/40"
+                      whileHover={{ scale: 1.05, opacity: 1 }}
+                    >
+                      {new Date(track.requestedAt).toLocaleDateString([], { 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                      })}
+                    </motion.div>
                   </motion.div>
                 ))}
               </div>

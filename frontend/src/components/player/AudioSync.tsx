@@ -59,10 +59,8 @@ export default function AudioSync() {
         if (!res.ok) throw new Error('Failed to fetch position');
         const data = await res.json();
         
-        // Calculate current position based on server time and elapsed time
-        const elapsed = (Date.now() - startTimeRef.current) / 1000;
-        const currentPosition = data.position + elapsed;
-        
+        // Use audio's currentTime directly instead of calculating elapsed time
+        const currentPosition = audioRef.current?.currentTime || 0;
         setPosition(Math.min(currentPosition, data.duration));
       } catch (error) {
         console.error('Error updating position:', error);
@@ -79,21 +77,39 @@ export default function AudioSync() {
 
     const setupStream = async () => {
       try {
-        // Get initial position
+        loadingRef.current = true;
         const res = await fetch('/api/music/position');
         if (!res.ok) throw new Error('Failed to fetch position');
         const data = await res.json();
         
-        // Update tracking
         startTimeRef.current = Date.now();
         trackIdRef.current = data.trackId;
         
-        // Start new stream
         const audio = audioRef.current;
         if (!audio) return;
-        
+
+        // Create a promise to handle metadata loading
+        const metadataLoaded = new Promise<void>((resolve) => {
+          const handleMetadata = () => {
+            audio.currentTime = data.position;
+            resolve();
+          };
+
+          if (audio.readyState >= 1) {
+            // Metadata is already loaded
+            handleMetadata();
+          } else {
+            // Wait for metadata to load
+            audio.addEventListener('loadedmetadata', handleMetadata, { once: true });
+          }
+        });
+
+        // Set new source
         audio.src = `/api/music/stream?ts=${Date.now()}`;
         
+        // Wait for metadata to load and position to be set
+        await metadataLoaded;
+
         if (status === 'playing') {
           await audio.play();
         }
@@ -102,10 +118,11 @@ export default function AudioSync() {
       } catch (error) {
         console.error('Stream setup error:', error);
         setStreamError(true);
+      } finally {
+        loadingRef.current = false;
       }
     };
 
-    // If track changed, setup new stream
     if (currentTrack.youtubeId !== trackIdRef.current) {
       setupStream();
     }
@@ -113,7 +130,7 @@ export default function AudioSync() {
 
   // Play/pause effect
   useEffect(() => {
-    if (!audioRef.current) return;
+    if (!audioRef.current || loadingRef.current) return;
 
     const audio = audioRef.current;
     
@@ -126,6 +143,19 @@ export default function AudioSync() {
       audio.pause();
     }
   }, [status, setPlayerState]);
+
+  // Add timeupdate handler to sync position with audio element
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleTimeUpdate = () => {
+      setPosition(audio.currentTime);
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    return () => audio.removeEventListener('timeupdate', handleTimeUpdate);
+  }, [setPosition]);
 
   return (
     <audio 
