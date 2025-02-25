@@ -164,7 +164,7 @@ class YouTubeKeyManager {
 
     // If no immediately available keys, find the one that will reset soonest
     let earliestReset = Infinity;
-    let bestKey = null;
+    let bestKey: string | null = null;
 
     this.keys.forEach(key => {
       const usage = this.keyUsage.get(key)!;
@@ -481,11 +481,12 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
   }
 }
 
-export async function getYoutubeId(query: string): Promise<string | undefined> {
+export async function getYoutubeId(query: string): Promise<{ videoId: string | undefined; isMusicUrl: boolean }> {
   try {
     // Check if it's a direct YouTube URL
     if (query.includes('youtube.com/') || query.includes('youtu.be/') || query.includes('music.youtube.com/')) {
       let videoId: string | null = null;
+      let isMusicUrl = false;
       
       // Handle youtu.be format
       if (query.includes('youtu.be/')) {
@@ -493,12 +494,11 @@ export async function getYoutubeId(query: string): Promise<string | undefined> {
       } else {
         try {
           const url = new URL(query);
+          // Check if it's a YouTube Music URL
+          isMusicUrl = url.hostname === 'music.youtube.com';
+          
           // Handle watch URLs
           if (url.pathname.includes('/watch')) {
-            videoId = url.searchParams.get('v');
-          }
-          // Handle music.youtube.com URLs
-          else if (url.hostname === 'music.youtube.com' && url.pathname.includes('/watch')) {
             videoId = url.searchParams.get('v');
           }
           // Handle embed URLs
@@ -511,16 +511,16 @@ export async function getYoutubeId(query: string): Promise<string | undefined> {
           }
         } catch (error) {
           console.error('Failed to parse YouTube URL:', error);
-          return undefined;
+          return { videoId: undefined, isMusicUrl: false };
         }
       }
 
       if (!videoId || !videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
         console.error('Invalid YouTube video ID format');
-        return undefined;
+        return { videoId: undefined, isMusicUrl: false };
       }
 
-      return videoId;
+      return { videoId, isMusicUrl };
     }
 
     // If not a URL, search YouTube
@@ -534,13 +534,10 @@ export async function getYoutubeId(query: string): Promise<string | undefined> {
     });
 
     const videoId = response.data.items?.[0]?.id?.videoId;
-    if (!videoId) return undefined;
-    return videoId;
+    return { videoId: videoId || undefined, isMusicUrl: false };
   } catch (error) {
-    const status = (error as any)?.code || (error as any)?.status;
-    const reason = (error as any)?.errors?.[0]?.reason;
-    console.error(`Failed to get YouTube ID: ${status}${reason ? ` (${reason})` : ''}`);
-    return undefined;
+    console.error('Failed to get YouTube ID:', error);
+    return { videoId: undefined, isMusicUrl: false };
   }
 }
 
@@ -708,7 +705,7 @@ async function getBestThumbnail(youtubeId: string): Promise<string> {
   return `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`;
 }
 
-export async function getYoutubeInfo(videoId: string): Promise<TrackInfo> {
+export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = false): Promise<TrackInfo> {
   try {
     console.log(`=== Starting YouTube info fetch for ${videoId} ===`);
     
@@ -720,6 +717,14 @@ export async function getYoutubeInfo(videoId: string): Promise<TrackInfo> {
     // If we have the track and it has valid duration, check if thumbnail exists
     if (track && track.duration > 0) {
       console.log('Found valid cached track info');
+      
+      // Update isMusicUrl if needed
+      if (isMusicUrl && !track.isMusicUrl) {
+        await prisma.track.update({
+          where: { youtubeId: videoId },
+          data: { isMusicUrl: true }
+        });
+      }
       
       // Verify thumbnail exists
       const thumbnailCache = await prisma.thumbnailCache.findUnique({
@@ -804,13 +809,15 @@ export async function getYoutubeInfo(videoId: string): Promise<TrackInfo> {
         title,
         duration: durationInSeconds,
         thumbnail: apiThumbnailUrl,
+        isMusicUrl,
         updatedAt: new Date()
       },
       create: {
         youtubeId: videoId,
         title,
         duration: durationInSeconds,
-        thumbnail: apiThumbnailUrl
+        thumbnail: apiThumbnailUrl,
+        isMusicUrl
       }
     });
 
@@ -1175,34 +1182,30 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
     // Get API key
     const apiKey = await getKeyManager().getCurrentKey('search.list');
     
-    // Use the YouTube API to get related videos
-    // @ts-ignore - Ignore TypeScript errors for the YouTube API
+    // Use the YouTube API to get related videos by searching with the video ID
     const response = await youtube.search.list({
       key: apiKey,
       part: ['id', 'snippet'],
-      relatedToVideoId: seedTrackId,
+      q: seedTrackId, // Search using the video ID
       type: ['video'],
       maxResults: 25,
-      videoCategoryId: '10', // Music category
       regionCode: 'JP', // Prioritize Japanese content
       relevanceLanguage: 'ja' // Prefer Japanese results
     });
     
-    if (!response.data.items || response.data.items.length === 0) {
+    if (!response.data?.items || response.data.items.length === 0) {
       console.log('No related videos found, trying without region/language restrictions');
       
       // Try again without region/language restrictions
-      // @ts-ignore - Ignore TypeScript errors for the YouTube API
       const fallbackResponse = await youtube.search.list({
         key: apiKey,
         part: ['id', 'snippet'],
-        relatedToVideoId: seedTrackId,
+        q: seedTrackId,
         type: ['video'],
-        maxResults: 25,
-        videoCategoryId: '10' // Music category
+        maxResults: 25
       });
       
-      if (!fallbackResponse.data.items || fallbackResponse.data.items.length === 0) {
+      if (!fallbackResponse.data?.items || fallbackResponse.data.items.length === 0) {
         return [];
       }
       
@@ -1242,7 +1245,7 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
       return [];
     }
     
-    // @ts-ignore - Ignore TypeScript errors for the YouTube API
+    // Get video details
     const videoDetails = await youtube.videos.list({
       key: apiKey,
       part: ['contentDetails'],
@@ -1250,9 +1253,9 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
     });
     
     // Filter by duration (exclude videos longer than MAX_DURATION)
-    const MAX_DURATION = 420; // 7 minutes
+    const MAX_DURATION = 420;
     
-    const validVideos = videoDetails.data.items?.filter(video => {
+    const validVideos = videoDetails.data?.items?.filter(video => {
       const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
       return duration > 0 && duration <= MAX_DURATION;
     }) || [];

@@ -212,18 +212,40 @@ export default function Home() {
         }
 
         const data = await response.json();
+        
+        // Initialize audio context if needed (for mobile)
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        const audioContext = new AudioContext();
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        
+        // Set current time and attempt playback
         audio.currentTime = data.position;
         
-        // Now play from the synced position
-        await audio.play().catch(err => {
-          // Failed to play audio
-        });
+        // Use a user gesture to trigger play (important for mobile)
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          try {
+            await playPromise;
+            // Playback started successfully
+          } catch (err) {
+            console.error('Playback failed:', err);
+            // Handle specific mobile errors
+            if (err.name === 'NotAllowedError') {
+              // User interaction required - show UI feedback
+              console.log('Playback requires user interaction');
+            }
+          }
+        }
       } catch (err) {
-        // Failed to sync position
+        console.error('Play error:', err);
         // Still try to play even if sync fails
-        await audio.play().catch(err => {
-          // Failed to play audio
-        });
+        try {
+          await audio.play();
+        } catch (playErr) {
+          console.error('Fallback play failed:', playErr);
+        }
       }
     } else {
       audio.pause();

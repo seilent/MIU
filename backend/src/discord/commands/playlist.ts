@@ -196,6 +196,11 @@ async function togglePlaylist(interaction: ChatInputCommandInteraction) {
     });
     // Reset the played tracks in the player when activating a new playlist
     interaction.client.player.resetAutoplayTracking();
+    // Set this as the current playlist in the player
+    await interaction.client.player.setCurrentPlaylist(playlist.id);
+  } else {
+    // If we're deactivating the playlist, clear it from the player
+    await interaction.client.player.setCurrentPlaylist(undefined);
   }
 
   const updatedPlaylist = await prisma.defaultPlaylist.update({
@@ -287,6 +292,9 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
     });
     let nextPosition = (lastTrack?.position ?? 0) + 1;
 
+    // Check if it's a YouTube Music URL
+    const isMusicUrl = url.includes('music.youtube.com');
+
     // Process videos in batches of 5
     for (let i = 0; i < videoIds.length; i += 5) {
       const batch = videoIds.slice(i, i + 5);
@@ -337,7 +345,8 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
                 youtubeId: videoId,
                 title: videoId, // Temporary title, will be updated by queue
                 thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
-                duration: 0 // Will be updated by queue
+                duration: 0, // Will be updated by queue
+                isMusicUrl: isMusicUrl // Set flag for YouTube Music URLs
               },
               update: {} // No update needed
             });
@@ -372,7 +381,7 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
     }
 
     await interaction.editReply({
-      content: `Finished adding tracks to playlist "${playlistName}".\nAdded: ${addedCount}\nSkipped: ${skippedCount}\nErrors: ${errorCount}`
+      content: `Finished adding tracks to playlist "${playlistName}".\nAdded: ${addedCount}\nSkipped: ${skippedCount}\nErrors: ${errorCount}${isMusicUrl ? '\nNote: YouTube Music tracks will be resolved when played.' : ''}`
     });
   } catch (error) {
     console.error('Error in handleAdd:', error);

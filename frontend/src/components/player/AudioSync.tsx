@@ -31,16 +31,61 @@ export default function AudioSync() {
   useEffect(() => {
     if (!audioRef.current) return;
     
-    if (globalAudioInstance) {
-      // Sync the current audio element with the global instance
-      audioRef.current.src = globalAudioInstance.src;
-      audioRef.current.currentTime = globalAudioInstance.currentTime;
-      audioRef.current.volume = globalAudioInstance.volume;
-    } else {
-      globalAudioInstance = audioRef.current;
-    }
+    const initAudio = async () => {
+      try {
+        // Initialize audio context first
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        const audioContext = new AudioContext();
+        
+        // Resume audio context if suspended (important for iOS)
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        
+        // Configure audio element for mobile
+        const audio = audioRef.current;
+        if (!audio) return;
+
+        audio.preload = 'metadata';
+        audio.setAttribute('playsinline', 'true');
+        audio.setAttribute('webkit-playsinline', 'true');
+        audio.setAttribute('x-webkit-airplay', 'allow');
+        
+        // Set initial volume
+        audio.volume = usePlayerStore.getState().volume;
+        
+        if (globalAudioInstance) {
+          // Sync with existing instance
+          audio.src = globalAudioInstance.src;
+          audio.currentTime = globalAudioInstance.currentTime;
+          audio.volume = globalAudioInstance.volume;
+        } else {
+          globalAudioInstance = audio;
+        }
+        
+        // Add error handler with detailed logging
+        audio.addEventListener('error', (e) => {
+          const target = e.target as HTMLAudioElement;
+          const error = target?.error;
+          console.error('Audio error:', {
+            code: error?.code,
+            message: error?.message,
+            state: audioContext.state,
+            readyState: target.readyState,
+            networkState: target.networkState,
+            src: target.src
+          });
+          setStreamError(true);
+        });
+      } catch (error) {
+        console.error('Audio initialization error:', error);
+        setStreamError(true);
+      }
+    };
     
+    initAudio();
     mountedRef.current = true;
+    
     return () => {
       mountedRef.current = false;
       if (globalAudioInstance === audioRef.current) {
@@ -71,7 +116,7 @@ export default function AudioSync() {
     return () => clearInterval(intervalId);
   }, [status, setPosition]);
 
-  // Track change effect
+  // Track change effect with improved error handling
   useEffect(() => {
     if (!currentTrack || !audioRef.current) return;
 
@@ -88,33 +133,55 @@ export default function AudioSync() {
         const audio = audioRef.current;
         if (!audio) return;
 
+        // Reset any previous errors
+        setStreamError(false);
+
         // Create a promise to handle metadata loading
-        const metadataLoaded = new Promise<void>((resolve) => {
+        const metadataLoaded = new Promise<void>((resolve, reject) => {
           const handleMetadata = () => {
-            audio.currentTime = data.position;
-            resolve();
+            try {
+              audio.currentTime = data.position;
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          };
+
+          const handleError = (error: Event) => {
+            reject(new Error('Metadata loading failed'));
           };
 
           if (audio.readyState >= 1) {
-            // Metadata is already loaded
             handleMetadata();
           } else {
-            // Wait for metadata to load
             audio.addEventListener('loadedmetadata', handleMetadata, { once: true });
+            audio.addEventListener('error', handleError, { once: true });
           }
         });
 
-        // Set new source
-        audio.src = `/api/music/stream?ts=${Date.now()}`;
+        // Set new source with cache-busting
+        const streamUrl = `/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
+        audio.src = streamUrl;
         
-        // Wait for metadata to load and position to be set
-        await metadataLoaded;
+        try {
+          // Wait for metadata to load and position to be set
+          await metadataLoaded;
 
-        if (status === 'playing') {
-          await audio.play();
+          if (status === 'playing') {
+            // Ensure audio context is resumed before playing
+            const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+            const audioContext = new AudioContext();
+            if (audioContext.state === 'suspended') {
+              await audioContext.resume();
+            }
+            
+            await audio.play();
+          }
+        } catch (error) {
+          console.error('Playback setup error:', error);
+          setStreamError(true);
+          throw error;
         }
-        
-        setStreamError(false);
       } catch (error) {
         console.error('Stream setup error:', error);
         setStreamError(true);
@@ -161,6 +228,9 @@ export default function AudioSync() {
     <audio 
       ref={audioRef}
       onError={() => setStreamError(true)}
+      playsInline
+      webkit-playsinline="true"
+      preload="metadata"
     />
   );
 } 

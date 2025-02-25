@@ -40,6 +40,8 @@ enum RequestStatus {
 
 model Track {
   youtubeId     String    @id
+  isMusicUrl    Boolean   @default(false)
+  resolvedYtId  String?
   title         String
   thumbnail     String
   duration      Int

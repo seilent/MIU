@@ -16,9 +16,9 @@ export async function play(interaction: ChatInputCommandInteraction) {
     }
 
     const query = interaction.options.getString('query', true);
-    const youtubeId = await getYoutubeId(query);
+    const { videoId, isMusicUrl } = await getYoutubeId(query);
 
-    if (!youtubeId) {
+    if (!videoId) {
       await interaction.reply('Could not find a valid YouTube video.');
       return;
     }
@@ -33,19 +33,20 @@ export async function play(interaction: ChatInputCommandInteraction) {
 
       const track = await interaction.client.player.play(
         member.voice,
-        youtubeId,
+        videoId,
         member.id,
         {
           username: member.user.username,
           discriminator: member.user.discriminator || '0',
           avatar: member.user.avatar || null
-        }
+        },
+        isMusicUrl
       );
 
       // Convert cached thumbnail path to YouTube URL if needed
       const thumbnailUrl = track.thumbnail?.includes('/api/albumart/')
-        ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`
-        : track.thumbnail || `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`;
+        ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+        : track.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
       const queuePosition = track.queuePosition ? ` (#${track.queuePosition} in queue)` : '';
       const playingNext = track.willPlayNext ? ' - Playing next!' : '';

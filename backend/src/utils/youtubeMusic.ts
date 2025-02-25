@@ -3,9 +3,13 @@ import { prisma } from '../db.js';
 import fs from 'fs';
 import path from 'path';
 import type { SearchResult } from './types.js';
+import { google } from 'googleapis';
+import { getYoutubeInfo, youtube } from './youtube.js';
+import fetch from 'node-fetch';
+import execa from 'execa';
 
 // API base URL for thumbnails
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3001';
+const API_BASE_URL = process.env.API_BASE_URL;
 
 // Cache directory configuration
 const CACHE_DIR = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
@@ -344,5 +348,364 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
   } catch (error) {
     console.error('YouTube Music recommendations failed:', error);
     return [];
+  }
+}
+
+// Function to check if a URL is a YouTube Music URL
+export function isYoutubeMusicUrl(url: string): boolean {
+  return url.includes('music.youtube.com');
+}
+
+// Function to resolve a YouTube Music ID to a regular YouTube ID
+export async function resolveYouTubeMusicId(musicId: string): Promise<string | null> {
+  try {
+    console.log('\n=== Starting YouTube Music ID resolution ===');
+    
+    // First try oEmbed to check if the video is directly available
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${musicId}&format=json`;
+    const response = await fetch(oembedUrl);
+    
+    if (response.ok) {
+      // Get oEmbed data for potential fallback search
+      const oembedData = await response.json();
+      const channelId = oembedData.author_url?.split('/channel/')?.[1];
+      
+      // Try verifying video availability first
+      try {
+        // First verify with yt-dlp that the video is actually available
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        await execa(ytdlpPath, [
+          musicId,
+          '--no-download',
+          '--no-warnings',
+          '--quiet'
+        ]);
+        
+        // Only if yt-dlp check passes, try getting video info
+        try {
+          const info = await getYoutubeInfo(musicId);
+          if (info) {
+            // Update track entry to mark it as a music URL
+            await prisma.track.update({
+              where: { youtubeId: musicId },
+              data: { isMusicUrl: true }
+            });
+            
+            console.log('✓ Original video is available');
+            return musicId;
+          }
+        } catch (infoError) {
+          console.log('✗ Failed to get video info');
+        }
+      } catch (error) {
+        // If video is not available but we have oEmbed data, try finding alternative video
+        if (oembedData.title && channelId) {
+          const alternativeId = await findAlternativeVideoId(oembedData.title, channelId);
+          if (alternativeId) {
+            // Create/update the original track entry with resolved ID
+            await prisma.track.upsert({
+              where: { youtubeId: musicId },
+              update: {
+                isMusicUrl: true,
+                resolvedYtId: alternativeId,
+                isActive: true
+              },
+              create: {
+                youtubeId: musicId,
+                title: oembedData.title,
+                isMusicUrl: true,
+                resolvedYtId: alternativeId,
+                duration: 0, // Will be updated when playing
+                thumbnail: oembedData.thumbnail_url || '',
+                isActive: true
+              }
+            });
+            return alternativeId;
+          }
+        }
+      }
+    }
+    
+    // Continue with existing fallback logic...
+    const musicUrl = `https://music.youtube.com/watch?v=${musicId}`;
+    const musicResponse = await fetch(musicUrl);
+    
+    if (!musicResponse.ok) return null;
+
+    const html = await musicResponse.text();
+    
+    // Extract title for potential search
+    const titleMatch = html.match(/"title":"([^"]+)"/);
+    if (!titleMatch) return null;
+    
+    const title = titleMatch[1];
+    
+    // Try to extract the actual YouTube video ID from the YouTube Music page
+    const videoIdMatch = html.match(/"videoId":"([^"]{11})"/);
+    if (videoIdMatch && videoIdMatch[1] !== musicId) {
+      const extractedVideoId = videoIdMatch[1];
+      
+      // Verify this ID works
+      try {
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        await execa(ytdlpPath, [
+          extractedVideoId,
+          '--no-download',
+          '--no-warnings',
+          '--quiet'
+        ]);
+        
+        // Create/update the original track entry with resolved ID
+        await prisma.track.upsert({
+          where: { youtubeId: musicId },
+          update: {
+            isMusicUrl: true,
+            resolvedYtId: extractedVideoId,
+            isActive: true
+          },
+          create: {
+            youtubeId: musicId,
+            title,
+            isMusicUrl: true,
+            resolvedYtId: extractedVideoId,
+            duration: 0,
+            thumbnail: '',
+            isActive: true
+          }
+        });
+        
+        console.log('✓ Found alternative video from music page');
+        return extractedVideoId;
+      } catch (error) {
+        // Continue to YouTube search if verification fails
+      }
+    }
+    
+    // If we couldn't extract a valid ID, search for the track on regular YouTube
+    try {
+      const youtubeApi = google.youtube('v3');
+      const apiKey = await youtube.keyManager().getCurrentKey();
+      const searchResponse = await youtubeApi.search.list({
+        key: apiKey,
+        part: ['snippet'],
+        q: title,
+        type: ['video'],
+        maxResults: 5
+      });
+
+      const videos = searchResponse.data.items;
+      if (!videos || videos.length === 0) return null;
+
+      // Get the first result's video ID
+      const regularYoutubeId = videos[0].id?.videoId;
+      if (!regularYoutubeId) return null;
+
+      // Verify the found video is available
+      try {
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        await execa(ytdlpPath, [
+          regularYoutubeId,
+          '--no-download',
+          '--no-warnings',
+          '--quiet'
+        ]);
+        
+        // Create/update the original track entry with resolved ID
+        await prisma.track.upsert({
+          where: { youtubeId: musicId },
+          update: {
+            isMusicUrl: true,
+            resolvedYtId: regularYoutubeId,
+            isActive: true
+          },
+          create: {
+            youtubeId: musicId,
+            title,
+            isMusicUrl: true,
+            resolvedYtId: regularYoutubeId,
+            duration: 0,
+            thumbnail: '',
+            isActive: true
+          }
+        });
+        
+        console.log('✓ Found alternative video from search');
+        return regularYoutubeId;
+      } catch (error) {
+        return null;
+      }
+    } catch (error) {
+      return null;
+    }
+
+  } catch (error) {
+    console.error('Error during YouTube Music ID resolution:', error);
+    return null;
+  }
+}
+
+// Function to calculate similarity between two titles
+function calculateTitleSimilarity(title1: string, title2: string): number {
+  console.log('\nCalculating title similarity:');
+  
+  // Clean both titles
+  const clean1 = cleanTitle(title1);
+  const clean2 = cleanTitle(title2);
+  
+  console.log(`Cleaned title 1: "${clean1}"`);
+  console.log(`Cleaned title 2: "${clean2}"`);
+  
+  // If either title is empty after cleaning, they're not similar
+  if (!clean1 || !clean2) {
+    console.log('One or both titles are empty after cleaning');
+    return 0;
+  }
+  
+  // Direct match after cleaning
+  if (clean1 === clean2) {
+    console.log('Exact match after cleaning');
+    return 1;
+  }
+  
+  // Check if one title contains the other
+  if (clean1.includes(clean2) || clean2.includes(clean1)) {
+    console.log('One title contains the other');
+    return 0.9;
+  }
+  
+  // Split into words and check overlap
+  const words1 = clean1.split(/\s+/);
+  const words2 = clean2.split(/\s+/);
+  
+  console.log(`Title 1 words: [${words1.join(', ')}]`);
+  console.log(`Title 2 words: [${words2.join(', ')}]`);
+  
+  // If one title has only one word, require exact match
+  if (words1.length === 1 || words2.length === 1) {
+    console.log('One title has only one word, requiring exact match');
+    return clean1 === clean2 ? 1 : 0;
+  }
+  
+  // Count matching words
+  const matchingWords = words1.filter(word => 
+    words2.some(w2 => {
+      const exactMatch = w2 === word;
+      const partialMatch = word.length > 2 && w2.includes(word) || 
+                          w2.length > 2 && word.includes(w2);
+      if (exactMatch) console.log(`Exact word match: "${word}"`);
+      if (partialMatch) console.log(`Partial word match: "${word}" ~ "${w2}"`);
+      return exactMatch || partialMatch;
+    })
+  );
+  
+  // Calculate similarity score
+  const similarityScore = matchingWords.length / Math.max(words1.length, words2.length);
+  console.log(`Matching words: [${matchingWords.join(', ')}]`);
+  console.log(`Similarity score: ${similarityScore.toFixed(3)} (${matchingWords.length} matches / ${Math.max(words1.length, words2.length)} max words)`);
+  
+  return similarityScore;
+}
+
+// Helper function to clean title for comparison
+function cleanTitle(title: string): string {
+  return title
+    .replace(/[\(\[\{].*?[\)\]\}]/g, '') // Remove content in brackets
+    .replace(/official|video|music|audio|lyrics|hd|4k/gi, '') // Remove common video indicators
+    .replace(/[^\w\s]/g, '') // Remove special characters
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim();
+}
+
+/**
+ * Search for alternative video ID using title and channel info
+ * @param title The title from oEmbed
+ * @param channelId The channel ID from oEmbed
+ * @returns The alternative video ID if found, null otherwise
+ */
+async function findAlternativeVideoId(title: string, channelId: string): Promise<string | null> {
+  try {
+    console.log(`\nSearching for alternative video from channel: ${channelId}`);
+    
+    const youtubeApi = google.youtube('v3');
+    const apiKey = await youtube.keyManager().getCurrentKey();
+    
+    // Search for videos with the exact title from the same channel
+    const searchResponse = await youtubeApi.search.list({
+      key: apiKey,
+      part: ['id', 'snippet'],
+      q: title,
+      type: ['video'],
+      channelId: channelId,
+      maxResults: 5
+    });
+
+    const videos = searchResponse.data.items;
+    if (!videos || videos.length === 0) {
+      console.log('✗ No videos found from the same channel');
+      return null;
+    }
+
+    // Get the first result from the same channel that's available
+    for (const video of videos) {
+      const videoId = video.id?.videoId;
+      if (!videoId) continue;
+
+      const foundTitle = video.snippet?.title || '';
+      
+      // Verify the video is accessible
+      try {
+        // First verify with yt-dlp that the video is actually available
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        await execa(ytdlpPath, [
+          videoId,
+          '--no-download',
+          '--no-warnings',
+          '--quiet'
+        ]);
+        
+        // Get video info from YouTube API to create track entry
+        const info = await getYoutubeInfo(videoId);
+        if (!info) continue;
+
+        // Get best quality thumbnail URL
+        const thumbnails = video.snippet?.thumbnails || {};
+        const bestThumbnail = thumbnails.maxres?.url || 
+                            thumbnails.high?.url || 
+                            thumbnails.medium?.url || 
+                            thumbnails.default?.url;
+
+        if (bestThumbnail) {
+          await downloadAndCacheThumbnail(videoId, bestThumbnail);
+        }
+
+        // Create track entry for the alternative video
+        await prisma.track.upsert({
+          where: { youtubeId: videoId },
+          update: {
+            title: info.title,
+            duration: info.duration,
+            thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
+            updatedAt: new Date()
+          },
+          create: {
+            youtubeId: videoId,
+            title: info.title,
+            duration: info.duration,
+            thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`
+          }
+        });
+        
+        console.log(`✓ Found alternative video: ${foundTitle}`);
+        return videoId;
+      } catch (error) {
+        continue;
+      }
+    }
+
+    console.log('✗ No available alternative video found');
+    return null;
+  } catch (error) {
+    console.error('Error searching for alternative video:', error);
+    return null;
   }
 } 

@@ -9,7 +9,10 @@ import {
   StreamType,
   demuxProbe,
   NoSubscriberBehavior,
-  AudioResource
+  AudioResource,
+  DiscordGatewayAdapterCreator,
+  VoiceConnectionStatus,
+  getVoiceConnection
 } from '@discordjs/voice';
 import path from 'path';
 import ffmpeg from 'ffmpeg-static';
@@ -19,24 +22,17 @@ import { prisma } from '../db.js';
 import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
 import fs from 'fs';
 import { youtube } from '../utils/youtube.js';
-import type { 
-    Request as PrismaRequest, 
-    PlaylistMode as PrismaPlaylistMode,
-    DefaultPlaylist,
-    DefaultPlaylistTrack,
-    Track,
-    AudioCache,
-    Prisma,
-    RequestStatus as PrismaRequestStatus
-} from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
 import { ChildProcessWithoutNullStreams } from 'child_process';
+import { resolveYouTubeMusicId } from '../utils/youtubeMusic.js';
+import { RequestStatus } from '@prisma/client';
 
 // Define RequestStatus enum to match Prisma schema
-const RequestStatus: Record<keyof typeof PrismaRequestStatus, PrismaRequestStatus> = {
+const RequestStatus = {
   PENDING: 'PENDING',
   PLAYING: 'PLAYING',
   QUEUED: 'QUEUED',
@@ -47,15 +43,19 @@ const RequestStatus: Record<keyof typeof PrismaRequestStatus, PrismaRequestStatu
 
 type RequestStatus = typeof RequestStatus[keyof typeof RequestStatus];
 
-// Configure FFmpeg path
-if (ffmpeg) {
-  process.env.FFMPEG_PATH = ffmpeg as unknown as string;
-  console.log('Using FFmpeg from:', ffmpeg);
-} else {
-  console.error('FFmpeg not found in ffmpeg-static package');
-}
+// Define PlaylistMode enum to match Prisma schema
+const PlaylistMode = {
+  LINEAR: 'LINEAR',
+  POOL: 'POOL'
+} as const;
 
-const API_BASE_URL = process.env.API_URL || 'http://localhost:3000';
+type PlaylistMode = typeof PlaylistMode[keyof typeof PlaylistMode];
+
+interface UserInfo {
+  username: string;
+  discriminator: string;
+  avatar?: string | null;
+}
 
 interface QueueItem {
   youtubeId: string;
@@ -72,31 +72,51 @@ interface QueueItem {
   isAutoplay?: boolean;
 }
 
-interface ScoredTrack {
-  track: Track;
-  score: number;
-}
-
-type Request = PrismaRequest;
-type PlaylistMode = PrismaPlaylistMode;
-
-interface PlaylistTrack {
-  id: string;
-  createdAt: Date;
-  updatedAt: Date;
+interface QueuedTrack {
   youtubeId: string;
   title: string;
   thumbnail: string;
   duration: number;
-  position: number;
-  playlistId: string;
+  requestedBy: {
+    userId: string;
+    username: string;
+    avatar?: string;
+  };
+  queuePosition?: number;
+  willPlayNext: boolean;
+  isPlaying: boolean;
 }
 
-interface PlaylistWithTracks extends DefaultPlaylist {
-    tracks: DefaultPlaylistTrack[];
+interface PlaylistWithTracks {
+  id: string;
+  name: string;
+  active: boolean;
+  mode: PlaylistMode;
+  tracks: Array<{
+    trackId: string;
+    position: number;
+  }>;
+}
+
+interface ScoredTrack {
+  youtubeId: string;
+  score: number;
 }
 
 let defaultPlaylist: PlaylistWithTracks | null = null;
+
+// Configure FFmpeg path
+if (ffmpeg) {
+  process.env.FFMPEG_PATH = ffmpeg as unknown as string;
+  console.log('Using FFmpeg from:', ffmpeg);
+} else {
+  console.error('FFmpeg not found in ffmpeg-static package');
+}
+
+const API_BASE_URL = process.env.API_URL || 'http://localhost:3000';
+
+type Request = PrismaRequest;
+type Track = PrismaTrack;
 
 // Add singleton instance and getter
 let instance: Player | null = null;
@@ -136,6 +156,14 @@ type TrackResult = {
 type TrackIdResult = { 
   youtubeId: string 
 };
+
+interface QueuedTrack {
+  title: string;
+  thumbnail: string | null;
+  duration: number;
+  queuePosition?: number;
+  willPlayNext?: boolean;
+}
 
 export class Player {
   private client: Client;
@@ -207,6 +235,11 @@ export class Player {
     // Reset played tracks and cleanup stuck states on server restart
     this.resetAutoplayTracking();
     this.cleanupStuckStates();
+
+    // Check for active playlist on startup
+    this.initializeActivePlaylist().catch(error => {
+      console.error('Failed to initialize active playlist:', error);
+    });
 
     // Handle audio player state changes
     this.audioPlayer.on('stateChange', async (oldState, newState) => {
@@ -471,40 +504,34 @@ export class Player {
     }
   };
 
-  async play(
-    voiceState: VoiceState | null | undefined, 
-    youtubeId: string, 
+  public async play(
+    voiceState: VoiceState,
+    youtubeId: string,
     userId: string,
-    userInfo: { 
-      username: string;
-      discriminator: string;
-      avatar: string | null;
-    }
-  ) {
+    userInfo: UserInfo,
+    isMusicUrl: boolean = false
+  ): Promise<QueuedTrack> {
     try {
-      console.log('=== Starting play request for:', youtubeId);
+      console.log(`=== Starting play request for: ${youtubeId}`);
 
-      // Initialize voice connection if not already connected
-      if (!this.connection) {
-        console.log('No voice connection, initializing...');
-        await this.initializeVoiceConnection();
-        
-        // Wait for connection to be ready
-        if (!this.connection) {
-          console.log('Failed to establish voice connection');
-          throw new Error('Failed to establish voice connection');
+      // If it's a YouTube Music URL, resolve it first
+      let resolvedId = youtubeId;
+      if (isMusicUrl) {
+        const resolved = await resolveYouTubeMusicId(youtubeId);
+        if (!resolved) {
+          throw new Error('Failed to resolve YouTube Music URL');
         }
-        
-        // Ensure we're in the right state for web users
-        if (this.hasWebPresence) {
-          this.hasActiveUsers = false;
-          this.isPlayerPaused = false;
-          console.log('Web presence active, preparing for playback');
-        }
+        resolvedId = resolved;
       }
 
-      // Get track info first to check duration and validate
-      const trackInfo = await getYoutubeInfo(youtubeId);
+      // Get voice connection
+      const connection = await this.getVoiceConnection(voiceState);
+      if (!connection) {
+        throw new Error('Failed to join voice channel');
+      }
+
+      // Get track info using the resolved ID
+      const trackInfo = await getYoutubeInfo(resolvedId, isMusicUrl);
 
       // Check duration limit
       if (trackInfo.duration > this.MAX_DURATION) {
@@ -514,7 +541,7 @@ export class Player {
       // Create queue item with complete metadata
       const requestedAt = new Date();
       const queueItem: QueueItem = {
-        youtubeId,
+        youtubeId: resolvedId, // Use resolved ID
         title: trackInfo.title,
         thumbnail: trackInfo.thumbnail,
         duration: trackInfo.duration,
@@ -534,7 +561,7 @@ export class Player {
         
         // Start audio download and playback
         try {
-          const resource = await this.getAudioResource(youtubeId);
+          const resource = await this.getAudioResource(resolvedId); // Use resolved ID
           if (resource) {
             this.audioPlayer.play(resource);
             console.log('Started immediate playback');
@@ -550,23 +577,25 @@ export class Player {
       }
 
       // Start downloading audio for this track in the background
-      this.prefetchAudioForTrack(youtubeId, trackInfo.title);
+      this.prefetchAudioForTrack(resolvedId, trackInfo.title); // Use resolved ID
 
       // Update database in background
       Promise.all([
         // Update track record
         prisma.track.upsert({
-          where: { youtubeId },
+          where: { youtubeId: resolvedId }, // Use resolved ID
           create: {
-            youtubeId,
+            youtubeId: resolvedId, // Use resolved ID
             title: trackInfo.title,
             thumbnail: trackInfo.thumbnail,
-            duration: trackInfo.duration
+            duration: trackInfo.duration,
+            isMusicUrl
           },
           update: {
             title: trackInfo.title,
             thumbnail: trackInfo.thumbnail,
-            duration: trackInfo.duration
+            duration: trackInfo.duration,
+            isMusicUrl
           }
         }),
 
@@ -587,16 +616,16 @@ export class Player {
           }
         }),
 
-        // Create request
+        // Create request using resolved ID
         prisma.request.create({
           data: {
             userId,
-            youtubeId,
+            youtubeId: resolvedId,
             status: this.audioPlayer.state.status === AudioPlayerStatus.Playing ? 
               RequestStatus.QUEUED : RequestStatus.PLAYING,
             requestedAt,
             isAutoplay: false
-          } as Prisma.RequestUncheckedCreateInput
+          }
         })
       ]).catch(error => {
         console.error('Background database updates failed:', error);
@@ -617,7 +646,7 @@ export class Player {
       // Calculate response
       const willPlayNext = this.audioPlayer.state.status === AudioPlayerStatus.Idle || (this.queue.length === 1);
       const response = {
-        youtubeId,
+        youtubeId: resolvedId, // Use resolved ID
         title: trackInfo.title,
         thumbnail: trackInfo.thumbnail,
         duration: trackInfo.duration,
@@ -887,32 +916,37 @@ export class Player {
 
   private async getAutoplayTrack(): Promise<QueueItem | null> {
     try {
-      // Clean up played tracks first
-      this.cleanupPlayedTracks();
-
-      // If we have tracks in the autoplay queue, use those first
       if (this.autoplayQueue.length > 0) {
-        return this.autoplayQueue.shift()!;
+        const track = this.autoplayQueue.shift()!;
+        const source = track.requestedBy.username === 'Playlist' ? '\x1b[35m[PLAYLIST POOL]\x1b[0m' : '\x1b[32m[YT-MIX]\x1b[0m';
+        console.log(`${source} Adding to queue: 🎵 "${track.title}"`);
+        return track;
       }
 
-      // If we have a current playlist, try to get tracks from it
       if (this.currentPlaylistId) {
-        // First get active tracks
+        const playlist = await prisma.defaultPlaylist.findUnique({
+          where: { id: this.currentPlaylistId }
+        });
+
+        if (!playlist) {
+          console.log('\x1b[31m[ERROR]\x1b[0m Playlist not found');
+          return null;
+        }
+
+        console.log(`\x1b[35m[PLAYLIST]\x1b[0m Using "${playlist.name}" (${playlist.mode} mode)`);
+
         const activeTracks = await prisma.$queryRaw<TrackResult[]>`
           SELECT t.* FROM "Track" t
           INNER JOIN "DefaultPlaylistTrack" dpt ON t."youtubeId" = dpt."trackId"
           WHERE dpt."playlistId" = ${this.currentPlaylistId}::text
           AND t."isActive" = true
-          ORDER BY dpt.position ASC
+          ORDER BY ${playlist.mode === 'POOL' ? Prisma.sql`RANDOM()` : Prisma.sql`dpt.position ASC`}
           LIMIT 1
         `;
 
         if (activeTracks.length > 0) {
-          // Get or create bot user
           const botId = this.client.user?.id;
-          if (!botId) {
-            throw new Error('Bot user ID not found');
-          }
+          if (!botId) throw new Error('Bot user ID not found');
 
           const botUser = await prisma.user.upsert({
             where: { id: botId },
@@ -933,16 +967,14 @@ export class Player {
           const requestedAt = new Date();
 
           try {
-            // Get track info first
             const info = await getYoutubeInfo(selectedTrack.youtubeId);
+            console.log(`📑 [PLAYLIST] Selected: ${info.title}`);
 
-            // Final duplicate check before returning the track
             if (this.isTrackDuplicate(selectedTrack.youtubeId, undefined, true)) {
-              console.log(`Track ${selectedTrack.youtubeId} (${info.title}) is a duplicate, skipping`);
+              console.log(`⏭️ [PLAYLIST] Skipping duplicate: ${info.title}`);
               return null;
             }
 
-            // Now create the request
             await prisma.request.create({
               data: {
                 userId: botUser.id,
@@ -967,33 +999,159 @@ export class Player {
               isAutoplay: true
             };
           } catch (error) {
-            console.error('Error preparing track:', error);
+            console.error('❌ [PLAYLIST] Error preparing track:', error);
             return null;
           }
         }
       }
 
-      // Get recommendations from recently played tracks
-      const recentTracks = Array.from(this.playedTracks.entries())
-        .filter(([_, timestamp]) => Date.now() - timestamp < this.AUTOPLAY_TRACKS_EXPIRY)
-        .map(([id]) => id);
+      console.log('❌ [AUTOPLAY] No suitable track found');
+      return null;
+    } catch (error) {
+      console.error('❌ [AUTOPLAY] Error:', error);
+      return null;
+    }
+  }
 
-      if (recentTracks.length > 0 && recentTracks.every(track => typeof track === 'string')) {
-        // Get similar tracks based on recently played
-        const similarTracks = await prisma.$queryRaw<TrackResult[]>`
-          SELECT * FROM "Track"
-          WHERE "youtubeId" != ALL(${recentTracks}::text[])
-          AND "isActive" = true
-          ORDER BY "globalScore" DESC
-          LIMIT 10
-        `;
+  setAutoplay(enabled: boolean) {
+    this.autoplayEnabled = enabled;
+    this.updatePlayerState();
+  }
 
-        if (similarTracks.length > 0) {
-          // Get or create bot user
-          const botId = this.client.user?.id;
-          if (!botId) {
-            throw new Error('Bot user ID not found');
+  private async handleAutoplay() {
+    if (!this.isAutoplayEnabled() || this.queue.length > 0) {
+      console.log('[DEBUG] handleAutoplay: Autoplay disabled or queue not empty, skipping');
+      return;
+    }
+
+    try {
+      console.log(`[DEBUG] handleAutoplay: Starting autoplay handling. Current playlist ID: ${this.currentPlaylistId}`);
+      
+      // First try to get a track from the autoplay queue
+      let nextTrack = this.autoplayQueue.shift();
+      
+      // If no track in queue, try to get a new one
+      if (!nextTrack) {
+        console.log('[DEBUG] handleAutoplay: No tracks in autoplay queue, attempting to get new track...');
+        
+        // First try to get a track from the current playlist
+        if (this.currentPlaylistId) {
+          console.log(`[DEBUG] handleAutoplay: Checking playlist ${this.currentPlaylistId} for tracks`);
+          const playlist = await prisma.defaultPlaylist.findUnique({
+            where: { id: this.currentPlaylistId },
+            include: {
+              tracks: {
+                include: {
+                  track: true
+                }
+              }
+            }
+          });
+
+          if (playlist) {
+            console.log(`[DEBUG] handleAutoplay: Found playlist "${playlist.name}" with ${playlist.tracks.length} tracks in ${playlist.mode} mode`);
+            console.log('[DEBUG] handleAutoplay: Sample of tracks:', playlist.tracks.slice(0, 3).map(t => t.track?.title || t.trackId));
+          } else {
+            console.log('[DEBUG] handleAutoplay: WARNING - Playlist ID set but playlist not found in database');
+            // Clear invalid playlist ID
+            this.currentPlaylistId = undefined;
           }
+        } else {
+          console.log('[DEBUG] handleAutoplay: No current playlist ID set, checking for active playlists');
+          // Try to find an active playlist
+          const activePlaylist = await prisma.defaultPlaylist.findFirst({
+            where: { active: true },
+            include: {
+              tracks: {
+                include: {
+                  track: true
+                }
+              }
+            }
+          });
+
+          if (activePlaylist) {
+            console.log(`[DEBUG] handleAutoplay: Found active playlist "${activePlaylist.name}", setting as current`);
+            this.currentPlaylistId = activePlaylist.id;
+            console.log(`[DEBUG] handleAutoplay: Playlist has ${activePlaylist.tracks.length} tracks in ${activePlaylist.mode} mode`);
+          } else {
+            console.log('[DEBUG] handleAutoplay: No active playlists found');
+          }
+        }
+        
+        const newTrack = await this.getAutoplayTrack();
+        if (newTrack) {
+          console.log(`[DEBUG] handleAutoplay: Got new track: ${newTrack.title}`);
+          nextTrack = newTrack;
+        }
+        
+        if (!nextTrack) {
+          // If still no track, try to refresh YouTube recommendations and try again
+          console.log('[DEBUG] handleAutoplay: No track found, refreshing YouTube recommendations pool...');
+          await this.refreshYoutubeRecommendationsPool();
+          const retryTrack = await this.getAutoplayTrack();
+          if (retryTrack) {
+            console.log(`[DEBUG] handleAutoplay: Got track after refresh: ${retryTrack.title}`);
+            nextTrack = retryTrack;
+          }
+        }
+      } else {
+        console.log(`[DEBUG] handleAutoplay: Using track from autoplay queue: ${nextTrack.title}`);
+      }
+
+      if (nextTrack) {
+        console.log(`[DEBUG] handleAutoplay: Adding track to queue: ${nextTrack.title}`);
+        this.queue.push(nextTrack);
+        await this.playNext();
+        
+        // After successfully getting a track, prefetch more for the queue
+        this.prefetchAutoplayTracks().catch(error => {
+          console.error('[DEBUG] handleAutoplay: Failed to prefetch tracks:', error);
+        });
+      } else {
+        // If still no track, wait before trying again
+        console.log('[DEBUG] handleAutoplay: No autoplay track found after all attempts, waiting 30 seconds...');
+        await new Promise(resolve => setTimeout(resolve, 30000));
+      }
+    } catch (error) {
+      console.error('[DEBUG] handleAutoplay: Error:', error);
+      // Wait before retrying on error
+      await new Promise(resolve => setTimeout(resolve, 30000));
+    }
+  }
+
+  private async prefetchAutoplayTracks(): Promise<void> {
+    try {
+      if (!this.currentTrack) {
+        console.log('🎵 [AUTOPLAY] No current track playing');
+        return;
+      }
+
+      console.log(`🎵 [AUTOPLAY] Queue status - Playlist: ${this.currentPlaylistId ? 'Active' : 'None'}, Pool: ${this.youtubeRecommendationsPool.length}, Queue: ${this.autoplayQueue.length}`);
+
+      // If we have a current playlist, prioritize getting tracks from it
+      if (this.currentPlaylistId && this.autoplayQueue.length < this.AUTOPLAY_QUEUE_SIZE) {
+        const playlist = await prisma.defaultPlaylist.findUnique({
+          where: { id: this.currentPlaylistId }
+        });
+
+        if (playlist) {
+          console.log(`📑 [PLAYLIST] Using "${playlist.name}" (${playlist.mode} mode)`);
+          
+          const activeTracks = await prisma.$queryRaw<TrackResult[]>`
+            SELECT t.* FROM "Track" t
+            INNER JOIN "DefaultPlaylistTrack" dpt ON t."youtubeId" = dpt."trackId"
+            WHERE dpt."playlistId" = ${this.currentPlaylistId}::text
+            AND t."isActive" = true
+            AND t."youtubeId" != ${this.currentTrack.youtubeId}
+            ORDER BY ${playlist.mode === 'POOL' ? Prisma.sql`RANDOM()` : Prisma.sql`dpt.position ASC`}
+            LIMIT ${this.AUTOPLAY_QUEUE_SIZE}
+          `;
+
+          console.log(`📑 [PLAYLIST] Found ${activeTracks.length} tracks to process`);
+
+          const botId = this.client.user?.id;
+          if (!botId) throw new Error('Bot user ID not found');
 
           const botUser = await prisma.user.upsert({
             where: { id: botId },
@@ -1010,116 +1168,129 @@ export class Player {
             }
           });
 
-          const selectedTrack = similarTracks[0];
-          const requestedAt = new Date();
-
-          try {
-            // Get track info first
-            const info = await getYoutubeInfo(selectedTrack.youtubeId);
-
-            // Final duplicate check before returning the track
-            if (this.isTrackDuplicate(selectedTrack.youtubeId, undefined, true)) {
-              console.log(`Track ${selectedTrack.youtubeId} (${info.title}) is a duplicate, skipping`);
-              return null;
+          for (const track of activeTracks) {
+            if (this.isTrackDuplicate(track.youtubeId, undefined, true)) {
+              console.log(`⏭️ [PLAYLIST] Skipping duplicate: ${track.title}`);
+              continue;
             }
 
-            return {
-              youtubeId: selectedTrack.youtubeId,
-              title: info.title,
-              thumbnail: info.thumbnail,
-              duration: info.duration,
+            const requestedAt = new Date();
+            await prisma.request.create({
+              data: {
+                userId: botUser.id,
+                youtubeId: track.youtubeId,
+                status: RequestStatus.PENDING,
+                requestedAt,
+                isAutoplay: true
+              }
+            });
+
+            this.autoplayQueue.push({
+              youtubeId: track.youtubeId,
+              title: track.title,
+              thumbnail: track.thumbnail,
+              duration: track.duration,
               requestedBy: {
                 userId: botUser.id,
-                username: 'Similar',
+                username: 'Playlist',
                 avatar: botUser.avatar || undefined
               },
               requestedAt,
               isAutoplay: true
-            };
-          } catch (error) {
-            console.error('Error preparing track:', error);
-            return null;
+            });
+
+            console.log(`➕ [PLAYLIST] Added: ${track.title}`);
+            this.prefetchAudioForTrack(track.youtubeId, track.title);
+
+            if (this.autoplayQueue.length >= this.AUTOPLAY_QUEUE_SIZE) {
+              console.log('✅ [PLAYLIST] Queue is full');
+              break;
+            }
           }
+
+          console.log(`📊 [AUTOPLAY] Final queue size: ${this.autoplayQueue.length}`);
+          return;
         }
       }
 
-      return null;
-    } catch (error) {
-      console.error('Error in getAutoplayTrack:', error);
-      return null;
-    }
-  }
-
-  setAutoplay(enabled: boolean) {
-    this.autoplayEnabled = enabled;
-    this.updatePlayerState();
-  }
-
-  private async handleAutoplay() {
-    if (!this.isAutoplayEnabled() || this.queue.length > 0) {
-      return;
-    }
-
-    try {
-      // First try to get a track from the autoplay queue
-      let nextTrack = this.autoplayQueue.shift();
-      
-      // If no track in queue, try to get a new one
-      if (!nextTrack) {
-        console.log('No tracks in autoplay queue, attempting to get new track...');
-        const newTrack = await this.getAutoplayTrack();
-        if (newTrack) nextTrack = newTrack;
-        
-        if (!nextTrack) {
-          // If still no track, try to refresh YouTube recommendations and try again
-          console.log('No track found, refreshing YouTube recommendations pool...');
-          await this.refreshYoutubeRecommendationsPool();
-          const retryTrack = await this.getAutoplayTrack();
-          if (retryTrack) nextTrack = retryTrack;
-        }
-      }
-
-      if (nextTrack) {
-        this.queue.push(nextTrack);
-        await this.playNext();
-        
-        // After successfully getting a track, prefetch more for the queue
-        this.prefetchAutoplayTracks().catch(error => {
-          console.error('Failed to prefetch tracks:', error);
-        });
-      } else {
-        // If still no track, wait before trying again
-        console.log('No autoplay track found after all attempts, waiting 30 seconds...');
-        await new Promise(resolve => setTimeout(resolve, 30000));
-      }
-    } catch (error) {
-      console.error('Error in handleAutoplay:', error);
-      // Wait before retrying on error
-      await new Promise(resolve => setTimeout(resolve, 30000));
-    }
-  }
-
-  private async prefetchAutoplayTracks(): Promise<void> {
-    try {
-      if (!this.currentTrack) return;
-
-      // Get recommendations from YouTube
+      // Only use YouTube recommendations if we don't have a playlist or couldn't get playlist tracks
       if (this.youtubeRecommendationsPool.length < this.AUTOPLAY_QUEUE_SIZE) {
+        console.log('🎵 [YT-MIX] Fetching recommendations');
         const recommendations = await getYoutubeRecommendations(this.currentTrack.youtubeId);
         
-        // Filter out inactive tracks
         const activeRecommendations = await prisma.$queryRaw<TrackIdResult[]>`
           SELECT "youtubeId" FROM "Track"
           WHERE "youtubeId" = ANY(${recommendations.map(rec => rec.youtubeId)}::text[])
           AND "isActive" = true
         `;
+        console.log(`🎵 [YT-MIX] Found ${activeRecommendations.length} active tracks`);
 
         this.youtubeRecommendationsPool.push(...activeRecommendations);
       }
 
-      // ... rest of existing code ...
+      while (this.autoplayQueue.length < this.AUTOPLAY_QUEUE_SIZE && this.youtubeRecommendationsPool.length > 0) {
+        const nextRecommendation = this.youtubeRecommendationsPool.shift();
+        if (!nextRecommendation) break;
+
+        if (this.isTrackDuplicate(nextRecommendation.youtubeId, undefined, true)) {
+          console.log(`⏭️ [YT-MIX] Skipping duplicate: ${nextRecommendation.youtubeId}`);
+          continue;
+        }
+
+        try {
+          const info = await getYoutubeInfo(nextRecommendation.youtubeId);
+          console.log(`➕ [YT-MIX] Added: ${info.title}`);
+          
+          const botId = this.client.user?.id;
+          if (!botId) throw new Error('Bot user ID not found');
+
+          const botUser = await prisma.user.upsert({
+            where: { id: botId },
+            create: {
+              id: botId,
+              username: this.client.user?.username || 'Bot',
+              discriminator: this.client.user?.discriminator || '0000',
+              avatar: this.client.user?.avatar || null
+            },
+            update: {
+              username: this.client.user?.username || 'Bot',
+              discriminator: this.client.user?.discriminator || '0000',
+              avatar: this.client.user?.avatar || null
+            }
+          });
+
+          const requestedAt = new Date();
+          await prisma.request.create({
+            data: {
+              userId: botUser.id,
+              youtubeId: nextRecommendation.youtubeId,
+              status: RequestStatus.PENDING,
+              requestedAt,
+              isAutoplay: true
+            }
+          });
+
+          this.autoplayQueue.push({
+            youtubeId: nextRecommendation.youtubeId,
+            title: info.title,
+            thumbnail: info.thumbnail,
+            duration: info.duration,
+            requestedBy: {
+              userId: botUser.id,
+              username: 'Mix',
+              avatar: botUser.avatar || undefined
+            },
+            requestedAt,
+            isAutoplay: true
+          });
+
+          this.prefetchAudioForTrack(nextRecommendation.youtubeId, info.title);
+        } catch (error) {
+          console.error(`❌ [YT-MIX] Failed to process: ${nextRecommendation.youtubeId}`, error);
+        }
+      }
     } catch (error) {
-      console.error('Error prefetching autoplay tracks:', error);
+      console.error('❌ [AUTOPLAY] Error:', error);
     }
   }
 
@@ -1304,24 +1475,60 @@ export class Player {
     while (retryCount < maxRetries) {
       try {
         let audioFilePath: string;
+        let finalYoutubeId = youtubeId;
         
         // Get cached audio file and track info
+        const track = await prisma.track.findUnique({
+          where: { youtubeId }
+        });
+
+        if (!track) {
+          console.error(`Track not found in database: ${youtubeId}`);
+          return null;
+        }
+
+        // If this is a YouTube Music track that hasn't been resolved yet
+        if (track.isMusicUrl && !track.resolvedYtId) {
+          console.log(`🎵 [YT-MUSIC] Resolving ID: ${youtubeId}`);
+          const resolvedId = await resolveYouTubeMusicId(youtubeId);
+          
+          if (resolvedId) {
+            finalYoutubeId = resolvedId;
+            
+            // Update the track with resolved ID
+            await prisma.track.update({
+              where: { youtubeId },
+              data: { resolvedYtId: resolvedId }
+            });
+          } else {
+            console.log(`❌ [YT-MUSIC] Failed to resolve ID: ${youtubeId}`);
+            await prisma.track.update({
+              where: { youtubeId },
+              data: { isActive: false }
+            });
+            throw new Error(`Could not resolve YouTube Music ID: ${youtubeId}`);
+          }
+        } else if (track.resolvedYtId) {
+          // Use resolved ID if available
+          finalYoutubeId = track.resolvedYtId;
+        }
+
+        // Get cached audio file
         const audioCache = await prisma.audioCache.findUnique({
-          where: { youtubeId },
-          include: { track: true }
+          where: { youtubeId: finalYoutubeId }
         });
 
         if (!audioCache || !fs.existsSync(audioCache.filePath)) {
           // Download if not in cache or file missing
-          console.log(`Attempt ${retryCount + 1}/${maxRetries}: Downloading audio for ${youtubeId}`);
+          console.log(`⬇️ [DOWNLOAD] Starting: ${track.title}`);
           try {
-            audioFilePath = await downloadYoutubeAudio(youtubeId);
+            audioFilePath = await downloadYoutubeAudio(finalYoutubeId);
           } catch (error: any) {
             // Check if error indicates video is unavailable
             if (error.stderr?.includes('Video unavailable') || 
                 error.stderr?.includes('This video is not available') ||
                 error.stderr?.includes('This video has been removed')) {
-              console.log(`Video ${youtubeId} is unavailable, marking as inactive in database`);
+              console.log(`🎵 [CACHE] Video ${finalYoutubeId} is unavailable, marking as inactive in database`);
               // Mark track as inactive in database
               await prisma.track.update({
                 where: { youtubeId },
@@ -1334,9 +1541,9 @@ export class Player {
           
           // Create or update the audio cache
           await prisma.audioCache.upsert({
-            where: { youtubeId },
+            where: { youtubeId: finalYoutubeId },
             create: {
-              youtubeId,
+              youtubeId: finalYoutubeId,
               filePath: audioFilePath
             },
             update: {
@@ -1355,7 +1562,7 @@ export class Player {
           inputType: type,
           inlineVolume: false,
           metadata: {
-            title: audioCache?.track?.title || 'Unknown'
+            title: track.title
           }
         });
 
@@ -1386,22 +1593,51 @@ export class Player {
       });
 
       if (audioCache && fs.existsSync(audioCache.filePath)) {
-        console.log(`Audio already cached for: ${audioCache.track?.title || youtubeId}`);
+        console.log(`🎵 [CACHE] Found cached audio: ${audioCache.track?.title || youtubeId}`);
         return;
       }
 
       const track = await prisma.track.findUnique({
         where: { youtubeId }
       });
-      console.log(`Downloading audio for: ${track?.title || youtubeId}`);
+
+      if (!track) {
+        throw new Error(`Track not found in database: ${youtubeId}`);
+      }
+
+      let finalYoutubeId = youtubeId;
+
+      // If this is a YouTube Music track that hasn't been resolved yet
+      if (track.isMusicUrl && !track.resolvedYtId) {
+        console.log(`🎵 [YT-MUSIC] Resolving ID: ${youtubeId}`);
+        const resolvedId = await resolveYouTubeMusicId(youtubeId);
+        
+        if (resolvedId) {
+          finalYoutubeId = resolvedId;
+          await prisma.track.update({
+            where: { youtubeId },
+            data: { resolvedYtId: resolvedId }
+          });
+        } else {
+          console.log(`❌ [YT-MUSIC] Failed to resolve ID: ${youtubeId}`);
+          await prisma.track.update({
+            where: { youtubeId },
+            data: { isActive: false }
+          });
+          throw new Error(`Could not resolve YouTube Music ID: ${youtubeId}`);
+        }
+      } else if (track.resolvedYtId) {
+        finalYoutubeId = track.resolvedYtId;
+      }
+
+      console.log(`⬇️ [DOWNLOAD] Starting: ${track.title}`);
       
-      const audioPath = await downloadYoutubeAudio(youtubeId);
+      const audioPath = await downloadYoutubeAudio(finalYoutubeId);
       
-      // Update audio cache
       await prisma.audioCache.upsert({
-        where: { youtubeId },
+        where: { youtubeId: finalYoutubeId },
         create: {
-          youtubeId,
+          youtubeId: finalYoutubeId,
           filePath: audioPath
         },
         update: {
@@ -1409,9 +1645,9 @@ export class Player {
         }
       });
 
-      console.log(`Audio download complete for: ${track?.title || youtubeId}`);
+      console.log(`✅ [DOWNLOAD] Complete: ${track.title}`);
     } catch (error) {
-      console.error('Error downloading audio:', error);
+      console.error('❌ [DOWNLOAD] Failed:', error);
       throw error;
     }
   }
@@ -1510,10 +1746,13 @@ export class Player {
   private async refreshYoutubeRecommendationsPool(): Promise<void> {
     // Only refresh if pool is running low
     if (this.youtubeRecommendationsPool.length >= 5) {
+      console.log('[DEBUG] refreshYoutubeRecommendationsPool: Pool size sufficient, skipping refresh');
       return;
     }
 
     try {
+      console.log('[DEBUG] refreshYoutubeRecommendationsPool: Starting refresh');
+      
       // Get popular tracks to use as seeds
       const popularTracks = await prisma.request.groupBy({
         by: ['youtubeId'],
@@ -1529,9 +1768,11 @@ export class Player {
       });
 
       if (popularTracks.length === 0) {
-        console.log('No popular tracks found for recommendations');
+        console.log('[DEBUG] refreshYoutubeRecommendationsPool: No popular tracks found');
         return;
       }
+
+      console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Found ${popularTracks.length} popular tracks to use as seeds`);
 
       // Try multiple seed tracks if needed
       let newRecommendations: Array<{ youtubeId: string }> = [];
@@ -1542,35 +1783,68 @@ export class Player {
         const seedTrack = popularTracks[attempts];
         
         try {
-          console.log(`Trying to get YouTube recommendations for ${seedTrack.youtubeId} (attempt ${attempts + 1})`);
+          console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Trying seed track ${seedTrack.youtubeId} (attempt ${attempts + 1})`);
           // Get recommendations from YouTube
           const recommendations = await getYoutubeRecommendations(seedTrack.youtubeId);
           
           if (recommendations.length > 0) {
-            newRecommendations = recommendations;
-            console.log(`Got ${recommendations.length} recommendations from YouTube for ${seedTrack.youtubeId}`);
-            break;
+            // Filter out the current track and any tracks in the queue
+            const filteredRecommendations = recommendations.filter(rec => {
+              // Skip if it's the current track
+              if (this.currentTrack && rec.youtubeId === this.currentTrack.youtubeId) {
+                console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Filtering out current track ${rec.youtubeId}`);
+                return false;
+              }
+              
+              // Skip if it's in the user queue
+              if (this.queue.some(track => track.youtubeId === rec.youtubeId)) {
+                console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Filtering out queued track ${rec.youtubeId}`);
+                return false;
+              }
+              
+              // Skip if it's in the autoplay queue
+              if (this.autoplayQueue.some(track => track.youtubeId === rec.youtubeId)) {
+                console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Filtering out autoplay queued track ${rec.youtubeId}`);
+                return false;
+              }
+              
+              // Skip if it's in the recommendations pool
+              if (this.youtubeRecommendationsPool.some(track => track.youtubeId === rec.youtubeId)) {
+                console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Filtering out pooled track ${rec.youtubeId}`);
+                return false;
+              }
+              
+              return true;
+            });
+            
+            console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Found ${recommendations.length} recommendations, ${filteredRecommendations.length} after filtering`);
+            
+            if (filteredRecommendations.length > 0) {
+              newRecommendations = filteredRecommendations;
+              console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Using ${filteredRecommendations.length} recommendations from seed ${seedTrack.youtubeId}`);
+              break;
+            }
           }
         } catch (error) {
-          console.error(`Failed to get recommendations for seed ${seedTrack.youtubeId}:`, error);
+          console.error(`[DEBUG] refreshYoutubeRecommendationsPool: Failed to get recommendations for seed ${seedTrack.youtubeId}:`, error);
         }
         
         attempts++;
       }
       
       if (newRecommendations.length === 0) {
-        console.log('Could not get any YouTube recommendations after multiple attempts');
+        console.log('[DEBUG] refreshYoutubeRecommendationsPool: Could not get any valid recommendations after all attempts');
         return;
       }
       
-      // Filter out duplicates
+      // Filter out duplicates (should be redundant now but keeping as safety)
       const existingIds = new Set(this.youtubeRecommendationsPool.map(r => r.youtubeId));
       const uniqueNewRecommendations = newRecommendations.filter(r => !existingIds.has(r.youtubeId));
       
       this.youtubeRecommendationsPool.push(...uniqueNewRecommendations);
-      console.log(`YouTube Mix pool size: ${this.youtubeRecommendationsPool.length}`);
+      console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Final pool size: ${this.youtubeRecommendationsPool.length}`);
     } catch (error) {
-      console.error('Failed to refresh YouTube recommendations:', error);
+      console.error('[DEBUG] refreshYoutubeRecommendationsPool: Error refreshing recommendations:', error);
     }
   }
 
@@ -1779,6 +2053,88 @@ export class Player {
       console.log(`Streaming track to client: ${this.currentTrack.title}`);
     } catch (error) {
       console.error('Error streaming track to client:', error);
+    }
+  }
+
+  private async getVoiceConnection(voiceState: VoiceState): Promise<VoiceConnection | null> {
+    try {
+      // Initialize voice connection if not already connected
+      if (!this.connection) {
+        console.log('No voice connection, initializing...');
+        await this.initializeVoiceConnection();
+        
+        // Wait for connection to be ready
+        if (!this.connection) {
+          console.log('Failed to establish voice connection');
+          return null;
+        }
+        
+        // Ensure we're in the right state for web users
+        if (this.hasWebPresence) {
+          this.hasActiveUsers = false;
+          this.isPlayerPaused = false;
+          console.log('Web presence active, preparing for playback');
+        }
+      }
+      return this.connection;
+    } catch (error) {
+      console.error('Error getting voice connection:', error);
+      return null;
+    }
+  }
+
+  // Add new method to initialize active playlist
+  private async initializeActivePlaylist(): Promise<void> {
+    try {
+      console.log('[DEBUG] initializeActivePlaylist: Checking for active playlists');
+      const activePlaylist = await prisma.defaultPlaylist.findFirst({
+        where: { active: true },
+        include: {
+          tracks: {
+            include: {
+              track: true
+            }
+          }
+        }
+      });
+
+      if (activePlaylist) {
+        console.log(`[DEBUG] initializeActivePlaylist: Found active playlist "${activePlaylist.name}" with ${activePlaylist.tracks.length} tracks in ${activePlaylist.mode} mode`);
+        this.currentPlaylistId = activePlaylist.id;
+      } else {
+        console.log('[DEBUG] initializeActivePlaylist: No active playlists found');
+        this.currentPlaylistId = undefined;
+      }
+    } catch (error) {
+      console.error('[DEBUG] initializeActivePlaylist: Error:', error);
+    }
+  }
+
+  // Add method to set current playlist
+  public async setCurrentPlaylist(playlistId: string | undefined): Promise<void> {
+    console.log(`[DEBUG] setCurrentPlaylist: Setting current playlist to ${playlistId}`);
+    this.currentPlaylistId = playlistId;
+    
+    if (playlistId) {
+      const playlist = await prisma.defaultPlaylist.findUnique({
+        where: { id: playlistId },
+        include: {
+          tracks: {
+            include: {
+              track: true
+            }
+          }
+        }
+      });
+
+      if (playlist) {
+        console.log(`[DEBUG] setCurrentPlaylist: Successfully set playlist "${playlist.name}" with ${playlist.tracks.length} tracks in ${playlist.mode} mode`);
+      } else {
+        console.log('[DEBUG] setCurrentPlaylist: WARNING - Playlist not found, clearing ID');
+        this.currentPlaylistId = undefined;
+      }
+    } else {
+      console.log('[DEBUG] setCurrentPlaylist: Cleared current playlist');
     }
   }
 }

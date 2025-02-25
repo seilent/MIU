@@ -5,21 +5,33 @@ export class TrackingService {
   // Track when a user joins a voice channel during a song
   async trackUserJoin(userId: string, youtubeId: string): Promise<void> {
     try {
-      await prisma.$transaction([
-        // Ensure track exists
-        prisma.$executeRaw`
-          INSERT INTO "Track" ("youtubeId", "title", "thumbnail", "duration", "globalScore", "playCount", "skipCount", "createdAt", "updatedAt")
-          VALUES (${youtubeId}, '', '', 0, 0, 0, 0, NOW(), NOW())
-          ON CONFLICT ("youtubeId") DO NOTHING
-        `,
-        // Update user stats
-        prisma.$executeRaw`
-          INSERT INTO "UserTrackStats" ("userId", "youtubeId", "playCount", "skipCount", "totalListenTime", "personalScore", "lastPlayed")
-          VALUES (${userId}, ${youtubeId}, 0, 0, 0, 0, NOW())
-          ON CONFLICT ("userId", "youtubeId") DO UPDATE
-          SET "lastPlayed" = NOW()
-        `
-      ]);
+      // First ensure the user exists
+      const user = await prisma.user.findUnique({
+        where: { id: userId }
+      });
+
+      if (!user) {
+        console.error(`Cannot track stats for non-existent user: ${userId}`);
+        return;
+      }
+
+      // First check if track exists
+      const track = await prisma.track.findUnique({
+        where: { youtubeId }
+      });
+
+      if (!track) {
+        console.error(`Cannot track stats for non-existent track: ${youtubeId}`);
+        return;
+      }
+
+      // Update user stats only if both user and track exist
+      await prisma.$executeRaw`
+        INSERT INTO "UserTrackStats" ("userId", "youtubeId", "playCount", "skipCount", "totalListenTime", "personalScore", "lastPlayed")
+        VALUES (${userId}, ${youtubeId}, 0, 0, 0, 0, NOW())
+        ON CONFLICT ("userId", "youtubeId") DO UPDATE
+        SET "lastPlayed" = NOW()
+      `;
     } catch (error) {
       console.error('Error tracking user join:', error);
     }
@@ -34,6 +46,26 @@ export class TrackingService {
     wasSkipped: boolean
   ): Promise<void> {
     try {
+      // First ensure the user exists
+      const user = await prisma.user.findUnique({
+        where: { id: userId }
+      });
+
+      if (!user) {
+        console.error(`Cannot track stats for non-existent user: ${userId}`);
+        return;
+      }
+
+      // Check if track exists
+      const track = await prisma.track.findUnique({
+        where: { youtubeId }
+      });
+
+      if (!track) {
+        console.error(`Cannot track stats for non-existent track: ${youtubeId}`);
+        return;
+      }
+
       const listenRatio = listenDuration / trackDuration;
       
       // Calculate score updates

@@ -217,6 +217,8 @@ router.post('/queue', async (req: Request, res: Response) => {
       }
     );
 
+    console.log('\x1b[36m%s\x1b[0m', `[TRACK ADDED] 🎵 "${trackInfo.title}" by ${user.username} (${user.id}) via web_request`);
+
     res.json(track);
   } catch (error) {
     console.error('Error adding to queue:', error);
@@ -610,6 +612,9 @@ router.post('/autoplay', async (req, res) => {
     }
 
     client.player.setAutoplay(enabled);
+    
+    console.log('\x1b[33m%s\x1b[0m', `[AUTOPLAY] ${enabled ? '✅ Enabled' : '❌ Disabled'} by web_interface`);
+
     res.json({ success: true });
   } catch (error) {
     console.error('Error toggling autoplay:', error);
@@ -683,14 +688,18 @@ router.get('/stream', async (req, res) => {
     }
 
     // Set streaming headers
-    res.setHeader('Content-Type', 'audio/mp4');
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'audio/mp4; codecs=mp4a.40.2'); // Explicit codec specification
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Initial-Position', client.player.getPosition());
     res.setHeader('X-Playback-Start', Date.now());
     res.setHeader('X-Track-Id', currentTrack.track.youtubeId);
     res.setHeader('X-Track-Duration', currentTrack.track.duration);
     res.setHeader('Access-Control-Expose-Headers', 
-      'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration');
+      'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length');
       
     // Get or create shared stream
     const fileStream = getSharedStream(currentTrack.track.youtubeId, audioCache.filePath);

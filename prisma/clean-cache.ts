@@ -1,4 +1,4 @@
-import { prisma } from '../src/backend/db';
+import { prisma } from '../backend/src/db';
 
 async function cleanCache() {
   try {
