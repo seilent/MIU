@@ -7,7 +7,7 @@ import {
   StringSelectMenuInteraction,
   MessageComponentInteraction
 } from 'discord.js';
-import { searchYoutubeMusic } from '../../utils/youtubeMusic.js';
+import { searchYoutube } from '../../utils/youtube.js';
 import type { SearchResult } from '../../utils/types.js';
 
 export async function search(interaction: ChatInputCommandInteraction) {
@@ -15,7 +15,7 @@ export async function search(interaction: ChatInputCommandInteraction) {
     const query = interaction.options.getString('query', true);
     await interaction.deferReply();
 
-    const results = await searchYoutubeMusic(query);
+    const results = await searchYoutube(query);
     if (!results || results.length === 0) {
       await interaction.editReply('No results found.');
       return;

@@ -7,7 +7,6 @@ import fs from 'fs';
 import rateLimit from 'express-rate-limit';
 import { getYoutubeId, getYoutubeInfo, searchYoutube, parseDuration } from '../utils/youtube.js';
 import { MAX_DURATION } from '../config.js';
-import { searchYoutubeMusic } from '../utils/youtubeMusic.js';
 
 interface WebUser {
   id: string;
@@ -62,8 +61,8 @@ router.get('/search', searchLimiter, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Search query is required' });
     }
 
-    // Use YouTube Music search instead of regular YouTube
-    const results = await searchYoutubeMusic(query);
+    // Use regular YouTube search instead of YouTube Music
+    const results = await searchYoutube(query);
     
     // Results are already in the correct format, no need to transform
     res.json(results);
