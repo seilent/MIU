@@ -31,6 +31,7 @@ export default function Home() {
   const queueAnimationCompleteCount = useRef(0);
   const [showHomeTimeout, setShowHomeTimeout] = useState<NodeJS.Timeout | null>(null);
   const [shouldShowPlayer, setShouldShowPlayer] = useState(!!currentTrack);
+  const animationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Separate user requests from autoplay tracks
   const userRequests = queue.filter(track => !track.isAutoplay);
@@ -48,18 +49,14 @@ export default function Home() {
       
       // If we have a current track and it's different from the previous one
       if (previousTrack && previousTrack.youtubeId !== currentTrack.youtubeId) {
-        // Store the transitioning track ID
+        // Clear any existing animation timeout
+        if (animationTimeoutRef.current) {
+          clearTimeout(animationTimeoutRef.current);
+        }
+
         setTransitioningTrackId(previousTrack.youtubeId);
-        
-        // Store the previous queue for animation, but only include the transitioning track
-        // and the current queue to ensure proper indexing
-        setPreviousQueue([previousTrack, ...queue]);
-        
-        // Start queue animation
+        setPreviousQueue([previousTrack, ...queue.slice(0, 2)]); // Only keep first 2 items for transition
         setAnimatingQueue(true);
-        
-        // Reset animation completion counter
-        queueAnimationCompleteCount.current = 0;
       }
       
       // Update previous track
@@ -77,22 +74,25 @@ export default function Home() {
       if (showHomeTimeout) {
         clearTimeout(showHomeTimeout);
       }
+      if (animationTimeoutRef.current) {
+        clearTimeout(animationTimeoutRef.current);
+      }
     };
   }, [currentTrack, queue, previousTrack, showHomeTimeout]);
 
   // Handle queue animation completion
   const handleQueueItemAnimationComplete = () => {
-    queueAnimationCompleteCount.current += 1;
-    
-    // When all items have completed their animation
-    if (queueAnimationCompleteCount.current >= previousQueue.length) {
-      // Small delay before resetting animation state to ensure smooth transition
-      setTimeout(() => {
-        setAnimatingQueue(false);
-        setTransitioningTrackId(null);
-        setPreviousQueue([]);
-      }, 100);
+    // Use the timeout ref to ensure we don't stack timeouts
+    if (animationTimeoutRef.current) {
+      clearTimeout(animationTimeoutRef.current);
     }
+
+    animationTimeoutRef.current = setTimeout(() => {
+      setAnimatingQueue(false);
+      setTransitioningTrackId(null);
+      setPreviousQueue([]);
+      animationTimeoutRef.current = null;
+    }, 200);
   };
 
   // Auth check effect
@@ -275,49 +275,20 @@ export default function Home() {
           <div className="relative">
             <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
               <AnimatePresence mode="sync">
-                {animatingQueue ? (
-                  // During track transition, show previous queue with animations
-                  previousQueue.map((track, index) => {
-                    const isTransitioning = track.youtubeId === transitioningTrackId;
-                    // Adjust index to reflect new position in queue
-                    const adjustedIndex = isTransitioning ? index : index - 1;
-                    
-                    return (
-                      <AnimatedQueueItem
-                        key={`${track.youtubeId}-${track.requestedAt}-${index}`}
-                        track={track}
-                        index={adjustedIndex}
-                        isRemoving={isTransitioning}
-                        onAnimationComplete={handleQueueItemAnimationComplete}
-                      />
-                    );
-                  })
-                ) : displayQueue.length > 0 ? (
-                  // Normal queue display
-                  displayQueue.map((track, index) => (
+                {(animatingQueue ? previousQueue : displayQueue).map((track, index) => {
+                  const isTransitioning = track.youtubeId === transitioningTrackId;
+                  const adjustedIndex = animatingQueue && !isTransitioning ? index - 1 : index;
+                  
+                  return (
                     <AnimatedQueueItem
-                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                      key={`${track.youtubeId}-${track.requestedAt}`}
                       track={track}
-                      index={index}
-                      isRemoving={false}
+                      index={adjustedIndex}
+                      isLeaving={isTransitioning}
+                      onAnimationComplete={isTransitioning ? handleQueueItemAnimationComplete : undefined}
                     />
-                  ))
-                ) : (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ 
-                      duration: 0.5, 
-                      delay: 0.2,
-                      type: "spring",
-                      stiffness: 100,
-                      damping: 20
-                    }}
-                    className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
-                  >
-                    No tracks in queue
-                  </motion.div>
-                )}
+                  );
+                })}
               </AnimatePresence>
             </div>
             <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
@@ -490,49 +461,20 @@ export default function Home() {
         <div className="relative">
           <div className={`transition-all duration-300 ${showHistory ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'} ${!showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>
             <AnimatePresence mode="sync">
-              {animatingQueue ? (
-                // During track transition, show previous queue with animations
-                previousQueue.map((track, index) => {
-                  const isTransitioning = track.youtubeId === transitioningTrackId;
-                  // Adjust index to reflect new position in queue
-                  const adjustedIndex = isTransitioning ? index : index - 1;
-                  
-                  return (
-                    <AnimatedQueueItem
-                      key={`${track.youtubeId}-${track.requestedAt}-${index}`}
-                      track={track}
-                      index={adjustedIndex}
-                      isRemoving={isTransitioning}
-                      onAnimationComplete={handleQueueItemAnimationComplete}
-                    />
-                  );
-                })
-              ) : displayQueue.length > 0 ? (
-                // Normal queue display
-                displayQueue.map((track, index) => (
+              {(animatingQueue ? previousQueue : displayQueue).map((track, index) => {
+                const isTransitioning = track.youtubeId === transitioningTrackId;
+                const adjustedIndex = animatingQueue && !isTransitioning ? index - 1 : index;
+                
+                return (
                   <AnimatedQueueItem
-                    key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                    key={`${track.youtubeId}-${track.requestedAt}`}
                     track={track}
-                    index={index}
-                    isRemoving={false}
+                    index={adjustedIndex}
+                    isLeaving={isTransitioning}
+                    onAnimationComplete={isTransitioning ? handleQueueItemAnimationComplete : undefined}
                   />
-                ))
-              ) : (
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ 
-                    duration: 0.5, 
-                    delay: 0.2,
-                    type: "spring",
-                    stiffness: 100,
-                    damping: 20
-                  }}
-                  className="text-center py-12 text-white/40 bg-white/5 rounded-lg border border-white/5"
-                >
-                  No tracks in queue
-                </motion.div>
-              )}
+                );
+              })}
             </AnimatePresence>
           </div>
           <div className={`transition-all duration-300 ${!showHistory ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'} ${showHistory ? 'relative' : 'absolute inset-0 pointer-events-none'}`}>

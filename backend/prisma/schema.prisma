@@ -46,6 +46,7 @@ model Track {
   globalScore   Float     @default(0)
   playCount     Int       @default(0)
   skipCount     Int       @default(0)
+  isActive      Boolean   @default(true)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   requests      Request[]

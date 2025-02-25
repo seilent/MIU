@@ -28,59 +28,76 @@ CREATE TABLE "Role" (
 );
 
 -- CreateTable
-CREATE TABLE "Request" (
-    "id" TEXT NOT NULL,
-    "userId" TEXT NOT NULL,
+CREATE TABLE "Track" (
     "youtubeId" TEXT NOT NULL,
     "title" TEXT NOT NULL,
-    "artist" TEXT,
     "thumbnail" TEXT NOT NULL,
     "duration" INTEGER NOT NULL,
+    "globalScore" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "playCount" INTEGER NOT NULL DEFAULT 0,
+    "skipCount" INTEGER NOT NULL DEFAULT 0,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Track_pkey" PRIMARY KEY ("youtubeId")
+);
+
+-- CreateTable
+CREATE TABLE "Request" (
+    "youtubeId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
     "status" "RequestStatus" NOT NULL DEFAULT 'PENDING',
     "requestedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "playedAt" TIMESTAMP(3),
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
     "isAutoplay" BOOLEAN NOT NULL DEFAULT false,
 
-    CONSTRAINT "Request_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Request_pkey" PRIMARY KEY ("youtubeId","requestedAt")
+);
+
+-- CreateTable
+CREATE TABLE "UserTrackStats" (
+    "userId" TEXT NOT NULL,
+    "youtubeId" TEXT NOT NULL,
+    "playCount" INTEGER NOT NULL DEFAULT 0,
+    "skipCount" INTEGER NOT NULL DEFAULT 0,
+    "totalListenTime" INTEGER NOT NULL DEFAULT 0,
+    "lastPlayed" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "personalScore" DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    CONSTRAINT "UserTrackStats_pkey" PRIMARY KEY ("userId","youtubeId")
 );
 
 -- CreateTable
 CREATE TABLE "AudioCache" (
-    "id" TEXT NOT NULL,
     "youtubeId" TEXT NOT NULL,
-    "title" TEXT NOT NULL,
-    "artist" TEXT,
-    "duration" INTEGER NOT NULL,
     "filePath" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "AudioCache_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "AudioCache_pkey" PRIMARY KEY ("youtubeId")
 );
 
 -- CreateTable
 CREATE TABLE "ThumbnailCache" (
-    "id" TEXT NOT NULL,
     "youtubeId" TEXT NOT NULL,
-    "url" TEXT NOT NULL,
     "filePath" TEXT NOT NULL,
+    "width" INTEGER NOT NULL DEFAULT 0,
+    "height" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "ThumbnailCache_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "ThumbnailCache_pkey" PRIMARY KEY ("youtubeId")
 );
 
 -- CreateTable
 CREATE TABLE "Setting" (
-    "id" TEXT NOT NULL,
     "key" TEXT NOT NULL,
     "value" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "Setting_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Setting_pkey" PRIMARY KEY ("key")
 );
 
 -- CreateTable
@@ -97,48 +114,52 @@ CREATE TABLE "DefaultPlaylist" (
 
 -- CreateTable
 CREATE TABLE "DefaultPlaylistTrack" (
-    "id" TEXT NOT NULL,
     "playlistId" TEXT NOT NULL,
-    "youtubeId" TEXT NOT NULL,
-    "title" TEXT NOT NULL,
-    "artist" TEXT,
-    "thumbnail" TEXT NOT NULL,
-    "duration" INTEGER NOT NULL,
+    "trackId" TEXT NOT NULL,
     "position" INTEGER NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "DefaultPlaylistTrack_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "DefaultPlaylistTrack_pkey" PRIMARY KEY ("playlistId","position")
+);
+
+-- CreateTable
+CREATE TABLE "WebPresence" (
+    "userId" TEXT NOT NULL,
+    "lastSeen" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "WebPresence_pkey" PRIMARY KEY ("userId")
 );
 
 -- CreateTable
 CREATE TABLE "_UserRoles" (
     "A" TEXT NOT NULL,
-    "B" TEXT NOT NULL,
-
-    CONSTRAINT "_UserRoles_AB_pkey" PRIMARY KEY ("A","B")
+    "B" TEXT NOT NULL
 );
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Role_name_key" ON "Role"("name");
 
 -- CreateIndex
-CREATE INDEX "Request_isAutoplay_status_playedAt_idx" ON "Request"("isAutoplay", "status", "playedAt");
+CREATE INDEX "Request_status_requestedAt_idx" ON "Request"("status", "requestedAt");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "AudioCache_youtubeId_key" ON "AudioCache"("youtubeId");
+CREATE INDEX "Request_youtubeId_idx" ON "Request"("youtubeId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ThumbnailCache_youtubeId_key" ON "ThumbnailCache"("youtubeId");
+CREATE INDEX "UserTrackStats_userId_idx" ON "UserTrackStats"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Setting_key_key" ON "Setting"("key");
+CREATE INDEX "UserTrackStats_youtubeId_idx" ON "UserTrackStats"("youtubeId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "DefaultPlaylist_name_key" ON "DefaultPlaylist"("name");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "DefaultPlaylistTrack_playlistId_position_key" ON "DefaultPlaylistTrack"("playlistId", "position");
+CREATE INDEX "DefaultPlaylistTrack_trackId_idx" ON "DefaultPlaylistTrack"("trackId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "_UserRoles_AB_unique" ON "_UserRoles"("A", "B");
 
 -- CreateIndex
 CREATE INDEX "_UserRoles_B_index" ON "_UserRoles"("B");
@@ -147,7 +168,25 @@ CREATE INDEX "_UserRoles_B_index" ON "_UserRoles"("B");
 ALTER TABLE "Request" ADD CONSTRAINT "Request_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "Request" ADD CONSTRAINT "Request_youtubeId_fkey" FOREIGN KEY ("youtubeId") REFERENCES "Track"("youtubeId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "UserTrackStats" ADD CONSTRAINT "UserTrackStats_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "UserTrackStats" ADD CONSTRAINT "UserTrackStats_youtubeId_fkey" FOREIGN KEY ("youtubeId") REFERENCES "Track"("youtubeId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "AudioCache" ADD CONSTRAINT "AudioCache_youtubeId_fkey" FOREIGN KEY ("youtubeId") REFERENCES "Track"("youtubeId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "DefaultPlaylistTrack" ADD CONSTRAINT "DefaultPlaylistTrack_playlistId_fkey" FOREIGN KEY ("playlistId") REFERENCES "DefaultPlaylist"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "DefaultPlaylistTrack" ADD CONSTRAINT "DefaultPlaylistTrack_trackId_fkey" FOREIGN KEY ("trackId") REFERENCES "Track"("youtubeId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "WebPresence" ADD CONSTRAINT "WebPresence_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "_UserRoles" ADD CONSTRAINT "_UserRoles_A_fkey" FOREIGN KEY ("A") REFERENCES "Role"("id") ON DELETE CASCADE ON UPDATE CASCADE;
