@@ -14,6 +14,7 @@ This guide explains how to deploy the MIU application (frontend and backend) on 
 
 The `deploy.sh` script automates the deployment process. It can:
 
+- Pull code from the Git repository (https://github.com/seilent/MIU by default)
 - Install system dependencies (Node.js, PM2, Nginx, Certbot)
 - Deploy the backend and/or frontend
 - Configure Nginx as a reverse proxy
@@ -36,6 +37,18 @@ The `deploy.sh` script automates the deployment process. It can:
 
 # Change the backend path (default is 'backend')
 ./scripts/deploy.sh --domain=yourdomain.com --backend-path=api
+
+# Deploy from a different Git repository
+./scripts/deploy.sh --domain=yourdomain.com --git-repo=https://github.com/yourusername/miu.git
+
+# Deploy from a specific branch
+./scripts/deploy.sh --domain=yourdomain.com --git-branch=develop
+
+# Deploy to a custom directory
+./scripts/deploy.sh --domain=yourdomain.com --deploy-dir=/opt/miu
+
+# Skip pulling from Git repository
+./scripts/deploy.sh --domain=yourdomain.com --no-pull
 ```
 
 ### Command Line Options
@@ -50,7 +63,45 @@ The `deploy.sh` script automates the deployment process. It can:
 | `--with-ssl` | Configure SSL with Let's Encrypt |
 | `--domain=DOMAIN` | Set the domain name (required for Nginx and SSL) |
 | `--backend-path=PATH` | Set the backend path (default: backend) |
+| `--git-repo=URL` | Git repository URL to pull from (default: https://github.com/seilent/MIU) |
+| `--git-branch=BRANCH` | Git branch to use (default: main) |
+| `--deploy-dir=DIR` | Directory to deploy to (default: /var/www/miu) |
+| `--no-pull` | Skip pulling from Git repository |
 | `--help` | Display help message |
+
+## Deployment from Git Repository
+
+The script automatically pulls code from the default repository (https://github.com/seilent/MIU), which is useful for continuous deployment or initial setup:
+
+1. **First-time deployment**:
+   ```bash
+   ./scripts/deploy.sh --domain=yourdomain.com
+   ```
+   This will:
+   - Clone the repository to `/var/www/miu` (default)
+   - Install dependencies
+   - Build and deploy both frontend and backend
+   - Configure Nginx
+
+2. **Update existing deployment**:
+   ```bash
+   ./scripts/deploy.sh --domain=yourdomain.com
+   ```
+   If the repository already exists in the deployment directory, the script will:
+   - Pull the latest changes from the specified branch
+   - Rebuild and restart the services
+
+3. **Using SSH for private repositories**:
+   For private repositories, make sure your SSH keys are set up correctly on the server:
+   ```bash
+   ./scripts/deploy.sh --domain=yourdomain.com --git-repo=git@github.com:yourusername/miu.git
+   ```
+
+4. **Deploying without Git**:
+   If you want to deploy from local files instead of pulling from Git:
+   ```bash
+   ./scripts/deploy.sh --domain=yourdomain.com --no-pull
+   ```
 
 ## Manual Deployment Steps
 
@@ -263,6 +314,11 @@ sudo systemctl enable redis-server
 5. **CORS issues**:
    - Ensure the backend is properly configured to accept requests from the frontend
    - With the path-based approach, CORS issues should be minimal since both frontend and backend are on the same domain
+
+6. **Git repository issues**:
+   - For private repositories, ensure SSH keys are properly set up
+   - Check permissions on the deployment directory
+   - Verify the branch name is correct
 
 ### Getting Help
 

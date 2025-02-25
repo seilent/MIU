@@ -963,6 +963,9 @@ export class Player {
           where: {
             youtubeId: {
               in: popularTracks.map(t => t.youtubeId)
+            },
+            globalScore: {
+              gte: 0 // Only include tracks with non-negative scores
             }
           }
         });
@@ -1058,6 +1061,9 @@ export class Player {
               youtubeId: {
                 in: [...selectionPool.map(item => item.track.youtubeId)]
               }
+            },
+            globalScore: {
+              gte: 0 // Only include tracks with non-negative scores
             }
           },
           orderBy: {

@@ -16,8 +16,12 @@ USE_PM2=true
 SETUP_NGINX=true
 SETUP_SSL=false
 DOMAIN_NAME=""
-BACKEND_PATH="backend"  # Changed from subdomain to path
+BACKEND_PATH="backend"
 PROJECT_ROOT=$(pwd)
+GIT_REPO="https://github.com/seilent/MIU"
+GIT_BRANCH="main"
+DEPLOY_DIR="/var/www/miu"
+PULL_REPO=true
 
 # Text formatting
 BOLD='\033[1m'
@@ -58,8 +62,24 @@ for arg in "$@"; do
       DOMAIN_NAME="${arg#*=}"
       shift
       ;;
-    --backend-path=*)  # Changed from backend-subdomain to backend-path
+    --backend-path=*)
       BACKEND_PATH="${arg#*=}"
+      shift
+      ;;
+    --git-repo=*)
+      GIT_REPO="${arg#*=}"
+      shift
+      ;;
+    --git-branch=*)
+      GIT_BRANCH="${arg#*=}"
+      shift
+      ;;
+    --deploy-dir=*)
+      DEPLOY_DIR="${arg#*=}"
+      shift
+      ;;
+    --no-pull)
+      PULL_REPO=false
       shift
       ;;
     --help)
@@ -75,6 +95,10 @@ for arg in "$@"; do
       echo "  --with-ssl            Configure SSL with Let's Encrypt"
       echo "  --domain=DOMAIN       Set the domain name (required for Nginx and SSL)"
       echo "  --backend-path=PATH   Set the backend path (default: backend)"
+      echo "  --git-repo=URL        Git repository URL to pull from (default: https://github.com/seilent/MIU)"
+      echo "  --git-branch=BRANCH   Git branch to use (default: main)"
+      echo "  --deploy-dir=DIR      Directory to deploy to (default: /var/www/miu)"
+      echo "  --no-pull             Skip pulling from Git repository"
       echo "  --help                Display this help message"
       exit 0
       ;;
@@ -109,6 +133,12 @@ install_system_dependencies() {
   # Update package lists
   sudo apt-get update
   
+  # Install Git if not installed
+  if ! command_exists git; then
+    echo -e "${YELLOW}Installing Git...${NC}"
+    sudo apt-get install -y git
+  fi
+  
   # Install Node.js if not installed
   if ! command_exists node; then
     echo -e "${YELLOW}Installing Node.js...${NC}"
@@ -135,6 +165,38 @@ install_system_dependencies() {
   fi
   
   echo -e "${GREEN}System dependencies installed successfully.${NC}"
+}
+
+# Function to pull from Git repository
+pull_repository() {
+  if [ "$PULL_REPO" = true ]; then
+    echo -e "${BLUE}Pulling code from Git repository (${GIT_REPO})...${NC}"
+    
+    # Create deployment directory if it doesn't exist
+    if [ ! -d "$DEPLOY_DIR" ]; then
+      echo -e "${YELLOW}Creating deployment directory: $DEPLOY_DIR${NC}"
+      sudo mkdir -p "$DEPLOY_DIR"
+      sudo chown $(whoami):$(whoami) "$DEPLOY_DIR"
+    fi
+    
+    # Check if it's a new clone or update
+    if [ -d "$DEPLOY_DIR/.git" ]; then
+      echo -e "${YELLOW}Updating existing repository...${NC}"
+      cd "$DEPLOY_DIR"
+      git fetch
+      git checkout "$GIT_BRANCH"
+      git pull origin "$GIT_BRANCH"
+    else
+      echo -e "${YELLOW}Cloning repository...${NC}"
+      git clone --branch "$GIT_BRANCH" "$GIT_REPO" "$DEPLOY_DIR"
+      cd "$DEPLOY_DIR"
+    fi
+    
+    # Update PROJECT_ROOT to the deployment directory
+    PROJECT_ROOT="$DEPLOY_DIR"
+    
+    echo -e "${GREEN}Repository updated successfully.${NC}"
+  fi
 }
 
 # Function to deploy the backend
@@ -314,6 +376,9 @@ echo -e "${BOLD}Starting MIU deployment...${NC}"
 if [ "$INSTALL_DEPS" = true ]; then
   install_system_dependencies
 fi
+
+# Pull from Git repository if specified
+pull_repository
 
 # Deploy backend if enabled
 if [ "$DEPLOY_BACKEND" = true ]; then

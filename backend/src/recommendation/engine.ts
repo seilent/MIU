@@ -14,7 +14,7 @@ interface UserStats {
 
 export class RecommendationEngine {
   private readonly RECENT_HISTORY_HOURS = 72; // Consider last 72 hours
-  private readonly MIN_SCORE = -0.5; // Minimum score to consider a track
+  private readonly MIN_SCORE = 0; // Minimum score to consider a track (changed from -0.5 to prevent negative scores)
   private readonly RECENCY_PENALTY_HOURS = 3; // How recent a song needs to be to get penalized
   private readonly USER_WEIGHT = 0.6; // Weight for user preferences vs global score
   private readonly GLOBAL_WEIGHT = 0.4; // Weight for global score
