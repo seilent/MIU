@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import swaggerUi from 'swagger-ui-express';
 import { createTRPCRouter } from './trpc.js';
 import { authRouter } from './routes/auth.js';
-import { musicRouter, setupWebSocketAudio } from './routes/music.js';
+import { musicRouter } from './routes/music.js';
 import { adminRouter } from './routes/admin.js';
 import { healthRouter } from './routes/health.js';
 import historyRouter from './routes/history.js';
@@ -19,6 +19,7 @@ import { albumArtRouter } from './routes/albumart.js';
 import { initializeDiscordClient } from './discord/client.js';
 import getEnv from './utils/env.js';
 import http from 'http';
+import { json } from 'body-parser';
 
 const env = getEnv();
 
@@ -33,10 +34,6 @@ export async function createServer() {
   } catch (error) {
     logger.error('Failed to initialize Discord client:', error);
   }
-
-  // Set up WebSocket server for audio streaming
-  const wss = setupWebSocketAudio(server);
-  logger.info('WebSocket server for audio streaming initialized');
 
   // CORS configuration
   const corsOrigins = env.getString('CORS_ORIGIN', 'http://localhost:3300').split(',').map(origin => origin.trim());
@@ -97,9 +94,9 @@ export async function createServer() {
 
   // API Routes with /api prefix
   app.use('/api/auth', authRouter);
-  app.use('/api/music', authMiddleware as express.RequestHandler, musicRouter);
-  app.use('/api/admin', authMiddleware as express.RequestHandler, adminRouter);
-  app.use('/api/history', authMiddleware as express.RequestHandler, historyRouter);
+  app.use('/api/music', authMiddleware, musicRouter);
+  app.use('/api/admin', authMiddleware, adminRouter);
+  app.use('/api/history', authMiddleware, historyRouter);
   app.use('/api/presence', presenceRouter);
   app.use('/api/albumart', albumArtRouter);
 

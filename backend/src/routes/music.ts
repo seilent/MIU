@@ -13,12 +13,7 @@ import {
   audioStreamBytesCounter, 
   audioStreamLatencyHistogram 
 } from '../metrics.js';
-import WebSocket from 'ws';
-import jwt from 'jsonwebtoken';
-import { createReadStream } from 'fs';
-import { PassThrough } from 'stream';
-import { spawn } from 'child_process';
-import ffmpeg from 'ffmpeg-static';
+import { Readable, PassThrough } from 'stream';
 import path from 'path';
 
 interface WebUser {
@@ -622,268 +617,116 @@ router.post('/autoplay', async (req, res) => {
   }
 });
 
-router.get('/audio/:youtubeId', async (req, res) => {
-  const startTime = Date.now();
-  
+// Shared stream controller
+const activeStreams = new Map<string, {
+  stream: Readable;
+  listeners: number;
+  filePath: string;
+}>();
+
+function getSharedStream(youtubeId: string, filePath: string): Readable {
+  const existing = activeStreams.get(youtubeId);
+  if (existing) {
+    existing.listeners++;
+    return existing.stream;
+  }
+
+  const stream = fs.createReadStream(filePath, {
+    highWaterMark: 1024 * 64 // 64KB chunks for efficient streaming
+  });
+
+  activeStreams.set(youtubeId, {
+    stream,
+    listeners: 1,
+    filePath
+  });
+          
+  // Cleanup when stream ends
+  stream.on('end', () => {
+    const streamData = activeStreams.get(youtubeId);
+    if (streamData && --streamData.listeners === 0) {
+      activeStreams.delete(youtubeId);
+            }
+  });
+          
+  return stream;
+}
+
+// New streaming endpoint
+router.get('/stream', async (req, res) => {
   try {
-    // Check authentication - user might not be a WebUser type
     if (!req.user) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { youtubeId } = req.params;
-    const isPrefetch = req.headers['x-prefetch'] === 'true';
-    
-    // Log without user ID for privacy
-    console.log(`Audio request for: ${youtubeId}${isPrefetch ? ' (prefetch)' : ''}`);
-    
+    const client = getDiscordClient();
+    if (!client) {
+      return res.status(500).json({ error: 'Discord client not available' });
+    }
+
+    const currentTrack = await prisma.request.findFirst({
+      where: { status: RequestStatus.PLAYING },
+      include: { track: true }
+    });
+
+    if (!currentTrack) {
+      return res.status(404).json({ error: 'No track playing' });
+    }
+
     // Get cached audio file
     const audioCache = await prisma.audioCache.findUnique({
-      where: { youtubeId }
+      where: { youtubeId: currentTrack.track.youtubeId }
     });
 
     if (!audioCache || !fs.existsSync(audioCache.filePath)) {
-      console.log('Audio not found:', youtubeId);
+      return res.status(404).json({ error: 'Audio not found' });
+    }
+
+    // Set streaming headers
+    res.setHeader('Content-Type', 'audio/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Initial-Position', client.player.getPosition());
+    res.setHeader('X-Playback-Start', Date.now());
+    res.setHeader('X-Track-Id', currentTrack.track.youtubeId);
+    res.setHeader('X-Track-Duration', currentTrack.track.duration);
+    res.setHeader('Access-Control-Expose-Headers', 
+      'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration');
       
-      // For prefetch requests, trigger background download instead of returning 404
-      if (isPrefetch) {
-        // Get the Discord client to trigger a background download
-        const client = getDiscordClient();
-        if (client) {
-          // Trigger a download by requesting the audio resource
-          // This will automatically download if not in cache
-          console.log(`Initiating background download for ${youtubeId}`);
-          
-          // Use a background process to download the audio
-          (async () => {
-            try {
-              // This will download the audio if it doesn't exist
-              await downloadYoutubeAudio(youtubeId);
-              console.log(`Background download complete for ${youtubeId}`);
-            } catch (error) {
-              console.error(`Background download failed for ${youtubeId}:`, error);
-            }
-          })();
-          
-          return res.status(202).json({ message: 'Download initiated' });
+    // Get or create shared stream
+    const fileStream = getSharedStream(currentTrack.track.youtubeId, audioCache.filePath);
+      
+    // Track metrics
+    audioStreamRequestsCounter.inc({ type: 'stream' });
+    const startTime = Date.now();
+
+    // Handle client disconnect
+    req.on('close', () => {
+      const streamData = activeStreams.get(currentTrack.track.youtubeId);
+      if (streamData) {
+        streamData.listeners--;
+        if (streamData.listeners === 0) {
+          streamData.stream.destroy();
+          activeStreams.delete(currentTrack.track.youtubeId);
         }
       }
       
-      return res.status(404).json({ error: 'Audio not found in cache' });
-    }
-
-    // For HEAD requests (prefetch), just return headers without body
-    if (req.method === 'HEAD') {
-      const stat = fs.statSync(audioCache.filePath);
-      const fileSize = stat.size;
-      
-      // Set CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Prefetch');
-      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-      
-      // Determine content type
-      const extension = audioCache.filePath.split('.').pop()?.toLowerCase();
-      let contentType = 'audio/mp4'; // default for AAC/M4A
-
-      switch (extension) {
-        case 'm4a':
-          contentType = 'audio/mp4';
-          break;
-        case 'aac':
-          contentType = 'audio/aac';
-          break;
-        case 'mp3':
-          contentType = 'audio/mpeg';
-          break;
-        case 'webm':
-          contentType = 'audio/webm';
-          break;
-      }
-      
-      // Set audio headers
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Content-Length', fileSize);
-      
-      // Set caching headers
-      const etag = `"${youtubeId}-${stat.mtime.getTime()}"`;
-      res.setHeader('ETag', etag);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
-      
-      // Track prefetch metrics
-      audioStreamRequestsCounter.inc({ type: 'prefetch' });
-      
-      return res.status(200).end();
-    }
-
-    // Log file details for debugging
-    console.log(`Serving audio file: path=${audioCache.filePath}, size=${fs.statSync(audioCache.filePath).size}, extension=${audioCache.filePath.split('.').pop()}`);
-
-    const stat = fs.statSync(audioCache.filePath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
-
-    // Set CORS headers for audio streaming
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-
-    // Determine content type based on file extension
-    const extension = audioCache.filePath.split('.').pop()?.toLowerCase();
-    let contentType = 'audio/mp4'; // default for AAC/M4A
-
-    switch (extension) {
-      case 'm4a':
-        contentType = 'audio/mp4'; // Standard MIME type for M4A/AAC
-        break;
-      case 'aac':
-        contentType = 'audio/aac';
-        break;
-      case 'mp3':
-        contentType = 'audio/mpeg';
-        break;
-      case 'webm':
-        contentType = 'audio/webm';
-        break;
-    }
-
-    // Set audio headers
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Accept-Ranges', 'bytes');
-    
-    // Improved caching headers for streaming
-    const etag = `"${youtubeId}-${stat.mtime.getTime()}"`;
-    res.setHeader('ETag', etag);
-    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
-    
-    // Check if client has a valid cached copy
-    if (req.headers['if-none-match'] === etag) {
-      return res.status(304).end(); // Not Modified
-    }
-
-    // Handle range requests
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      
-      // For streaming, use smaller chunk sizes (256KB) for faster initial playback
-      // but allow larger chunks (up to 1MB) if explicitly requested
-      const end = parts[1] 
-        ? parseInt(parts[1], 10) 
-        : Math.min(start + 256 * 1024, fileSize - 1);
-      
-      const chunksize = (end - start) + 1;
-
-      console.log(`Range request: start=${start}, end=${end}, chunksize=${chunksize}`);
-      
-      // Track range request metrics
-      audioStreamRequestsCounter.inc({ type: 'range' });
-      audioStreamBytesCounter.inc({ type: 'range' }, chunksize);
-
-      // Validate range
-      if (start >= fileSize || end >= fileSize) {
-        // Return the 416 Range Not Satisfiable if the range is invalid
-        res.setHeader('Content-Range', `bytes */${fileSize}`);
-        return res.status(416).end();
-      }
-
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-      res.setHeader('Content-Length', chunksize);
-      res.status(206);
-
-      const stream = fs.createReadStream(audioCache.filePath, { start, end });
-      
-      // Add better error handling for streams
-      stream.on('error', (error) => {
-        console.error('Stream error:', error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Stream error' });
-        } else if (!res.writableEnded) {
-          res.end();
-        }
-      });
-      
-      // Handle client disconnects
-      req.on('close', () => {
-        stream.destroy();
-      });
-      
-      // Track latency when the response finishes
-      res.on('finish', () => {
+      // Track latency
         const latency = (Date.now() - startTime) / 1000;
         audioStreamLatencyHistogram.observe(latency);
       });
       
-      stream.pipe(res);
-    } else {
-      // No range requested, send entire file
-      // For streaming clients, they should be using range requests
-      // but we'll handle the full file case as well
-      
-      // Track full file request metrics
-      audioStreamRequestsCounter.inc({ type: 'full' });
-      audioStreamBytesCounter.inc({ type: 'full' }, fileSize);
-      
-      res.setHeader('Content-Length', fileSize);
-      const stream = fs.createReadStream(audioCache.filePath);
-      
-      stream.on('error', (error) => {
-        console.error('Stream error:', error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: 'Stream error' });
-        } else if (!res.writableEnded) {
-          res.end();
-        }
-      });
-      
-      // Handle client disconnects
-      req.on('close', () => {
-        stream.destroy();
-      });
-      
-      // Track latency when the response finishes
-      res.on('finish', () => {
-        const latency = (Date.now() - startTime) / 1000;
-        audioStreamLatencyHistogram.observe(latency);
-      });
-      
-      stream.pipe(res);
-    }
+    // Pipe stream to response
+    fileStream.pipe(res);
+
   } catch (error) {
-    console.error('Error streaming audio:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to stream audio' });
+        console.error('Stream error:', error);
+        if (!res.headersSent) {
+      res.status(500).json({ error: 'Stream failed' });
     }
   }
 });
 
-/**
- * @swagger
- * /api/music/position:
- *   get:
- *     summary: Get current playback position
- *     tags: [Music]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Current playback position in seconds
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 position:
- *                   type: number
- *                   description: Current position in seconds
- *       401:
- *         description: Unauthorized
- *       500:
- *         description: Server error
- */
+// Enhanced position endpoint
 router.get('/position', async (req: Request, res: Response) => {
   try {
     const client = getDiscordClient();
@@ -891,11 +734,22 @@ router.get('/position', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Discord client not available' });
     }
     
-    const position = client.player.getPosition();
-    res.json({ position });
+    const currentTrack = await prisma.request.findFirst({
+      where: { status: RequestStatus.PLAYING },
+      include: { track: true }
+    });
+
+    res.json({
+      position: client.player.getPosition(),
+      duration: currentTrack?.track.duration || 0,
+      timestamp: Date.now(),
+      trackId: currentTrack?.track.youtubeId,
+      title: currentTrack?.track.title,
+      playbackRate: 1.0
+    });
   } catch (error) {
-    console.error('Error getting playback position:', error);
-    res.status(500).json({ error: 'Failed to get playback position' });
+    console.error('Position error:', error);
+    res.status(500).json({ error: 'Failed to get position' });
   }
 });
 
@@ -950,358 +804,6 @@ router.get('/history', async (req: Request, res: Response) => {
  */
 router.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok' });
-});
-
-/**
- * @swagger
- * /api/music/stream:
- *   get:
- *     summary: Get continuous audio stream
- *     tags: [Music]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Audio stream
- *         content:
- *           audio/mpeg:
- *             schema:
- *               type: string
- *               format: binary
- *       401:
- *         description: Unauthorized
- *       500:
- *         description: Server error
- */
-router.get('/stream', async (req, res) => {
-  try {
-    // Check authentication
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    // Set headers for streaming
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-
-    // Get Discord client
-    const client = getDiscordClient();
-    if (!client) {
-      return res.status(500).json({ error: 'Discord client not available' });
-    }
-
-    // Create a PassThrough stream to pipe audio data
-    const { PassThrough } = await import('stream');
-    const audioStream = new PassThrough();
-
-    // Function to send silence when no track is playing
-    const sendSilence = () => {
-      // Create 1 second of silence (44.1kHz, 16-bit, stereo)
-      const silenceBuffer = Buffer.alloc(44100 * 2 * 2);
-      audioStream.write(silenceBuffer);
-    };
-
-    // Handle client disconnect
-    req.on('close', () => {
-      console.log('Client disconnected from audio stream');
-      audioStream.end();
-    });
-
-    // Start streaming
-    res.status(200);
-    audioStream.pipe(res);
-
-    // Send initial silence to start the stream
-    sendSilence();
-
-    // Set up audio pipeline from Discord player
-    client.player.setupAudioPipeline(audioStream);
-
-    // Log streaming start
-    console.log('Started audio streaming for client');
-    
-    // Track metrics
-    audioStreamRequestsCounter.inc({ type: 'stream' });
-  } catch (error) {
-    console.error('Error setting up audio stream:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to set up audio stream' });
-    }
-  }
-});
-
-// Export WebSocket handler for audio streaming
-export function setupWebSocketAudio(server: any) {
-  const wss = new WebSocket.Server({ 
-    noServer: true,
-    path: '/api/music/ws-stream'
-  });
-
-  // Handle upgrade requests
-  server.on('upgrade', async (request: any, socket: any, head: any) => {
-    if (request.url.startsWith('/api/music/ws-stream')) {
-      // Extract token from query string
-      const url = new URL(request.url, `http://${request.headers.host}`);
-      const token = url.searchParams.get('token');
-      
-      if (!token) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      
-      try {
-        // Verify token using jwt directly
-        const decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-          id: string;
-          roles: string[];
-        };
-        
-        // Get user from database to ensure they still exist
-        const user = await prisma.user.findUnique({
-          where: { id: decoded.id },
-          include: { roles: true },
-        });
-
-        if (!user) {
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-        
-        // Store user info for later use
-        (request as any).user = {
-          id: user.id,
-          roles: user.roles.map(role => role.name),
-        };
-        
-        // Upgrade the connection
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          wss.emit('connection', ws, request);
-        });
-      } catch (error) {
-        console.error('WebSocket auth error:', error);
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-      }
-    }
-  });
-
-  // Handle WebSocket connections
-  wss.on('connection', async (ws: WebSocket, request: any) => {
-    console.log('WebSocket audio stream connected');
-    
-    // Get Discord client
-    const client = getDiscordClient();
-    if (!client) {
-      ws.close(1011, 'Discord client not available');
-      return;
-    }
-    
-    // Create a PassThrough stream for audio data
-    const audioStream = new PassThrough();
-    
-    // Track metrics
-    audioStreamRequestsCounter.inc({ type: 'websocket' });
-    
-    // Handle WebSocket close
-    ws.on('close', () => {
-      console.log('WebSocket audio stream closed');
-      audioStream.end();
-    });
-    
-    // Handle WebSocket errors
-    ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
-      audioStream.end();
-    });
-    
-    // Set up audio pipeline from Discord player
-    client.player.setupAudioPipeline(audioStream);
-    
-    // Pipe audio data to WebSocket
-    audioStream.on('data', (chunk) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(chunk);
-      }
-    });
-    
-    // Send initial message to confirm connection
-    ws.send(JSON.stringify({ type: 'connected', message: 'Audio stream connected' }));
-  });
-  
-  return wss;
-}
-
-// Add a new endpoint for HLS streaming
-router.get('/hls/:youtubeId/:segment', async (req, res) => {
-  try {
-    // Check authentication
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const { youtubeId, segment } = req.params;
-    
-    // Get cached audio file
-    const audioCache = await prisma.audioCache.findUnique({
-      where: { youtubeId }
-    });
-
-    if (!audioCache || !fs.existsSync(audioCache.filePath)) {
-      return res.status(404).json({ error: 'Audio not found' });
-    }
-
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    
-    // Set content type for TS segment
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
-    
-    // Create cache directory for HLS segments if it doesn't exist
-    const cacheDir = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
-    const hlsDir = path.join(cacheDir, 'hls', youtubeId);
-    
-    if (!fs.existsSync(hlsDir)) {
-      fs.mkdirSync(hlsDir, { recursive: true });
-    }
-    
-    const segmentPath = path.join(hlsDir, `${segment}.ts`);
-    
-    // Check if segment already exists
-    if (fs.existsSync(segmentPath)) {
-      // Serve cached segment
-      const stream = fs.createReadStream(segmentPath);
-      stream.pipe(res);
-      return;
-    }
-    
-    // Generate segment using ffmpeg
-    const ffmpegProcess = spawn(ffmpeg!, [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-i', audioCache.filePath,
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-f', 'segment',
-      '-segment_time', '10',
-      '-segment_start_number', segment,
-      '-segment_list', path.join(hlsDir, 'playlist.m3u8'),
-      '-segment_format', 'mpegts',
-      path.join(hlsDir, '%d.ts')
-    ]);
-    
-    ffmpegProcess.on('close', (code) => {
-      if (code === 0 && fs.existsSync(segmentPath)) {
-        // Serve generated segment
-        const stream = fs.createReadStream(segmentPath);
-        stream.pipe(res);
-      } else {
-        res.status(500).json({ error: 'Failed to generate segment' });
-      }
-    });
-    
-    ffmpegProcess.stderr.on('data', (data) => {
-      console.error(`FFmpeg error: ${data}`);
-    });
-    
-  } catch (error) {
-    console.error('Error serving HLS segment:', error);
-    res.status(500).json({ error: 'Failed to serve segment' });
-  }
-});
-
-// Add endpoint for HLS playlist
-router.get('/hls/:youtubeId/playlist.m3u8', async (req, res) => {
-  try {
-    // Check authentication
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const { youtubeId } = req.params;
-    
-    // Get cached audio file
-    const audioCache = await prisma.audioCache.findUnique({
-      where: { youtubeId },
-      include: { track: true }
-    });
-
-    if (!audioCache || !fs.existsSync(audioCache.filePath)) {
-      return res.status(404).json({ error: 'Audio not found' });
-    }
-
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    
-    // Set content type for M3U8 playlist
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-cache'); // Don't cache playlist
-    
-    // Create cache directory for HLS segments if it doesn't exist
-    const cacheDir = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
-    const hlsDir = path.join(cacheDir, 'hls', youtubeId);
-    
-    if (!fs.existsSync(hlsDir)) {
-      fs.mkdirSync(hlsDir, { recursive: true });
-    }
-    
-    const playlistPath = path.join(hlsDir, 'playlist.m3u8');
-    
-    // Check if playlist already exists
-    if (fs.existsSync(playlistPath)) {
-      // Serve cached playlist
-      const stream = fs.createReadStream(playlistPath);
-      stream.pipe(res);
-      return;
-    }
-    
-    // Generate playlist using ffmpeg
-    const ffmpegProcess = spawn(ffmpeg!, [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-i', audioCache.filePath,
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-f', 'hls',
-      '-hls_time', '10',
-      '-hls_list_size', '0',
-      '-hls_segment_filename', path.join(hlsDir, '%d.ts'),
-      playlistPath
-    ]);
-    
-    ffmpegProcess.on('close', (code) => {
-      if (code === 0 && fs.existsSync(playlistPath)) {
-        // Serve generated playlist
-        const stream = fs.createReadStream(playlistPath);
-        stream.pipe(res);
-      } else {
-        res.status(500).json({ error: 'Failed to generate playlist' });
-      }
-    });
-    
-    ffmpegProcess.stderr.on('data', (data) => {
-      console.error(`FFmpeg error: ${data}`);
-    });
-    
-  } catch (error) {
-    console.error('Error serving HLS playlist:', error);
-    res.status(500).json({ error: 'Failed to serve playlist' });
-  }
 });
 
 export { router as musicRouter };
