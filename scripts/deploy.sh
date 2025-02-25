@@ -240,14 +240,32 @@ install_system_dependencies() {
     fi
   fi
   
-  # Check for dependencies required for building native modules
-  echo -e "${YELLOW}Checking dependencies for building native modules...${NC}"
+  # Install comprehensive dependencies for building native modules
+  echo -e "${YELLOW}Installing comprehensive dependencies for building native modules...${NC}"
   
-  # Check for build tools
-  if ! command_exists gcc || ! command_exists make; then
-    echo -e "${YELLOW}Installing build tools (gcc, make)...${NC}"
-    sudo apt-get install -y build-essential
+  # Install build essentials and Python
+  echo -e "${YELLOW}Installing build-essential and Python tools...${NC}"
+  sudo apt-get install -y build-essential python3-pip python3-dev
+  
+  # Install specific dependencies for native modules (from reference guide)
+  echo -e "${YELLOW}Installing specific dependencies for native modules...${NC}"
+  sudo apt-get install -y libopus-dev libvips-dev ffmpeg
+  sudo apt-get install -y make g++ libtool autoconf automake
+  sudo apt-get install -y gyp
+  
+  # Install YouTube audio dependencies
+  echo -e "${YELLOW}Installing YouTube audio dependencies...${NC}"
+  
+  # Install ffmpeg if not already installed (should be installed above, but double-check)
+  if ! command_exists ffmpeg; then
+    echo -e "${YELLOW}Installing ffmpeg...${NC}"
+    sudo apt-get install -y ffmpeg
   fi
+  
+  # Install yt-dlp globally
+  echo -e "${YELLOW}Installing yt-dlp globally...${NC}"
+  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+  sudo chmod a+rx /usr/local/bin/yt-dlp
   
   # Check for Python and handle externally managed environments
   if command_exists python3; then
@@ -268,21 +286,10 @@ install_system_dependencies() {
         sudo apt-get install -y python3 python3-dev python3-pip
         export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
       fi
-    else
-      # Install Python development packages
-      echo -e "${YELLOW}Installing Python development packages...${NC}"
-      sudo apt-get install -y python3-dev python3-pip
     fi
-  else
-    echo -e "${YELLOW}Installing Python 3...${NC}"
-    sudo apt-get install -y python3 python3-dev python3-pip
   fi
   
-  # Install dependencies for native modules
-  echo -e "${YELLOW}Installing dependencies for native modules...${NC}"
-  sudo apt-get install -y libopus-dev libvips-dev ffmpeg
-  
-  echo -e "${GREEN}System dependency check completed.${NC}"
+  echo -e "${GREEN}System dependency installation completed.${NC}"
 }
 
 # Function to set up Docker for database and Redis
@@ -524,6 +531,57 @@ run_pm2() {
   fi
 }
 
+# Function to install and configure YouTube audio dependencies
+install_youtube_audio_deps() {
+  echo -e "${BLUE}Installing and configuring YouTube audio dependencies...${NC}"
+  
+  # Install ffmpeg if not already installed
+  if ! command_exists ffmpeg; then
+    echo -e "${YELLOW}Installing ffmpeg...${NC}"
+    sudo apt-get install -y ffmpeg
+  else
+    echo -e "${GREEN}ffmpeg is already installed.${NC}"
+  fi
+  
+  # Install yt-dlp globally
+  echo -e "${YELLOW}Installing yt-dlp globally...${NC}"
+  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+  sudo chmod a+rx /usr/local/bin/yt-dlp
+  
+  # Check if we're in the backend directory or need to navigate there
+  if [ -d "$PROJECT_ROOT/backend" ]; then
+    cd "$PROJECT_ROOT/backend"
+  fi
+  
+  # Create symbolic links for yt-dlp
+  echo -e "${YELLOW}Creating symbolic links for yt-dlp...${NC}"
+  mkdir -p node_modules/yt-dlp-exec/bin
+  ln -sf /usr/local/bin/yt-dlp node_modules/yt-dlp-exec/bin/yt-dlp
+  
+  # Create symbolic links for ffmpeg
+  echo -e "${YELLOW}Creating symbolic links for ffmpeg...${NC}"
+  mkdir -p node_modules/ffmpeg-static
+  ln -sf $(which ffmpeg) node_modules/ffmpeg-static/ffmpeg
+  
+  # Verify installations
+  echo -e "${YELLOW}Verifying installations...${NC}"
+  if command_exists yt-dlp; then
+    YT_DLP_VERSION=$(yt-dlp --version)
+    echo -e "${GREEN}yt-dlp version $YT_DLP_VERSION installed successfully.${NC}"
+  else
+    echo -e "${RED}yt-dlp installation failed. Please install it manually.${NC}"
+  fi
+  
+  if command_exists ffmpeg; then
+    FFMPEG_VERSION=$(ffmpeg -version | head -n1)
+    echo -e "${GREEN}$FFMPEG_VERSION installed successfully.${NC}"
+  else
+    echo -e "${RED}ffmpeg installation failed. Please install it manually.${NC}"
+  fi
+  
+  echo -e "${GREEN}YouTube audio dependencies setup completed.${NC}"
+}
+
 # Function to deploy the backend
 deploy_backend() {
   echo -e "${BLUE}Deploying backend...${NC}"
@@ -539,40 +597,49 @@ deploy_backend() {
     export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
     export SHARP_IGNORE_GLOBAL_LIBVIPS=1
     
-    # First try to install all dependencies except problematic ones
-    echo -e "${YELLOW}Installing main dependencies...${NC}"
-    npm install --no-optional || true
+    # Clean installation (from reference guide)
+    echo -e "${YELLOW}Cleaning previous installation...${NC}"
+    rm -rf node_modules package-lock.json
+    npm cache clean --force
     
-    # Install sharp separately with multiple approaches
-    echo -e "${YELLOW}Installing sharp with multiple approaches...${NC}"
+    # Two-phase installation (from reference guide)
+    echo -e "${YELLOW}Phase 1: Installing dependencies (skipping scripts)...${NC}"
+    npm install --ignore-scripts --no-optional --no-fund || true
     
-    # Approach 1: Try with prebuild-install
-    echo -e "${YELLOW}Approach 1: Using prebuild-install...${NC}"
-    npm install --save-dev prebuild-install
-    npx prebuild-install -r sharp || true
+    echo -e "${YELLOW}Phase 2: Completing installation...${NC}"
+    npm install || true
     
-    # Approach 2: Try with specific environment variables
-    echo -e "${YELLOW}Approach 2: Using specific environment variables...${NC}"
-    export SHARP_DIST_BASE_URL=https://sharp.pixelplumbing.com/vendor/
-    npm install sharp --no-save || true
-    
-    # Approach 3: Try with build from source
+    # Install sharp separately with multiple approaches if it failed
     if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-      echo -e "${YELLOW}Approach 3: Building from source...${NC}"
-      npm install sharp --no-save --build-from-source || true
-    fi
-    
-    # Approach 4: Try with a specific version
-    if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-      echo -e "${YELLOW}Approach 4: Trying with a specific version...${NC}"
-      npm install sharp@0.32.6 --no-save || true
-    fi
-    
-    # Check if sharp installation failed
-    if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
-      echo -e "${YELLOW}Sharp installation failed. Creating a dummy module...${NC}"
-      mkdir -p node_modules/sharp
-      cat > node_modules/sharp/index.js << EOF
+      echo -e "${YELLOW}Sharp not properly installed. Trying multiple approaches...${NC}"
+      
+      # Approach 1: Try with prebuild-install
+      echo -e "${YELLOW}Approach 1: Using prebuild-install...${NC}"
+      npm install --save-dev prebuild-install
+      npx prebuild-install -r sharp || true
+      
+      # Approach 2: Try with specific environment variables
+      echo -e "${YELLOW}Approach 2: Using specific environment variables...${NC}"
+      export SHARP_DIST_BASE_URL=https://sharp.pixelplumbing.com/vendor/
+      npm install sharp --no-save || true
+      
+      # Approach 3: Try with build from source
+      if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+        echo -e "${YELLOW}Approach 3: Building from source...${NC}"
+        npm install sharp --no-save --build-from-source || true
+      fi
+      
+      # Approach 4: Try with a specific version
+      if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+        echo -e "${YELLOW}Approach 4: Trying with a specific version...${NC}"
+        npm install sharp@0.32.6 --no-save || true
+      fi
+      
+      # Check if sharp installation failed
+      if [ ! -d "node_modules/sharp" ] || [ ! -f "node_modules/sharp/build/Release/sharp.node" ]; then
+        echo -e "${YELLOW}Sharp installation failed. Creating a dummy module...${NC}"
+        mkdir -p node_modules/sharp
+        cat > node_modules/sharp/index.js << EOF
 console.warn('Sharp module not available. Image processing functionality is limited.');
 module.exports = {
   // Provide minimal dummy implementation
@@ -586,8 +653,9 @@ module.exports = {
   default: function() { return module.exports; }
 };
 EOF
-    else
-      echo -e "${GREEN}Sharp installed successfully.${NC}"
+      else
+        echo -e "${GREEN}Sharp installed successfully.${NC}"
+      fi
     fi
     
     # Install @discordjs/opus separately if needed
@@ -596,6 +664,9 @@ EOF
       npm install @discordjs/opus --no-save --build-from-source || npm install opusscript --no-save || true
     fi
   fi
+  
+  # Install and configure YouTube audio dependencies
+  install_youtube_audio_deps
   
   # Check if .env.example exists and copy to .env if needed
   if [ ! -f .env ] && [ -f "$PROJECT_ROOT/.env.example" ]; then
@@ -891,10 +962,53 @@ create_startup_script() {
 # MIU Startup Script
 # This script starts all required services for MIU
 
+# Set up environment variables for native modules
+export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
+export SHARP_IGNORE_GLOBAL_LIBVIPS=1
+export SHARP_DIST_BASE_URL=https://sharp.pixelplumbing.com/vendor/
+
 # Add npm global bin to PATH if it exists
 if [ -d "\$HOME/.npm-global/bin" ]; then
   export PATH="\$HOME/.npm-global/bin:\$PATH"
 fi
+
+# Check YouTube audio dependencies
+check_youtube_audio_deps() {
+  echo "Checking YouTube audio dependencies..."
+  
+  # Check if yt-dlp is installed
+  if ! command -v yt-dlp >/dev/null 2>&1; then
+    echo "Warning: yt-dlp not found. YouTube audio features may not work."
+    echo "Run the reinstall-packages.sh script and select option 5 to fix this issue."
+  else
+    # Check if symbolic links exist
+    if [ -d "$PROJECT_ROOT/backend" ]; then
+      if [ ! -f "$PROJECT_ROOT/backend/node_modules/yt-dlp-exec/bin/yt-dlp" ]; then
+        echo "Creating symbolic link for yt-dlp..."
+        mkdir -p "$PROJECT_ROOT/backend/node_modules/yt-dlp-exec/bin"
+        ln -sf /usr/local/bin/yt-dlp "$PROJECT_ROOT/backend/node_modules/yt-dlp-exec/bin/yt-dlp"
+      fi
+    fi
+  fi
+  
+  # Check if ffmpeg is installed
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "Warning: ffmpeg not found. Audio processing features may not work."
+    echo "Run the reinstall-packages.sh script and select option 5 to fix this issue."
+  else
+    # Check if symbolic links exist
+    if [ -d "$PROJECT_ROOT/backend" ]; then
+      if [ ! -f "$PROJECT_ROOT/backend/node_modules/ffmpeg-static/ffmpeg" ]; then
+        echo "Creating symbolic link for ffmpeg..."
+        mkdir -p "$PROJECT_ROOT/backend/node_modules/ffmpeg-static"
+        ln -sf \$(which ffmpeg) "$PROJECT_ROOT/backend/node_modules/ffmpeg-static/ffmpeg"
+      fi
+    fi
+  fi
+}
+
+# Check YouTube audio dependencies
+check_youtube_audio_deps
 
 # Start Docker services if using Docker
 if [ -f "$PROJECT_ROOT/docker-compose.db.yml" ]; then
@@ -928,6 +1042,173 @@ EOF
   echo -e "${YELLOW}  crontab -e${NC}"
   echo -e "${YELLOW}Then add the line:${NC}"
   echo -e "${YELLOW}  @reboot $PROJECT_ROOT/start.sh${NC}"
+}
+
+# Function to create a helper script for reinstalling problematic packages
+create_reinstall_script() {
+  echo -e "${BLUE}Creating package reinstallation helper script...${NC}"
+  
+  # Create a script to reinstall problematic packages
+  cat > "$PROJECT_ROOT/reinstall-packages.sh" << EOF
+#!/bin/bash
+
+# MIU Package Reinstallation Script
+# This script helps reinstall problematic native packages
+
+# Set up environment variables for native modules
+export NODE_GYP_FORCE_PYTHON=/usr/bin/python3
+export SHARP_IGNORE_GLOBAL_LIBVIPS=1
+export SHARP_DIST_BASE_URL=https://sharp.pixelplumbing.com/vendor/
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+# Function to reinstall a package
+reinstall_package() {
+  local package=\$1
+  local directory=\$2
+  
+  echo -e "\${YELLOW}Reinstalling \${package}...\${NC}"
+  
+  # Remove the package
+  rm -rf "\${directory}/node_modules/\${package}"
+  
+  # Clean npm cache for the package
+  npm cache clean --force \${package}
+  
+  # Try different installation methods
+  echo -e "\${YELLOW}Trying standard installation...\${NC}"
+  npm install \${package} --save || {
+    echo -e "\${YELLOW}Standard installation failed. Trying build from source...\${NC}"
+    npm install \${package} --build-from-source --save || {
+      echo -e "\${RED}All installation methods failed for \${package}.\${NC}"
+      return 1
+    }
+  }
+  
+  echo -e "\${GREEN}\${package} reinstalled successfully.\${NC}"
+  return 0
+}
+
+# Function to fix YouTube audio dependencies
+fix_youtube_audio_deps() {
+  echo -e "\${YELLOW}Fixing YouTube audio dependencies...\${NC}"
+  
+  # Install ffmpeg if not already installed
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo -e "\${YELLOW}Installing ffmpeg...\${NC}"
+    sudo apt-get install -y ffmpeg
+  else
+    echo -e "\${GREEN}ffmpeg is already installed.\${NC}"
+  fi
+  
+  # Install yt-dlp globally
+  echo -e "\${YELLOW}Installing yt-dlp globally...\${NC}"
+  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+  sudo chmod a+rx /usr/local/bin/yt-dlp
+  
+  # Create symbolic links for yt-dlp
+  echo -e "\${YELLOW}Creating symbolic links for yt-dlp...\${NC}"
+  mkdir -p node_modules/yt-dlp-exec/bin
+  ln -sf /usr/local/bin/yt-dlp node_modules/yt-dlp-exec/bin/yt-dlp
+  
+  # Create symbolic links for ffmpeg
+  echo -e "\${YELLOW}Creating symbolic links for ffmpeg...\${NC}"
+  mkdir -p node_modules/ffmpeg-static
+  ln -sf \$(which ffmpeg) node_modules/ffmpeg-static/ffmpeg
+  
+  # Verify installations
+  echo -e "\${YELLOW}Verifying installations...\${NC}"
+  if command -v yt-dlp >/dev/null 2>&1; then
+    YT_DLP_VERSION=\$(yt-dlp --version)
+    echo -e "\${GREEN}yt-dlp version \$YT_DLP_VERSION installed successfully.\${NC}"
+  else
+    echo -e "\${RED}yt-dlp installation failed. Please install it manually.\${NC}"
+  fi
+  
+  if command -v ffmpeg >/dev/null 2>&1; then
+    FFMPEG_VERSION=\$(ffmpeg -version | head -n1)
+    echo -e "\${GREEN}\$FFMPEG_VERSION installed successfully.\${NC}"
+  else
+    echo -e "\${RED}ffmpeg installation failed. Please install it manually.\${NC}"
+  fi
+  
+  echo -e "\${GREEN}YouTube audio dependencies fixed successfully.\${NC}"
+}
+
+# Check which directory to use
+if [ -d "./backend" ]; then
+  cd ./backend
+  echo -e "\${YELLOW}Working in backend directory.\${NC}"
+elif [ -d "../backend" ]; then
+  cd ../backend
+  echo -e "\${YELLOW}Working in backend directory.\${NC}"
+else
+  echo -e "\${YELLOW}Working in current directory.\${NC}"
+fi
+
+# Current directory
+CURRENT_DIR=\$(pwd)
+
+# Menu
+echo "Select an option:"
+echo "1) Reinstall @discordjs/opus"
+echo "2) Reinstall sharp"
+echo "3) Reinstall all problematic packages"
+echo "4) Clean installation (remove all node_modules)"
+echo "5) Fix YouTube audio dependencies (yt-dlp and ffmpeg)"
+echo "6) Exit"
+
+read -p "Enter your choice (1-6): " CHOICE
+
+case \$CHOICE in
+  1)
+    reinstall_package "@discordjs/opus" "\$CURRENT_DIR"
+    ;;
+  2)
+    reinstall_package "sharp" "\$CURRENT_DIR"
+    ;;
+  3)
+    reinstall_package "@discordjs/opus" "\$CURRENT_DIR"
+    reinstall_package "sharp" "\$CURRENT_DIR"
+    ;;
+  4)
+    echo -e "\${YELLOW}Performing clean installation...\${NC}"
+    rm -rf node_modules package-lock.json
+    npm cache clean --force
+    
+    echo -e "\${YELLOW}Phase 1: Installing dependencies (skipping scripts)...\${NC}"
+    npm install --ignore-scripts --no-optional --no-fund
+    
+    echo -e "\${YELLOW}Phase 2: Completing installation...\${NC}"
+    npm install
+    
+    echo -e "\${GREEN}Clean installation completed.\${NC}"
+    ;;
+  5)
+    fix_youtube_audio_deps
+    ;;
+  6)
+    echo -e "\${YELLOW}Exiting.\${NC}"
+    exit 0
+    ;;
+  *)
+    echo -e "\${RED}Invalid choice.\${NC}"
+    exit 1
+    ;;
+esac
+
+echo -e "\${GREEN}Operation completed.\${NC}"
+EOF
+  
+  # Make the script executable
+  chmod +x "$PROJECT_ROOT/reinstall-packages.sh"
+  
+  echo -e "${GREEN}Package reinstallation helper script created at $PROJECT_ROOT/reinstall-packages.sh${NC}"
+  echo -e "${YELLOW}You can use this script to reinstall problematic packages if needed.${NC}"
 }
 
 # Function to update .env.example based on current .env
@@ -1014,6 +1295,9 @@ setup_ssl
 
 # Create startup script
 create_startup_script
+
+# Create package reinstallation helper script
+create_reinstall_script
 
 # Update .env.example based on current .env
 update_env_example
