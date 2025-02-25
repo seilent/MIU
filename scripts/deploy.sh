@@ -164,6 +164,15 @@ install_system_dependencies() {
     sudo apt-get install -y certbot python3-certbot-nginx
   fi
   
+  # Install dependencies required for building @discordjs/opus
+  echo -e "${YELLOW}Installing dependencies for building native modules...${NC}"
+  sudo apt-get install -y python3-pip build-essential libtool autoconf automake python3-dev
+  sudo pip3 install gyp
+  
+  # Install dependencies for audio processing
+  echo -e "${YELLOW}Installing audio dependencies...${NC}"
+  sudo apt-get install -y ffmpeg libopus-dev
+  
   echo -e "${GREEN}System dependencies installed successfully.${NC}"
 }
 
@@ -209,7 +218,31 @@ deploy_backend() {
   # Install dependencies if needed
   if [ "$INSTALL_DEPS" = true ]; then
     echo -e "${YELLOW}Installing backend dependencies...${NC}"
-    npm install
+    
+    # First try to install all dependencies
+    npm install || true
+    
+    # Check if @discordjs/opus installation failed
+    if [ ! -d "node_modules/@discordjs/opus" ]; then
+      echo -e "${YELLOW}Attempting to fix @discordjs/opus installation...${NC}"
+      
+      # Install specific dependencies for @discordjs/opus
+      npm install @discordjs/opus --no-save --build-from-source || true
+      
+      # If still failing, try with an alternative voice implementation
+      if [ ! -d "node_modules/@discordjs/opus" ]; then
+        echo -e "${YELLOW}Using alternative voice implementation...${NC}"
+        # Install opusscript as a fallback (pure JS implementation, less efficient but more compatible)
+        npm install opusscript
+        
+        # Create a patch to use opusscript instead if needed
+        if [ -f "src/services/discord/voice.ts" ]; then
+          echo -e "${YELLOW}Patching voice service to use alternative implementation...${NC}"
+          # This is a simple patch that might need to be adjusted based on your actual code
+          sed -i 's/@discordjs\/opus/opusscript/g' src/services/discord/voice.ts
+        fi
+      fi
+    fi
   fi
   
   # Check if .env.production exists and copy to .env if needed
