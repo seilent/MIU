@@ -36,6 +36,8 @@ enum RequestStatus {
   COMPLETED
   DOWNLOADING
   SKIPPED
+  EXPIRED
+  READY
 }
 
 model Track {
@@ -55,12 +57,21 @@ model Track {
   audioCache    AudioCache?
   defaultPlaylistTracks DefaultPlaylistTrack[]
   userStats     UserTrackStats[]
+  state         TrackState?
+}
+
+model TrackState {
+  youtubeId    String       @id
+  status       RequestStatus @default(PENDING)
+  lastUpdated  DateTime     @default(now())
+  queuedAt     DateTime?
+  playedAt     DateTime?
+  track        Track        @relation(fields: [youtubeId], references: [youtubeId])
 }
 
 model Request {
   youtubeId   String
   userId      String
-  status      RequestStatus @default(PENDING)
   requestedAt DateTime      @default(now())
   playedAt    DateTime?
   isAutoplay  Boolean       @default(false)
@@ -68,7 +79,6 @@ model Request {
   track       Track         @relation(fields: [youtubeId], references: [youtubeId])
 
   @@id([youtubeId, requestedAt])
-  @@index([status, requestedAt])
   @@index([youtubeId])
 }
 

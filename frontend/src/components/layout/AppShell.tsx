@@ -53,6 +53,9 @@ export function AppShell({ children }: AppShellProps) {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const { colors } = useTheme();
+  const [isUrlLoading, setIsUrlLoading] = useState(false);
+  const [urlRequestStatus, setUrlRequestStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const urlRequestTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const isLoginPage = pathname === '/login';
 
@@ -82,6 +85,9 @@ export function AppShell({ children }: AppShellProps) {
     try {
       if (isYouTubeUrl(query)) {
         // Handle YouTube URL - add directly to queue
+        setIsUrlLoading(true);
+        setUrlRequestStatus('idle');
+
         const response = await fetch(`${env.apiUrl}/api/music/queue`, {
           method: 'POST',
           headers: {
@@ -97,9 +103,22 @@ export function AppShell({ children }: AppShellProps) {
           throw new Error(error.error || 'Failed to add to queue');
         }
 
-        // Clear input after successful add
-        setQuery('');
-        setShowResults(false);
+        const track = await response.json();
+        
+        // Show success state
+        setUrlRequestStatus('success');
+        toast.success(`Added "${track.title}" to queue`);
+
+        // Clear input and reset state after delay
+        if (urlRequestTimeoutRef.current) {
+          clearTimeout(urlRequestTimeoutRef.current);
+        }
+        urlRequestTimeoutRef.current = setTimeout(() => {
+          setQuery('');
+          setUrlRequestStatus('idle');
+          setShowResults(false);
+        }, 1500);
+
         return;
       }
 
@@ -133,10 +152,20 @@ export function AppShell({ children }: AppShellProps) {
       setSearchResults(validResults);
       setShowResults(true);
     } catch (error) {
-      // Search/Queue failed
+      // Show error state for URL requests
+      if (isYouTubeUrl(query)) {
+        setUrlRequestStatus('error');
+        if (urlRequestTimeoutRef.current) {
+          clearTimeout(urlRequestTimeoutRef.current);
+        }
+        urlRequestTimeoutRef.current = setTimeout(() => {
+          setUrlRequestStatus('idle');
+        }, 1500);
+      }
       toast.error('Failed to search or queue item');
     } finally {
       setIsSearching(false);
+      setIsUrlLoading(false);
     }
   };
 
@@ -185,6 +214,15 @@ export function AppShell({ children }: AppShellProps) {
     setShowHistory(!showHistory);
   };
 
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (urlRequestTimeoutRef.current) {
+        clearTimeout(urlRequestTimeoutRef.current);
+      }
+    };
+  }, []);
+
   return (
     <ViewContext.Provider value={{ showHistory, setShowHistory, toggleView }}>
       <div className="flex min-h-screen flex-col">
@@ -226,11 +264,34 @@ export function AppShell({ children }: AppShellProps) {
                       if (searchResults.length > 0) setShowResults(true);
                     }}
                     placeholder="Search for songs or paste YouTube URL..."
-                    className="w-full px-4 py-2 rounded-lg bg-black/20 border border-theme-accent/10 
+                    className={`w-full px-4 py-2 rounded-lg bg-black/20 border 
                              text-theme-accent placeholder:text-theme-accent/40 focus:outline-none 
-                             focus:border-theme-accent/30 focus:bg-black/30 focus:ring-1 focus:ring-theme-accent/20
-                             transition-all duration-200 text-sm backdrop-blur-sm"
+                             transition-all duration-200 text-sm backdrop-blur-sm
+                             ${isUrlLoading ? 'pr-10' : ''}
+                             ${urlRequestStatus === 'success' ? 'border-green-500/30 focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20' :
+                               urlRequestStatus === 'error' ? 'border-red-500/30 focus:border-red-500/50 focus:ring-1 focus:ring-red-500/20' :
+                               'border-theme-accent/10 focus:border-theme-accent/30 focus:bg-black/30 focus:ring-1 focus:ring-theme-accent/20'}`}
+                    disabled={isUrlLoading}
                   />
+                  {isUrlLoading && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                      <LoadingSpinner size="sm" className="text-theme-accent" />
+                    </div>
+                  )}
+                  {!isUrlLoading && urlRequestStatus === 'success' && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-green-500">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  )}
+                  {!isUrlLoading && urlRequestStatus === 'error' && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-red-500">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                  )}
                 </form>
 
                 {/* Search Results Dropdown */}

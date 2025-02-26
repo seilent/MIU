@@ -140,7 +140,7 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
   }, [token, logout]);
 
   const startPolling = useCallback(() => {
-    const STATE_POLL_INTERVAL = 2000; // Poll every 2 seconds instead of 500ms
+    const STATE_POLL_INTERVAL = 2000; // Poll every 2 seconds
     let consecutiveErrors = 0;
     const MAX_CONSECUTIVE_ERRORS = 3;
     
@@ -156,7 +156,6 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
         
         if (!response.ok) {
           if (response.status === 401) {
-            // Authentication failed, logging out
             logout();
             return;
           }
@@ -169,63 +168,42 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
         const data = await response.json();
         const currentState = usePlayerStore.getState();
         
-        // Check if this is a track transition
-        const isTrackTransition = 
-          data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId && 
-          data.currentTrack !== null && 
-          currentState.currentTrack !== undefined;
-        
-        // Update player state
-        if (isTrackTransition) {
-          // For continuous streaming, we don't need to delay the track update
-          // Just update the state immediately
-          setPlayerState({
-            ...data,
-            queue: data.queue?.map((track: QueueItem) => ({
-              ...track,
-              isAutoplay: track.isAutoplay ?? false
-            })) || currentState.queue
-          });
-          
-          // Fetch history when track changes
-          if (data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId) {
-            fetchHistory();
-          }
-        } else {
-          setPlayerState({
-            ...data,
-            currentTrack: data.currentTrack || currentState.currentTrack,
-            queue: data.queue?.map((track: QueueItem) => ({
-              ...track,
-              isAutoplay: track.isAutoplay ?? false
-            })) || currentState.queue
-          });
+        // Always update the state immediately to ensure sync
+        setPlayerState({
+          status: data.status,
+          currentTrack: data.currentTrack,
+          queue: data.queue?.map((track: QueueItem) => ({
+            ...track,
+            isAutoplay: track.isAutoplay ?? false
+          })) || [],
+          position: data.position
+        });
+
+        // If track has changed, fetch history
+        if (data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId) {
+          fetchHistory();
         }
 
         setLoading(false);
-      } catch (err) {
+      } catch (error) {
+        console.error('Error polling state:', error);
         setLoading(false);
-        
-        // Increment error counter and implement backoff
         consecutiveErrors++;
         
-        // If we've had multiple consecutive errors, increase the polling interval temporarily
-        let currentInterval = STATE_POLL_INTERVAL;
+        // Implement exponential backoff for consecutive errors
         if (consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
-          // Exponential backoff: double the interval for each consecutive error beyond the threshold
           const backoffFactor = Math.min(Math.pow(2, consecutiveErrors - MAX_CONSECUTIVE_ERRORS), 10);
-          currentInterval = STATE_POLL_INTERVAL * backoffFactor;
+          const nextInterval = STATE_POLL_INTERVAL * backoffFactor;
+          pollTimeoutRef.current = window.setTimeout(pollState, nextInterval);
+          return;
         }
-        
-        // Schedule next poll with potentially increased interval
-        pollTimeoutRef.current = window.setTimeout(pollState, currentInterval);
-        return; // Skip the normal scheduling below
       }
 
       // Schedule next poll
       pollTimeoutRef.current = window.setTimeout(pollState, STATE_POLL_INTERVAL);
     };
 
+    // Start polling immediately
     clearTimeouts();
     pollState();
 

@@ -17,7 +17,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 export default function Home() {
   const router = useRouter();
-  const { currentTrack, queue, isLoading, status } = usePlayerStore();
+  const { currentTrack, queue = [], isLoading, status } = usePlayerStore();
   const { user, token } = useAuthStore();
   const { sendCommand } = usePlayerProvider();
   const [isPlaying, setIsPlaying] = useState(false);
@@ -34,8 +34,8 @@ export default function Home() {
   const animationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Separate user requests from autoplay tracks
-  const userRequests = queue.filter(track => !track.isAutoplay);
-  const autoplayTracks = queue.filter(track => track.isAutoplay);
+  const userRequests = (queue ?? []).filter(track => !track.isAutoplay);
+  const autoplayTracks = (queue ?? []).filter(track => track.isAutoplay);
   const displayQueue = [...userRequests, ...autoplayTracks];
 
   // Track transitions with a delay to prevent UI flicker

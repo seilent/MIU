@@ -8,18 +8,15 @@ interface AnimatedNowPlayingProps {
   track: any;
   isPlaying: boolean;
   onPlayPause: () => void;
-  key?: string | number;
 }
 
 export function AnimatedNowPlaying({ 
   track, 
   isPlaying, 
-  onPlayPause,
-  key
+  onPlayPause
 }: AnimatedNowPlayingProps) {
   return (
     <motion.div 
-      key={key}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}

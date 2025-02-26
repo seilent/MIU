@@ -19,42 +19,56 @@ import ffmpeg from 'ffmpeg-static';
 import { createReadStream } from 'fs';
 import { Readable, PassThrough } from 'stream';
 import { prisma } from '../db.js';
+import { Prisma } from '@prisma/client';
 import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
 import fs from 'fs';
 import { youtube } from '../utils/youtube.js';
-import { Prisma } from '@prisma/client';
+import type { PlaylistMode } from '@prisma/client';
+import { RequestStatus } from '@prisma/client';
+import type { Track as PrismaTrack } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
 import { ChildProcessWithoutNullStreams } from 'child_process';
 import { resolveYouTubeMusicId } from '../utils/youtubeMusic.js';
-import { RequestStatus } from '@prisma/client';
 
-// Define RequestStatus enum to match Prisma schema
-const RequestStatus = {
-  PENDING: 'PENDING',
-  PLAYING: 'PLAYING',
-  QUEUED: 'QUEUED',
-  COMPLETED: 'COMPLETED',
-  DOWNLOADING: 'DOWNLOADING',
-  SKIPPED: 'SKIPPED'
-} as const;
+// Base types from Prisma
+type Track = PrismaTrack;
+type Request = Prisma.RequestGetPayload<{}>;
 
-type RequestStatus = typeof RequestStatus[keyof typeof RequestStatus];
+// Common interfaces
+interface BaseTrackResult {
+  youtubeId: string;
+  title: string;
+  thumbnail: string | null;
+  duration: number;
+}
 
-// Define PlaylistMode enum to match Prisma schema
-const PlaylistMode = {
-  LINEAR: 'LINEAR',
-  POOL: 'POOL'
-} as const;
+interface ExtendedTrackResult extends BaseTrackResult {
+  globalScore?: number;
+  playCount?: number;
+  skipCount?: number;
+  isActive?: boolean;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
 
-type PlaylistMode = typeof PlaylistMode[keyof typeof PlaylistMode];
+interface QueuedTrack extends BaseTrackResult {
+  requestedBy?: {
+    userId: string;
+    username: string;
+    avatar?: string;
+  };
+  queuePosition?: number;
+  willPlayNext?: boolean;
+  isPlaying?: boolean;
+}
 
 interface UserInfo {
   username: string;
   discriminator: string;
-  avatar?: string | null;
+  avatar: string | null;
 }
 
 interface QueueItem {
@@ -68,23 +82,7 @@ interface QueueItem {
     avatar?: string;
   };
   requestedAt: Date;
-  isDownloading?: boolean;
-  isAutoplay?: boolean;
-}
-
-interface QueuedTrack {
-  youtubeId: string;
-  title: string;
-  thumbnail: string;
-  duration: number;
-  requestedBy: {
-    userId: string;
-    username: string;
-    avatar?: string;
-  };
-  queuePosition?: number;
-  willPlayNext: boolean;
-  isPlaying: boolean;
+  isAutoplay: boolean;
 }
 
 interface PlaylistWithTracks {
@@ -114,9 +112,6 @@ if (ffmpeg) {
 }
 
 const API_BASE_URL = process.env.API_URL || 'http://localhost:3000';
-
-type Request = PrismaRequest;
-type Track = PrismaTrack;
 
 // Add singleton instance and getter
 let instance: Player | null = null;
@@ -205,25 +200,33 @@ export class Player {
   private downloadingTracks = new Set<string>();
   private activeAudioStreams: Set<NodeJS.WritableStream> = new Set();
 
+  private readonly WEIGHTS = {
+    PLAYLIST: 0.25,    // 25% for playlist tracks
+    FAVORITES: 0.25,   // 25% for user favorites
+    POPULAR: 0.20,     // 20% for popular tracks
+    YOUTUBE: 0.20,     // 20% for YouTube recommendations
+    RANDOM: 0.10       // 10% for random tracks
+  } as const;
+
   constructor(
     client: Client,
     trackingService: TrackingService,
     recommendationEngine: RecommendationEngine
   ) {
     this.client = client;
-    this.trackingService = trackingService || {
-      trackUserLeave: () => Promise.resolve(),
-      getUserFavoriteTracks: () => Promise.resolve([])
-    };
-    this.recommendationEngine = recommendationEngine || {
-      getRecommendationsForUsers: () => Promise.resolve([])
-    };
+    this.trackingService = trackingService;
+    this.recommendationEngine = recommendationEngine;
     this.audioPlayer = createAudioPlayer({
       behaviors: {
         noSubscriber: NoSubscriberBehavior.Play
       }
     });
-    
+
+    // Clean up any stuck states from previous sessions
+    this.cleanupStuckStates().catch(error => {
+      console.error('Failed to cleanup stuck states:', error);
+    });
+
     // Get default voice channel configuration
     this.defaultVoiceChannelId = process.env.DISCORD_DEFAULT_VOICE_CHANNEL_ID || '';
     this.defaultGuildId = process.env.DISCORD_DEFAULT_GUILD_ID || '';
@@ -522,6 +525,25 @@ export class Player {
           throw new Error('Failed to resolve YouTube Music URL');
         }
         resolvedId = resolved;
+        
+        // Update the original track with resolved ID immediately
+        await prisma.track.upsert({
+          where: { youtubeId },
+          create: {
+            youtubeId,
+            title: 'Loading...', // Temporary title
+            duration: 0,
+            thumbnail: `${process.env.API_URL || 'http://localhost:3000'}/api/albumart/${youtubeId}`,
+            isMusicUrl: true,
+            resolvedYtId: resolvedId,
+            isActive: true
+          },
+          update: {
+            isMusicUrl: true,
+            resolvedYtId: resolvedId,
+            isActive: true
+          }
+        });
       }
 
       // Get voice connection
@@ -538,10 +560,22 @@ export class Player {
         throw new Error(`Track duration exceeds limit of ${Math.floor(this.MAX_DURATION / 60)} minutes`);
       }
 
+      // Update both original and resolved track entries with complete metadata
+      if (isMusicUrl) {
+        await prisma.track.update({
+          where: { youtubeId },
+          data: {
+            title: trackInfo.title,
+            duration: trackInfo.duration,
+            thumbnail: trackInfo.thumbnail
+          }
+        });
+      }
+
       // Create queue item with complete metadata
       const requestedAt = new Date();
       const queueItem: QueueItem = {
-        youtubeId: resolvedId, // Use resolved ID
+        youtubeId: isMusicUrl ? youtubeId : resolvedId, // Use original ID for music URLs
         title: trackInfo.title,
         thumbnail: trackInfo.thumbnail,
         duration: trackInfo.duration,
@@ -551,7 +585,7 @@ export class Player {
           avatar: userInfo.avatar || undefined
         },
         requestedAt,
-        isDownloading: false
+        isAutoplay: false
       };
 
       // If nothing is playing, start this track immediately
@@ -1129,141 +1163,171 @@ export class Player {
 
       console.log(`🎵 [AUTOPLAY] Queue status - Playlist: ${this.currentPlaylistId ? 'Active' : 'None'}, Pool: ${this.youtubeRecommendationsPool.length}, Queue: ${this.autoplayQueue.length}`);
 
-      // If we have a current playlist, prioritize getting tracks from it
-      if (this.currentPlaylistId && this.autoplayQueue.length < this.AUTOPLAY_QUEUE_SIZE) {
-        const playlist = await prisma.defaultPlaylist.findUnique({
-          where: { id: this.currentPlaylistId }
-        });
-
-        if (playlist) {
-          console.log(`📑 [PLAYLIST] Using "${playlist.name}" (${playlist.mode} mode)`);
-          
-          const activeTracks = await prisma.$queryRaw<TrackResult[]>`
-            SELECT t.* FROM "Track" t
-            INNER JOIN "DefaultPlaylistTrack" dpt ON t."youtubeId" = dpt."trackId"
-            WHERE dpt."playlistId" = ${this.currentPlaylistId}::text
-            AND t."isActive" = true
-            AND t."youtubeId" != ${this.currentTrack.youtubeId}
-            ORDER BY ${playlist.mode === 'POOL' ? Prisma.sql`RANDOM()` : Prisma.sql`dpt.position ASC`}
-            LIMIT ${this.AUTOPLAY_QUEUE_SIZE}
-          `;
-
-          console.log(`📑 [PLAYLIST] Found ${activeTracks.length} tracks to process`);
-
-          const botId = this.client.user?.id;
-          if (!botId) throw new Error('Bot user ID not found');
-
-          const botUser = await prisma.user.upsert({
-            where: { id: botId },
-            create: {
-              id: botId,
-              username: this.client.user?.username || 'Bot',
-              discriminator: this.client.user?.discriminator || '0000',
-              avatar: this.client.user?.avatar || null
-            },
-            update: {
-              username: this.client.user?.username || 'Bot',
-              discriminator: this.client.user?.discriminator || '0000',
-              avatar: this.client.user?.avatar || null
-            }
-          });
-
-          for (const track of activeTracks) {
-            if (this.isTrackDuplicate(track.youtubeId, undefined, true)) {
-              console.log(`⏭️ [PLAYLIST] Skipping duplicate: ${track.title}`);
-              continue;
-            }
-
-            const requestedAt = new Date();
-            await prisma.request.create({
-              data: {
-                userId: botUser.id,
-                youtubeId: track.youtubeId,
-                status: RequestStatus.PENDING,
-                requestedAt,
-                isAutoplay: true
-              }
-            });
-
-            this.autoplayQueue.push({
-              youtubeId: track.youtubeId,
-              title: track.title,
-              thumbnail: track.thumbnail,
-              duration: track.duration,
-              requestedBy: {
-                userId: botUser.id,
-                username: 'Playlist',
-                avatar: botUser.avatar || undefined
-              },
-              requestedAt,
-              isAutoplay: true
-            });
-
-            console.log(`➕ [PLAYLIST] Added: ${track.title}`);
-            this.prefetchAudioForTrack(track.youtubeId, track.title);
-
-            if (this.autoplayQueue.length >= this.AUTOPLAY_QUEUE_SIZE) {
-              console.log('✅ [PLAYLIST] Queue is full');
-              break;
-            }
-          }
-
-          console.log(`📊 [AUTOPLAY] Final queue size: ${this.autoplayQueue.length}`);
-          return;
-        }
+      // Only proceed if we need more tracks
+      if (this.autoplayQueue.length >= this.AUTOPLAY_QUEUE_SIZE) {
+        return;
       }
 
-      // Only use YouTube recommendations if we don't have a playlist or couldn't get playlist tracks
-      if (this.youtubeRecommendationsPool.length < this.AUTOPLAY_QUEUE_SIZE) {
-        console.log('🎵 [YT-MIX] Fetching recommendations');
+      const tracksNeeded = this.AUTOPLAY_QUEUE_SIZE - this.autoplayQueue.length;
+      const botId = this.client.user?.id;
+      if (!botId) throw new Error('Bot user ID not found');
+
+      // Get bot user for requests
+      const botUser = await prisma.user.upsert({
+        where: { id: botId },
+        create: {
+          id: botId,
+          username: this.client.user?.username || 'Bot',
+          discriminator: this.client.user?.discriminator || '0000',
+          avatar: this.client.user?.avatar || null
+        },
+        update: {
+          username: this.client.user?.username || 'Bot',
+          discriminator: this.client.user?.discriminator || '0000',
+          avatar: this.client.user?.avatar || null
+        }
+      });
+
+      // Initialize pools for each source
+      let playlistTracks: TrackResult[] = [];
+      let favoriteTracks: TrackResult[] = [];
+      let popularTracks: TrackResult[] = [];
+      let youtubeTracks: { youtubeId: string }[] = [];
+      let randomTracks: TrackResult[] = [];
+
+      // 1. Get playlist tracks if available
+      if (this.currentPlaylistId) {
+        playlistTracks = await prisma.$queryRaw<TrackResult[]>`
+          SELECT t.* FROM "Track" t
+          INNER JOIN "DefaultPlaylistTrack" dpt ON t."youtubeId" = dpt."trackId"
+          WHERE dpt."playlistId" = ${this.currentPlaylistId}::text
+          AND t."isActive" = true
+          AND t."youtubeId" != ${this.currentTrack.youtubeId}
+          ORDER BY RANDOM()
+          LIMIT ${tracksNeeded * 2}
+        `;
+        console.log(`📑 [PLAYLIST] Found ${playlistTracks.length} tracks`);
+      }
+
+      // 2. Get user favorites
+      const recentUsers = await prisma.request.findMany({
+        where: {
+          requestedAt: {
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // Last 24 hours
+          }
+        },
+        select: { userId: true },
+        distinct: ['userId']
+      });
+
+      if (recentUsers.length > 0) {
+        favoriteTracks = await prisma.$queryRaw<TrackResult[]>`
+          SELECT t.* FROM "Track" t
+          INNER JOIN "UserTrackStats" uts ON t."youtubeId" = uts."youtubeId"
+          WHERE uts."userId" = ANY(${recentUsers.map(u => u.userId)})
+          AND t."isActive" = true
+          AND uts."personalScore" > 0
+          ORDER BY uts."personalScore" DESC
+          LIMIT ${tracksNeeded * 2}
+        `;
+        console.log(`👤 [FAVORITES] Found ${favoriteTracks.length} tracks`);
+      }
+
+      // 3. Get popular tracks
+      popularTracks = await prisma.$queryRaw<TrackResult[]>`
+        SELECT t.* FROM "Track" t
+        WHERE t."isActive" = true
+        AND t."globalScore" > 0
+        ORDER BY t."globalScore" DESC
+        LIMIT ${tracksNeeded * 2}
+      `;
+      console.log(`🔥 [POPULAR] Found ${popularTracks.length} tracks`);
+
+      // 4. Get YouTube recommendations
+      if (this.youtubeRecommendationsPool.length < tracksNeeded) {
         const recommendations = await getYoutubeRecommendations(this.currentTrack.youtubeId);
-        
         const activeRecommendations = await prisma.$queryRaw<TrackIdResult[]>`
           SELECT "youtubeId" FROM "Track"
           WHERE "youtubeId" = ANY(${recommendations.map(rec => rec.youtubeId)}::text[])
           AND "isActive" = true
         `;
-        console.log(`🎵 [YT-MIX] Found ${activeRecommendations.length} active tracks`);
-
-        this.youtubeRecommendationsPool.push(...activeRecommendations);
+        youtubeTracks = activeRecommendations;
+        console.log(`🎵 [YT-MIX] Found ${youtubeTracks.length} tracks`);
       }
 
-      while (this.autoplayQueue.length < this.AUTOPLAY_QUEUE_SIZE && this.youtubeRecommendationsPool.length > 0) {
-        const nextRecommendation = this.youtubeRecommendationsPool.shift();
-        if (!nextRecommendation) break;
+      // 5. Get random tracks
+      randomTracks = await prisma.$queryRaw<TrackResult[]>`
+        SELECT t.* FROM "Track" t
+        WHERE t."isActive" = true
+        AND t."globalScore" >= 0
+        ORDER BY RANDOM()
+        LIMIT ${tracksNeeded * 2}
+      `;
+      console.log(`🎲 [RANDOM] Found ${randomTracks.length} tracks`);
 
-        if (this.isTrackDuplicate(nextRecommendation.youtubeId, undefined, true)) {
-          console.log(`⏭️ [YT-MIX] Skipping duplicate: ${nextRecommendation.youtubeId}`);
-          continue;
+      // Calculate weights for each track
+      const weightedTracks: Array<{
+        track: TrackResult | { youtubeId: string };
+        weight: number;
+        source: string;
+      }> = [
+        ...playlistTracks.map(t => ({
+          track: t,
+          weight: this.WEIGHTS.PLAYLIST / (playlistTracks.length || 1),
+          source: 'Playlist'
+        })),
+        ...favoriteTracks.map((t, i) => ({
+          track: t,
+          weight: (this.WEIGHTS.FAVORITES / (favoriteTracks.length || 1)) * (1 - i * 0.05),
+          source: 'Favorites'
+        })),
+        ...popularTracks.map(t => ({
+          track: t,
+          weight: this.WEIGHTS.POPULAR / (popularTracks.length || 1),
+          source: 'Popular'
+        })),
+        ...youtubeTracks.map(t => ({
+          track: t,
+          weight: this.WEIGHTS.YOUTUBE / (youtubeTracks.length || 1),
+          source: 'YouTube Mix'
+        })),
+        ...randomTracks.map(t => ({
+          track: t,
+          weight: this.WEIGHTS.RANDOM / (randomTracks.length || 1),
+          source: 'Random'
+        }))
+      ];
+
+      // Filter out duplicates
+      const filteredTracks = weightedTracks.filter(
+        item => !this.isTrackDuplicate((item.track as any).youtubeId, undefined, true)
+      );
+
+      // Select tracks based on weights
+      for (let i = 0; i < tracksNeeded && filteredTracks.length > 0; i++) {
+        const totalWeight = filteredTracks.reduce((sum, item) => sum + item.weight, 0);
+        let random = Math.random() * totalWeight;
+        let selectedIndex = 0;
+
+        for (let j = 0; j < filteredTracks.length; j++) {
+          random -= filteredTracks[j].weight;
+          if (random <= 0) {
+            selectedIndex = j;
+            break;
+          }
         }
 
+        const selected = filteredTracks[selectedIndex];
+        const trackId = (selected.track as any).youtubeId;
+
         try {
-          const info = await getYoutubeInfo(nextRecommendation.youtubeId);
-          console.log(`➕ [YT-MIX] Added: ${info.title}`);
-          
-          const botId = this.client.user?.id;
-          if (!botId) throw new Error('Bot user ID not found');
-
-          const botUser = await prisma.user.upsert({
-            where: { id: botId },
-            create: {
-              id: botId,
-              username: this.client.user?.username || 'Bot',
-              discriminator: this.client.user?.discriminator || '0000',
-              avatar: this.client.user?.avatar || null
-            },
-            update: {
-              username: this.client.user?.username || 'Bot',
-              discriminator: this.client.user?.discriminator || '0000',
-              avatar: this.client.user?.avatar || null
-            }
-          });
-
+          const info = await getYoutubeInfo(trackId);
           const requestedAt = new Date();
+
           await prisma.request.create({
             data: {
               userId: botUser.id,
-              youtubeId: nextRecommendation.youtubeId,
+              youtubeId: trackId,
               status: RequestStatus.PENDING,
               requestedAt,
               isAutoplay: true
@@ -1271,24 +1335,31 @@ export class Player {
           });
 
           this.autoplayQueue.push({
-            youtubeId: nextRecommendation.youtubeId,
+            youtubeId: trackId,
             title: info.title,
             thumbnail: info.thumbnail,
             duration: info.duration,
             requestedBy: {
               userId: botUser.id,
-              username: 'Mix',
+              username: selected.source,
               avatar: botUser.avatar || undefined
             },
             requestedAt,
             isAutoplay: true
           });
 
-          this.prefetchAudioForTrack(nextRecommendation.youtubeId, info.title);
+          console.log(`➕ [${selected.source.toUpperCase()}] Added: ${info.title}`);
+          this.prefetchAudioForTrack(trackId, info.title);
+
+          // Remove selected track from pool
+          filteredTracks.splice(selectedIndex, 1);
         } catch (error) {
-          console.error(`❌ [YT-MIX] Failed to process: ${nextRecommendation.youtubeId}`, error);
+          console.error(`❌ [${selected.source.toUpperCase()}] Failed to process: ${trackId}`, error);
+          filteredTracks.splice(selectedIndex, 1);
         }
       }
+
+      console.log(`📊 [AUTOPLAY] Final queue size: ${this.autoplayQueue.length}`);
     } catch (error) {
       console.error('❌ [AUTOPLAY] Error:', error);
     }
@@ -1495,10 +1566,17 @@ export class Player {
           if (resolvedId) {
             finalYoutubeId = resolvedId;
             
-            // Update the track with resolved ID
+            // Update both tracks with complete metadata
+            const info = await getYoutubeInfo(resolvedId);
             await prisma.track.update({
               where: { youtubeId },
-              data: { resolvedYtId: resolvedId }
+              data: {
+                resolvedYtId: resolvedId,
+                title: info.title,
+                duration: info.duration,
+                thumbnail: info.thumbnail,
+                isActive: true
+              }
             });
           } else {
             console.log(`❌ [YT-MUSIC] Failed to resolve ID: ${youtubeId}`);
@@ -1654,91 +1732,52 @@ export class Player {
 
   private async cleanupStuckStates() {
     try {
-      // Reset any stuck states from previous sessions
+      // Reset any PLAYING or PENDING states to EXPIRED
       await prisma.request.updateMany({
         where: {
           status: {
-            in: [RequestStatus.PLAYING, RequestStatus.DOWNLOADING, RequestStatus.QUEUED]
+            in: [RequestStatus.PLAYING, RequestStatus.PENDING]
           }
         },
         data: {
-          status: RequestStatus.COMPLETED,
-          playedAt: new Date()
+          status: RequestStatus.EXPIRED
         }
       });
 
-      // Clean up any temp files
-      const cacheDir = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
-      const audioDir = path.join(cacheDir, 'audio');
-      const files = await fs.promises.readdir(audioDir);
-
-      // Get all valid cache entries
-      const validCacheEntries = await prisma.audioCache.findMany();
-      const validFilePaths = new Set(validCacheEntries.map(entry => entry.filePath));
-
-      // Remove any files not in the database
-      for (const file of files) {
-        const filePath = path.join(audioDir, file);
-        if (!validFilePaths.has(filePath)) {
-          try {
-            await fs.promises.unlink(filePath);
-            console.log('Removed orphaned file:', file);
-          } catch (error) {
-            console.error('Error removing orphaned file:', file, error);
+      // Reset any QUEUED states that are older than 10 minutes
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      await prisma.request.updateMany({
+        where: {
+          status: RequestStatus.QUEUED,
+          requestedAt: {
+            lt: tenMinutesAgo
           }
+        },
+        data: {
+          status: RequestStatus.EXPIRED
         }
-      }
+      });
 
-      // Clean up temp files
-      const tempFiles = files.filter(f => f.endsWith('.temp.m4a') || f.endsWith('.part'));
-      for (const tempFile of tempFiles) {
-        try {
-          await fs.promises.unlink(path.join(audioDir, tempFile));
-          console.log('Removed temp file:', tempFile);
-        } catch (error) {
-          console.error('Error removing temp file:', tempFile, error);
-        }
-      }
-
-      // Validate cache entries
-      for (const cacheEntry of validCacheEntries) {
-        try {
-          // Check if file exists
-          if (!fs.existsSync(cacheEntry.filePath)) {
-            console.log('Removing cache entry for missing file:', cacheEntry.youtubeId);
-            await prisma.audioCache.delete({
-              where: { youtubeId: cacheEntry.youtubeId }
-            });
-            continue;
+      // Reset completed requests that are causing cooldown issues
+      await prisma.request.updateMany({
+        where: {
+          status: RequestStatus.COMPLETED,
+          playedAt: {
+            gte: new Date(Date.now() - 5 * 60 * 60 * 1000) // Last 5 hours
           }
-
-          // Validate file duration
-          try {
-            const track = await prisma.track.findUnique({
-              where: { youtubeId: cacheEntry.youtubeId }
-            });
-            if (!track) continue;
-
-            const actualDuration = await getAudioFileDuration(cacheEntry.filePath);
-            // Allow 1 second difference to account for rounding
-            if (Math.abs(actualDuration - track.duration) > 1) {
-              console.log('Removing invalid cache entry due to duration mismatch:', cacheEntry.youtubeId);
-              await prisma.audioCache.delete({
-                where: { youtubeId: cacheEntry.youtubeId }
-              });
-              await fs.promises.unlink(cacheEntry.filePath);
-            }
-          } catch (error) {
-            console.error('Error validating cache entry:', cacheEntry.youtubeId, error);
-          }
-        } catch (error) {
-          console.error('Error processing cache entry:', cacheEntry.youtubeId, error);
+        },
+        data: {
+          status: RequestStatus.EXPIRED,
+          playedAt: new Date(0) // Set to epoch to clear cooldown
         }
-      }
+      });
 
-      console.log('Cleaned up stuck states and invalid cache entries from previous session');
+      // Clear the played tracks map
+      this.playedTracks.clear();
+
+      console.log('✨ Cleaned up stuck states and cleared cooldowns');
     } catch (error) {
-      console.error('Error cleaning up stuck states:', error);
+      console.error('Error cleaning up states:', error);
     }
   }
 
@@ -1876,31 +1915,18 @@ export class Player {
   }
 
   private areSongsSimilar(title1: string, title2: string): boolean {
-    const clean1 = this.cleanSongTitle(title1);
-    const clean2 = this.cleanSongTitle(title2);
+    // Clean and normalize both titles
+    const cleanTitle1 = this.cleanSongTitle(title1).toLowerCase();
+    const cleanTitle2 = this.cleanSongTitle(title2).toLowerCase();
 
-    // If either title is empty after cleaning, they're not similar
-    if (!clean1 || !clean2) return false;
+    // Split into words
+    const words1 = cleanTitle1.split(/\s+/);
+    const words2 = cleanTitle2.split(/\s+/);
 
-    // Direct match after cleaning
-    if (clean1 === clean2) return true;
-
-    // Check if one title contains the other
-    if (clean1.includes(clean2) || clean2.includes(clean1)) return true;
-
-    // Split into words and check overlap
-    const words1 = clean1.split(/\s+/);
-    const words2 = clean2.split(/\s+/);
-
-    // If one title has only one word, require exact match
-    if (words1.length === 1 || words2.length === 1) {
-      return clean1 === clean2;
-    }
-
-    // Count matching words
+    // Find matching words
     const matchingWords = words1.filter(word => 
-      words2.some(w2 => w2 === word || 
-        // Also check for partial matches for Japanese titles
+      words2.some(w2 => 
+        word === w2 || 
         (word.length > 2 && w2.includes(word)) || 
         (w2.length > 2 && word.includes(w2))
       )
@@ -1908,7 +1934,9 @@ export class Player {
 
     // Calculate similarity score
     const similarityScore = matchingWords.length / Math.max(words1.length, words2.length);
-    return similarityScore > 0.5; // Require more than 50% similarity
+
+    // Return true if similarity score is above threshold
+    return similarityScore > 0.5;
   }
 
   public hasCurrentTrack(): boolean {

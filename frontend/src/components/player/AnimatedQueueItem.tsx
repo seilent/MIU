@@ -31,17 +31,32 @@ export function AnimatedQueueItem({
   const variants = {
     enter: {
       y: 20,
-      opacity: 0
+      opacity: 0,
+      scale: 0.95
     },
     center: {
       y: 0,
       opacity: 1,
+      scale: 1,
       transition: {
-        duration: 0.3,
-        ease: "easeOut"
+        duration: 0.4,
+        ease: [0.4, 0, 0.2, 1], // Custom easing for fluid motion
+        scale: {
+          type: "spring",
+          damping: 15,
+          stiffness: 100
+        }
       }
     },
-    exit: {
+    exit: index === 0 ? {
+      y: -20,
+      opacity: 0,
+      scale: 0.95,
+      transition: {
+        duration: 0.3,
+        ease: [0.4, 0, 0.2, 1]
+      }
+    } : {
       x: -100,
       opacity: 0,
       transition: {

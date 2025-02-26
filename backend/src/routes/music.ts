@@ -259,39 +259,209 @@ router.get('/state', async (req: Request, res: Response) => {
       }
     });
 
+    // Format track for response
+    const formatTrack = (request: RequestWithTrack): TrackResponse => {
+      // For YouTube Music tracks, use the original ID to maintain consistency
+      const youtubeId = request.track.isMusicUrl ? request.track.youtubeId : (request.track.resolvedYtId || request.track.youtubeId);
+      
+      return {
+        youtubeId,
+        title: request.track.title,
+        thumbnail: request.track.thumbnail,
+        duration: request.track.duration,
+        requestedBy: {
+          id: request.user.id,
+          username: request.user.username,
+          avatar: request.user.avatar || undefined
+        },
+        requestedAt: request.requestedAt.toISOString(),
+        isAutoplay: request.isAutoplay
+      };
+    };
+
     // Ensure the database and player queue are in sync
     const playerQueue = client.player.getQueue();
-    const playerQueueIds = new Set(playerQueue.map(track => track.youtubeId));
+    const playerQueueMap = new Map(playerQueue.map(track => [track.youtubeId, track]));
     
-    // Filter out any tracks that are in the database but not in the player's queue
-    const syncedQueuedTracks = queuedTracks.filter(track => 
-      playerQueueIds.has(track.track.youtubeId)
-    );
+    // First, mark all queued tracks as stale
+    await prisma.request.updateMany({
+      where: {
+        status: RequestStatus.QUEUED
+      },
+      data: {
+        status: RequestStatus.SKIPPED
+      }
+    });
 
-    // Log if there's a mismatch between database and player queue
-    if (queuedTracks.length !== syncedQueuedTracks.length) {
-      console.log(`Queue sync: Filtered out ${queuedTracks.length - syncedQueuedTracks.length} tracks that are in DB but not in player queue`);
+    // Then, update or create entries for tracks in the player queue
+    for (const track of playerQueue) {
+      try {
+        // Check if the track was recently played, is playing, or is queued
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000); // 5 hours ago
+
+        // Check for any recent or current instances of this track
+        const recentOrCurrentRequest = await prisma.request.findFirst({
+          where: {
+            track: {
+              youtubeId: track.youtubeId
+            },
+            OR: [
+              // Check for recently completed tracks
+              {
+                status: RequestStatus.COMPLETED,
+                playedAt: {
+                  gte: track.isAutoplay ? fiveHoursAgo : oneHourAgo
+                }
+              },
+              // Check for currently playing or queued tracks
+              {
+                status: {
+                  in: [RequestStatus.PLAYING, RequestStatus.QUEUED]
+                }
+              }
+            ]
+          },
+          orderBy: {
+            requestedAt: 'desc'
+          }
+        });
+
+        if (recentOrCurrentRequest) {
+          const reason = recentOrCurrentRequest.status === RequestStatus.COMPLETED ? 
+            `too recent (${track.isAutoplay ? '5h' : '1h'} cooldown)` : 
+            `${recentOrCurrentRequest.status.toLowerCase()} in queue`;
+          console.log(`Skipping ${track.title} - ${reason}`);
+          continue;
+        }
+
+        // Create or update track entry
+        const trackEntry = await prisma.track.upsert({
+          where: { youtubeId: track.youtubeId },
+          create: {
+            youtubeId: track.youtubeId,
+            title: track.title || 'Unknown Title',
+            thumbnail: track.thumbnail || '',
+            duration: track.duration || 0,
+            isMusicUrl: false,
+            isActive: true,
+            globalScore: 0,
+            playCount: 0,
+            skipCount: 0
+          },
+          update: {} // No updates needed
+        });
+
+        // Create request entry for the track
+        await prisma.request.create({
+          data: {
+            status: RequestStatus.QUEUED,
+            isAutoplay: track.isAutoplay || false,
+            requestedAt: new Date(),
+            user: {
+              connect: { id: client.user?.id || 'bot' }
+            },
+            track: {
+              connect: { youtubeId: track.youtubeId }
+            }
+          }
+        });
+      } catch (error) {
+        console.error('Error syncing track:', error);
+      }
     }
 
-    // Format track for response
-    const formatTrack = (request: RequestWithTrack): TrackResponse => ({
-      youtubeId: request.track.youtubeId,
-      title: request.track.title,
-      thumbnail: request.track.thumbnail,
-      duration: request.track.duration,
-      requestedBy: {
-        id: request.user.id,
-        username: request.user.username,
-        avatar: request.user.avatar || undefined
+    // Get the updated queue, including only tracks that haven't been played recently
+    const updatedQueuedTracks = await prisma.request.findMany({
+      where: {
+        status: RequestStatus.QUEUED,
+        AND: [
+          // Base conditions
+          { status: RequestStatus.QUEUED },
+          {
+            OR: [
+              // For user requests
+              {
+                isAutoplay: false,
+                NOT: {
+                  track: {
+                    requests: {
+                      some: {
+                        OR: [
+                          // No recent completions
+                          {
+                            status: RequestStatus.COMPLETED,
+                            playedAt: { gte: new Date(Date.now() - 60 * 60 * 1000) }
+                          },
+                          // No current playing or queued instances except self
+                          {
+                            AND: [
+                              {
+                                status: { in: [RequestStatus.PLAYING, RequestStatus.QUEUED] }
+                              },
+                              {
+                                NOT: {
+                                  requestedAt: { equals: new Date() } // This will exclude the current request
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              // For autoplay tracks
+              {
+                isAutoplay: true,
+                NOT: {
+                  track: {
+                    requests: {
+                      some: {
+                        OR: [
+                          // No recent completions (5 hour cooldown)
+                          {
+                            status: RequestStatus.COMPLETED,
+                            playedAt: { gte: new Date(Date.now() - 5 * 60 * 60 * 1000) }
+                          },
+                          // No current playing or queued instances except self
+                          {
+                            AND: [
+                              {
+                                status: { in: [RequestStatus.PLAYING, RequestStatus.QUEUED] }
+                              },
+                              {
+                                NOT: {
+                                  requestedAt: { equals: new Date() } // This will exclude the current request
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
       },
-      requestedAt: request.requestedAt.toISOString(),
-      isAutoplay: request.isAutoplay
+      orderBy: [
+        { isAutoplay: 'asc' },
+        { requestedAt: 'asc' }
+      ],
+      include: {
+        track: true,
+        user: true
+      }
     });
 
     res.json({
       status: client.player.getStatus(),
       currentTrack: currentTrack ? formatTrack(currentTrack as RequestWithTrack) : undefined,
-      queue: syncedQueuedTracks.map((track: RequestWithTrack) => formatTrack(track)),
+      queue: updatedQueuedTracks.map((track: RequestWithTrack) => formatTrack(track)),
       position: client.player.getPosition()
     });
   } catch (error) {

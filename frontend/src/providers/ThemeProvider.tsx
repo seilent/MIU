@@ -57,18 +57,32 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     // Use current thumbnail or previous thumbnail during transitions
     const thumbnailUrl = currentTrack?.thumbnail || previousThumbnail || '/images/DEFAULT.jpg';
     
-    // Transform old sv-miu URLs to new format
-    const transformedUrl = thumbnailUrl.replace(
-      /^https:\/\/sv-miu\.vercel\.app\/api\/albumart\//,
-      `${env.apiUrl}/api/albumart/`
-    );
+    // Transform old sv-miu URLs to new format and ensure YouTube thumbnails are properly formatted
+    let transformedUrl = thumbnailUrl;
+    
+    // Handle old sv-miu URLs
+    if (thumbnailUrl.startsWith('https://sv-miu.vercel.app/api/albumart/')) {
+      transformedUrl = thumbnailUrl.replace(
+        /^https:\/\/sv-miu\.vercel\.app\/api\/albumart\//,
+        `${env.apiUrl}/api/albumart/`
+      );
+    }
+    
+    // Handle YouTube Music thumbnails
+    if (thumbnailUrl.startsWith('https://i.ytimg.com/')) {
+      // Ensure we're using maxresdefault for best quality
+      transformedUrl = thumbnailUrl.replace(
+        /\/[^/]+\.jpg$/,
+        '/maxresdefault.jpg'
+      );
+    }
 
     // Create an image element to load the thumbnail
     const img = new Image();
     
     // Function to extract colors from the image
     const loadImage = () => {
-    img.crossOrigin = 'Anonymous';
+      img.crossOrigin = 'Anonymous';
       img.onload = () => {
         try {
           // Create a canvas to draw the image
