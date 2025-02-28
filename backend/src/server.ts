@@ -11,7 +11,6 @@ import historyRouter from './routes/history.js';
 import presenceRouter from './routes/presence.js';
 import { errorHandler } from './middleware/error.js';
 import { authMiddleware, internalMiddleware } from './middleware/auth.js';
-import { apiLimiter, authLimiter, searchLimiter } from './middleware/rateLimit.js';
 import logger from './utils/logger.js';
 import { swaggerSpec } from './swagger.js';
 import cors from 'cors';
@@ -19,7 +18,7 @@ import { albumArtRouter } from './routes/albumart.js';
 import { initializeDiscordClient } from './discord/client.js';
 import getEnv from './utils/env.js';
 import http from 'http';
-import { json } from 'body-parser';
+import bodyParser from 'body-parser';
 
 const env = getEnv();
 
@@ -33,14 +32,23 @@ export async function createServer() {
     logger.info('Discord client initialized successfully');
   } catch (error) {
     logger.error('Failed to initialize Discord client:', error);
+    throw error; // This will prevent the server from starting if Discord init fails
   }
+
+  // Middleware setup
+  app.use(cors({
+    origin: env.getString('CORS_ORIGIN', '*'),
+    credentials: true
+  }));
+  app.use(cookieParser());
+  app.use(bodyParser.json());
 
   // CORS configuration
   const corsOrigins = env.getString('CORS_ORIGIN', 'http://localhost:3300').split(',').map(origin => origin.trim());
   const isProduction = env.getString('NODE_ENV', 'development') === 'production';
   logger.info('Configured CORS origins:', corsOrigins);
 
-  // Configure trusted proxies for secure cookies and rate limiting
+  // Configure trusted proxies
   const trustedProxies = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
   app.set('trust proxy', trustedProxies);
   
@@ -56,16 +64,12 @@ export async function createServer() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Accept-Version', 'Content-Length', 'Content-MD5', 'Date', 'X-Api-Version', 'Origin', 'X-Internal-Request'],
-    exposedHeaders: ['Set-Cookie', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Accept-Version', 'Content-Length', 'Content-MD5', 'Date', 'X-Api-Version', 'Origin', 'X-Internal-Request', 'Last-Event-ID'],
+    exposedHeaders: ['Set-Cookie', 'Authorization', 'Content-Type', 'Content-Length', 'X-Initial-Position', 'X-Playback-Start', 'X-Track-Id', 'X-Track-Duration'],
     maxAge: 86400 // 24 hours
   }));
 
-  // Basic middleware
-  app.use(express.json());
-  app.use(cookieParser(env.getString('JWT_SECRET')));
-
-  // Session configuration - after CORS but before routes
+  // Session configuration
   app.use(session({
     secret: env.getString('JWT_SECRET'),
     resave: false,
@@ -74,7 +78,7 @@ export async function createServer() {
     cookie: {
       secure: true,
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
-      sameSite: 'lax', // Changed from 'none' since we're using same-origin
+      sameSite: 'lax',
       path: '/',
       httpOnly: true,
       domain: isProduction ? '.gacha.boo' : undefined
@@ -82,22 +86,34 @@ export async function createServer() {
     name: 'miu.session'
   }));
 
-  // Add internal request middleware
-  app.use(internalMiddleware);
+  // Remove /backend prefix from API routes
+  app.use((req, res, next) => {
+    if (req.url.startsWith('/backend/api/')) {
+      // Special handling for SSE endpoints
+      if (req.url.startsWith('/backend/api/music/state/live')) {
+        // Keep the original URL for SSE endpoints
+        next();
+        return;
+      }
+      // Special handling for presence endpoints
+      if (req.url.startsWith('/backend/api/discord/presence')) {
+        req.url = req.url.replace('/backend/api/discord/presence', '/api/presence');
+      } else {
+        req.url = req.url.replace('/backend', '');
+      }
+    }
+    next();
+  });
 
-  // Health check routes (before rate limiting)
+  // Health check routes
   app.use('/api/health', healthRouter);
 
-  // Rate limiting middleware
-  app.use('/api', apiLimiter);
-  app.use('/api/music/search', searchLimiter);
-
-  // API Routes with /api prefix
+  // API Routes
   app.use('/api/auth', authRouter);
   app.use('/api/music', authMiddleware, musicRouter);
   app.use('/api/admin', authMiddleware, adminRouter);
   app.use('/api/history', authMiddleware, historyRouter);
-  app.use('/api/presence', presenceRouter);
+  app.use('/api/presence', authMiddleware, presenceRouter);
   app.use('/api/albumart', albumArtRouter);
 
   // API Documentation
@@ -131,6 +147,27 @@ export async function createServer() {
     }
   };
   app.use(errorHandlerWrapper);
+
+  // Add error handling for broken SSE connections
+  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    if (err.name === 'UnauthorizedError') {
+      res.status(401).json({ error: 'Invalid token' });
+    } else if (req.headers.accept === 'text/event-stream') {
+      // Handle SSE connection errors gracefully
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Connection': 'keep-alive',
+          'Cache-Control': 'no-cache',
+          'X-Accel-Buffering': 'no'
+        });
+      }
+      res.write('event: error\ndata: ' + JSON.stringify({ error: err.message }) + '\n\n');
+      res.end();
+    } else {
+      next(err);
+    }
+  });
 
   // Log server startup
   logger.info('Server created and configured');

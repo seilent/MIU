@@ -7,6 +7,7 @@ import { QueueItem } from '@/lib/types';
 import { useRouter } from 'next/navigation';
 import { toast } from 'react-hot-toast';
 import env from '@/utils/env';
+import SSEManager from '@/lib/sse/SSEManager';
 
 type MusicCommand = 
   | 'search'
@@ -49,8 +50,7 @@ interface PlayerProviderProps {
 
 export function PlayerProvider({ children }: PlayerProviderProps) {
   const { token } = useAuthStore();
-  const pollTimeoutRef = useRef<number | undefined>(undefined);
-  const trackTransitionTimeoutRef = useRef<number | undefined>(undefined);
+  const { logout } = useAuthStore();
   const {
     setPlayerState,
     setHistory,
@@ -58,32 +58,14 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
   } = usePlayerStore();
   const router = useRouter();
   const [serverError, setServerError] = useState<string | null>(null);
-  const [lastPingTime, setLastPingTime] = useState<number>(Date.now());
-  const [isConnected, setIsConnected] = useState<boolean>(true);
-  const [consecutiveErrors, setConsecutiveErrors] = useState<number>(0);
-  const [pollingInterval, setPollingInterval] = useState<number>(2000);
-
-  const clearTimeouts = useCallback(() => {
-    if (pollTimeoutRef.current !== undefined) {
-      window.clearTimeout(pollTimeoutRef.current);
-      pollTimeoutRef.current = undefined;
-    }
-    
-    if (trackTransitionTimeoutRef.current !== undefined) {
-      window.clearTimeout(trackTransitionTimeoutRef.current);
-      trackTransitionTimeoutRef.current = undefined;
-    }
-  }, []);
-
-  const { logout } = useAuthStore();
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected'>('connected');
+  const sseManager = useRef<SSEManager>(SSEManager.getInstance());
 
   const fetchState = useCallback(async () => {
     if (!token) return;
     
     try {
       setLoading(true);
-      
-      // Fetch state from API
       const response = await fetch(`${env.apiUrl}/api/music/state`, {
         headers: {
           'Authorization': `Bearer ${token}`
@@ -91,7 +73,6 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
       });
       
       if (response.status === 401) {
-        // Authentication failed
         logout();
         return;
       }
@@ -103,19 +84,16 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
       const data = await response.json();
       setPlayerState(data);
       setLoading(false);
-      setIsConnected(true);
-      setConsecutiveErrors(0);
     } catch (err) {
       setLoading(false);
-      setConsecutiveErrors(prev => prev + 1);
+      console.error('Error fetching state:', err);
     }
-  }, [token, logout]);
+  }, [token, logout, setPlayerState, setLoading]);
 
   const fetchHistory = useCallback(async () => {
     if (!token) return;
     
     try {
-      // Fetch history from API
       const response = await fetch(`${env.apiUrl}/api/music/history`, {
         headers: {
           'Authorization': `Bearer ${token}`
@@ -123,7 +101,6 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
       });
       
       if (response.status === 401) {
-        // Authentication failed
         logout();
         return;
       }
@@ -135,98 +112,70 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
       const data = await response.json();
       setHistory(data);
     } catch (err) {
-      // Failed to fetch history
+      console.error('Error fetching history:', err);
     }
-  }, [token, logout]);
+  }, [token, logout, setHistory]);
 
-  const startPolling = useCallback(() => {
-    const STATE_POLL_INTERVAL = 2000; // Poll every 2 seconds
-    let consecutiveErrors = 0;
-    const MAX_CONSECUTIVE_ERRORS = 3;
-    
-    const pollState = async () => {
-      try {
-        // Poll state from API
-        const response = await fetch(`${env.apiUrl}/api/music/state`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'X-Internal-Request': 'true'
-          }
-        });
-        
-        if (!response.ok) {
-          if (response.status === 401) {
-            logout();
-            return;
-          }
-          throw new Error(`Failed to fetch state: ${response.status}`);
-        }
-        
-        // Reset error counter on success
-        consecutiveErrors = 0;
-        
-        const data = await response.json();
-        const currentState = usePlayerStore.getState();
-        
-        // Always update the state immediately to ensure sync
-        setPlayerState({
-          status: data.status,
-          currentTrack: data.currentTrack,
-          queue: data.queue?.map((track: QueueItem) => ({
-            ...track,
-            isAutoplay: track.isAutoplay ?? false
-          })) || [],
-          position: data.position
-        });
-
-        // If track has changed, fetch history
-        if (data.currentTrack?.youtubeId !== currentState.currentTrack?.youtubeId) {
-          fetchHistory();
-        }
-
-        setLoading(false);
-      } catch (error) {
-        console.error('Error polling state:', error);
-        setLoading(false);
-        consecutiveErrors++;
-        
-        // Implement exponential backoff for consecutive errors
-        if (consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
-          const backoffFactor = Math.min(Math.pow(2, consecutiveErrors - MAX_CONSECUTIVE_ERRORS), 10);
-          const nextInterval = STATE_POLL_INTERVAL * backoffFactor;
-          pollTimeoutRef.current = window.setTimeout(pollState, nextInterval);
-          return;
-        }
-      }
-
-      // Schedule next poll
-      pollTimeoutRef.current = window.setTimeout(pollState, STATE_POLL_INTERVAL);
-    };
-
-    // Start polling immediately
-    clearTimeouts();
-    pollState();
-
-    return () => {
-      clearTimeouts();
-    };
-  }, [token, logout, setPlayerState, clearTimeouts, fetchHistory, setLoading]);
-
+  // Initialize SSE connection
   useEffect(() => {
-    if (token) {
-      startPolling();
-      fetchHistory();
-    }
-
-    return () => {
-      clearTimeouts();
-    };
-  }, [token, startPolling, clearTimeouts, fetchHistory]);
-
-  const sendCommand = useCallback(async (command: MusicCommand, payload?: CommandPayload) => {
     if (!token) {
+      sseManager.current.disconnect();
       return;
     }
+
+    // Set up event listeners
+    const handleState = (data: any) => {
+      setPlayerState(data);
+    };
+
+    const handleHistory = (data: any) => {
+      setHistory(data.tracks);
+    };
+
+    const handleHeartbeat = () => {
+      setConnectionStatus('connected');
+      setServerError(null);
+    };
+
+    const handleError = () => {
+      setConnectionStatus('disconnected');
+      setServerError('Server connection lost');
+    };
+
+    // Add listeners
+    sseManager.current.addEventListener('state', handleState);
+    sseManager.current.addEventListener('history', handleHistory);
+    sseManager.current.addEventListener('heartbeat', handleHeartbeat);
+    sseManager.current.addErrorListener(handleError);
+
+    // Connect to SSE
+    sseManager.current.connect();
+
+    // Initial data fetch
+    fetchState();
+    fetchHistory();
+
+    return () => {
+      // Remove listeners
+      sseManager.current.removeEventListener('state', handleState);
+      sseManager.current.removeEventListener('history', handleHistory);
+      sseManager.current.removeEventListener('heartbeat', handleHeartbeat);
+      sseManager.current.removeErrorListener(handleError);
+    };
+  }, [token, fetchState, fetchHistory, setPlayerState]);
+
+  // Show error toast when server connection is lost
+  useEffect(() => {
+    if (serverError) {
+      toast.error(serverError, {
+        position: 'bottom-right',
+        duration: 5000,
+      });
+    }
+  }, [serverError]);
+
+  const sendCommand = useCallback(async (command: MusicCommand, payload?: CommandPayload) => {
+    if (!token) return;
 
     try {
       setLoading(true);
@@ -248,85 +197,12 @@ export function PlayerProvider({ children }: PlayerProviderProps) {
         }
         throw new Error('Failed to send command');
       }
-
-      // Fetch updated state immediately after command
-      await fetchState();
-      
-      // If it was a history-related command, fetch history too
-      if (command.toLowerCase().includes('history')) {
-        await fetchHistory();
-      }
     } catch (err) {
-      // Failed to send command
+      console.error('Error sending command:', err);
     } finally {
       setLoading(false);
     }
-  }, [token, setLoading, fetchState, fetchHistory, logout]);
-
-  // Server connection monitoring
-  useEffect(() => {
-    let pingInterval: NodeJS.Timeout;
-    let checkInterval: NodeJS.Timeout;
-    let lastConnectionState = true; // Track connection state to only log changes
-    
-    const pingServer = async () => {
-      try {
-        const response = await fetch(`${env.apiUrl}/api/health`, {
-          headers: {
-            'Authorization': token ? `Bearer ${token}` : '',
-            'X-Internal-Request': 'true'
-          }
-        });
-        
-        if (response.ok) {
-          setLastPingTime(Date.now());
-          
-          // Only update state if it changed
-          if (!lastConnectionState) {
-            lastConnectionState = true;
-          }
-          
-          setServerError(null);
-        } else {
-          lastConnectionState = false;
-        }
-      } catch (error) {
-        lastConnectionState = false;
-      }
-    };
-
-    const checkConnection = () => {
-      const timeSinceLastPing = Date.now() - lastPingTime;
-      if (timeSinceLastPing > 10000) { // 10 seconds timeout
-        if (lastConnectionState) {
-          lastConnectionState = false;
-        }
-        setServerError('Server connection lost');
-        // Don't redirect immediately, allow for reconnection attempts
-      }
-    };
-
-    if (token) {
-      pingServer(); // Ping immediately
-      pingInterval = setInterval(pingServer, 5000); // Ping every 5 seconds
-      checkInterval = setInterval(checkConnection, 2000); // Check every 2 seconds
-    }
-
-    return () => {
-      clearInterval(pingInterval);
-      clearInterval(checkInterval);
-    };
-  }, [token, lastPingTime, router]);
-
-  // Show error toast when server connection is lost
-  useEffect(() => {
-    if (serverError) {
-      toast.error(serverError, {
-        position: 'bottom-right',
-        duration: 5000,
-      });
-    }
-  }, [serverError]);
+  }, [token, setLoading, logout]);
 
   return (
     <PlayerProviderContext.Provider value={{ sendCommand }}>

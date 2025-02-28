@@ -9,6 +9,7 @@ import Image from 'next/image';
 import { HistoryTrack } from '@/lib/types';
 import env from '@/utils/env';
 import { toast } from 'react-hot-toast';
+import SSEManager from '@/lib/sse/SSEManager';
 
 export default function HistoryPage() {
   const { token } = useAuthStore();
@@ -21,36 +22,34 @@ export default function HistoryPage() {
     return `${env.apiUrl}/api/albumart/${youtubeId}`;
   };
 
-  // Wrap fetchHistory in useCallback
-  const fetchHistory = useCallback(async () => {
+  // Use SSE for history updates
+  useEffect(() => {
     if (!token) return;
 
-    setIsLoading(true);
-    try {
-      const response = await fetch(`${env.apiUrl}/api/history`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'X-Internal-Request': 'true'
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch history');
+    // Get initial history
+    fetch(`${env.apiUrl}/api/music/history`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'X-Internal-Request': 'true'
       }
+    })
+      .then(res => res.json())
+      .then(data => setHistory(Array.isArray(data) ? data : []))
+      .catch(error => console.error('Error fetching history:', error));
 
-      const data = await response.json();
-      setHistory(data.tracks || []);
-      setError(null);
-    } catch (err) {
-      // Failed to fetch history
-    } finally {
-      setIsLoading(false);
-    }
+    const sseManager = SSEManager.getInstance();
+
+    sseManager.addEventListener('history', (data) => {
+      setHistory(Array.isArray(data.tracks) ? data.tracks : []);
+    });
+
+    // Connect with token
+    sseManager.connect(token);
+
+    return () => {
+      sseManager.disconnect();
+    };
   }, [token]);
-
-  useEffect(() => {
-    fetchHistory();
-  }, [fetchHistory]);
 
   const handleAddToQueue = async (track: HistoryTrack) => {
     if (!token) return;
@@ -78,7 +77,7 @@ export default function HistoryPage() {
   };
 
   const handleRefresh = () => {
-    fetchHistory();
+    // This function is no longer used with SSE
   };
 
   const formatDate = (dateString: string) => {

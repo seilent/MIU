@@ -16,15 +16,17 @@ interface AnimatedQueueItemProps {
     };
     isAutoplay?: boolean;
   };
-  index: number;
-  isLeaving: boolean;
+  position: number;
+  showPosition?: boolean;
+  isLeaving?: boolean;
   onAnimationComplete?: () => void;
 }
 
 export function AnimatedQueueItem({ 
   track, 
-  index,
-  isLeaving,
+  position,
+  showPosition = true,
+  isLeaving = false,
   onAnimationComplete
 }: AnimatedQueueItemProps) {
   // Simplified animation variants
@@ -48,7 +50,7 @@ export function AnimatedQueueItem({
         }
       }
     },
-    exit: index === 0 ? {
+    exit: position === 1 ? {
       y: -20,
       opacity: 0,
       scale: 0.95,
@@ -106,6 +108,7 @@ export function AnimatedQueueItem({
           </span>
           {track.requestedBy.avatar && (
             <img
+              key={`${track.requestedBy.id}-${track.requestedBy.avatar}`}
               src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
               alt={track.requestedBy.username}
               className="h-4 w-4 rounded-full opacity-50"
@@ -115,9 +118,11 @@ export function AnimatedQueueItem({
       </div>
 
       {/* Queue number */}
-      <div className="text-sm text-white/40">
-        #{index + 1}
-      </div>
+      {showPosition && (
+        <div className="text-sm text-white/40">
+          #{position}
+        </div>
+      )}
     </motion.div>
   );
 } 

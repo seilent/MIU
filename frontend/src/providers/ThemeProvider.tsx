@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { usePlayerStore } from '@/lib/store/playerStore';
 import { BokehBackground } from '@/components/ui/BokehBackground';
+import { useAuthStore } from '@/lib/store/authStore';
 import env from '@/utils/env';
 
 type RGB = [number, number, number];
@@ -44,18 +45,43 @@ interface ThemeProviderProps {
 }
 
 export function ThemeProvider({ children }: ThemeProviderProps) {
+  const { token } = useAuthStore();
   const currentTrack = usePlayerStore((state) => state.currentTrack);
   const [colors, setColors] = useState<ThemeColors>(defaultColors);
   const [previousThumbnail, setPreviousThumbnail] = useState<string | null>(null);
+  const [publicTrack, setPublicTrack] = useState<{ thumbnail: string } | null>(null);
+
+  // Fetch public track state when not authenticated
+  useEffect(() => {
+    if (token) return;
+
+    const fetchCurrentTrack = async () => {
+      try {
+        const response = await fetch(`${env.apiUrl}/api/music/current`);
+        if (!response.ok) throw new Error('Failed to fetch current track');
+        const data = await response.json();
+        if (data.currentTrack) {
+          setPublicTrack(data.currentTrack);
+        }
+      } catch (error) {
+        console.error('Error fetching current track:', error);
+      }
+    };
+
+    fetchCurrentTrack();
+    const interval = setInterval(fetchCurrentTrack, 5000);
+    return () => clearInterval(interval);
+  }, [token]);
 
   useEffect(() => {
     // Keep track of the previous thumbnail to prevent UI flicker during transitions
-    if (currentTrack?.thumbnail) {
-      setPreviousThumbnail(currentTrack.thumbnail);
+    const track = token ? currentTrack : publicTrack;
+    if (track?.thumbnail) {
+      setPreviousThumbnail(track.thumbnail);
     }
     
     // Use current thumbnail or previous thumbnail during transitions
-    const thumbnailUrl = currentTrack?.thumbnail || previousThumbnail || '/images/DEFAULT.jpg';
+    const thumbnailUrl = track?.thumbnail || previousThumbnail || '/images/DEFAULT.jpg';
     
     // Transform old sv-miu URLs to new format and ensure YouTube thumbnails are properly formatted
     let transformedUrl = thumbnailUrl;
@@ -384,7 +410,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       img.onerror = null;
       img.src = '';
     };
-  }, [currentTrack?.thumbnail, previousThumbnail]);
+  }, [token, currentTrack?.thumbnail, previousThumbnail, publicTrack?.thumbnail]);
 
 
   return (

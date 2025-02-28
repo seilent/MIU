@@ -1,8 +1,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { prisma } from '../db.js';
 import { authMiddleware } from '../middleware/auth.js';
-import { RequestStatus } from '@prisma/client';
-import type { Request as PrismaRequest, Track, User } from '@prisma/client';
+import { RequestStatus } from '../types/enums.js';
+import type { PrismaClient } from '@prisma/client';
 
 const router = Router();
 
@@ -111,11 +111,25 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       prisma.request.count({ where }),
     ]);
 
+    // Update the interface for the request with track and user
+    interface RequestWithDetails {
+      track: {
+        youtubeId: string;
+        title: string;
+        thumbnail: string;
+        duration: number;
+      };
+      user: {
+        id: string;
+        username: string;
+        avatar: string | null;
+      };
+      requestedAt: Date;
+      playedAt: Date | null;
+    }
+
     // Transform data for response
-    const formattedTracks = tracks.map((request: PrismaRequest & { 
-      user: User;
-      track: Track;
-    }) => ({
+    const formattedTracks = tracks.map((request: RequestWithDetails) => ({
       youtubeId: request.track.youtubeId,
       title: request.track.title,
       thumbnail: request.track.thumbnail,

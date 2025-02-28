@@ -87,6 +87,7 @@ export function AnimatedNowPlaying({
           <span className="text-white/60">{track.requestedBy.username}</span>
           {track.requestedBy.avatar && (
             <img
+              key={`${track.requestedBy.id}-${track.requestedBy.avatar}`}
               src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
               alt={track.requestedBy.username}
               className="h-4 w-4 rounded-full opacity-60"

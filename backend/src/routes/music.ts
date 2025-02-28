@@ -1,10 +1,8 @@
-import express, { Router, Request, Response } from 'express';
-import { PrismaClient, User, Prisma, RequestStatus, Track } from '@prisma/client';
+import express, { Request, Response, Router } from 'express';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { getDiscordClient } from '../discord/client.js';
-import { searchLimiter, stateLimiter, queueLimiter, positionLimiter } from '../middleware/rateLimit.js';
 import fs from 'fs';
-import rateLimit from 'express-rate-limit';
 import { getYoutubeId, getYoutubeInfo, searchYoutube, parseDuration, downloadYoutubeAudio } from '../utils/youtube.js';
 import { MAX_DURATION } from '../config.js';
 import { 
@@ -15,6 +13,12 @@ import {
 } from '../metrics.js';
 import { Readable, PassThrough } from 'stream';
 import path from 'path';
+import { getPlayer } from '../discord/player.js';
+import { RequestStatus } from '../types/enums.js';
+import { spawn } from 'child_process';
+import getEnv from '../utils/env.js';
+
+const env = getEnv();
 
 interface WebUser {
   id: string;
@@ -23,9 +27,30 @@ interface WebUser {
   avatar: string | null;
 }
 
-interface RequestWithTrack extends Prisma.RequestGetPayload<{
-  include: { track: true; user: true };
-}> {}
+interface RequestWithTrack {
+  track: {
+    youtubeId: string;
+    title: string;
+    thumbnail: string;
+    duration: number;
+    resolvedYtId: string | null;
+    isMusicUrl?: boolean;
+    createdAt?: Date;
+    updatedAt?: Date;
+    globalScore?: number;
+    playCount?: number;
+    skipCount?: number;
+    isActive?: boolean;
+  };
+  user: {
+    id: string;
+    username: string;
+    avatar: string | null;
+  };
+  requestedAt: Date;
+  playedAt?: Date | null;
+  isAutoplay: boolean;
+}
 
 interface TrackResponse {
   youtubeId: string;
@@ -41,38 +66,78 @@ interface TrackResponse {
   isAutoplay: boolean;
 }
 
+// Enhance SSE client interface
+interface SSEClient {
+  id: string;
+  response: Response;
+  lastEventId?: string;
+}
+
+interface QueueItem {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  duration: number;
+  requestedBy: {
+    userId: string;
+    username: string;
+    discriminator: string;
+    avatar: string | null;
+  };
+  requestedAt: Date;
+  isAutoplay: boolean;
+}
+
+// Helper function to format track response
+function formatTrack(request: RequestWithTrack): TrackResponse {
+  // For YouTube Music tracks, use the original ID to maintain consistency
+  const youtubeId = request.track.isMusicUrl ? request.track.youtubeId : (request.track.resolvedYtId || request.track.youtubeId);
+  
+  return {
+    youtubeId,
+    title: request.track.title,
+    thumbnail: request.track.thumbnail,
+    duration: request.track.duration,
+    requestedBy: {
+      id: request.user.id,
+      username: request.user.username,
+      avatar: request.user.avatar || undefined
+    },
+    requestedAt: request.requestedAt.toISOString(),
+    isAutoplay: request.isAutoplay
+  };
+}
+
+// Store active SSE clients
+export const sseClients = new Set<SSEClient>();
+
+// Helper functions for SSE broadcasts
+export function broadcastToClient(client: SSEClient, event: string, data: any) {
+  try {
+    client.response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\nid: ${Date.now()}\n\n`);
+  } catch (error) {
+    console.error(`Error broadcasting to client ${client.id}:`, error);
+    sseClients.delete(client);
+  }
+}
+
+export function broadcast(event: string, data: any) {
+  sseClients.forEach(client => {
+    broadcastToClient(client, event, data);
+  });
+}
+
 const router = Router();
 
-// Apply rate limiters
-router.use('/search', searchLimiter);
-router.use('/state', stateLimiter);
-router.use(['/queue', '/history'], queueLimiter);
-
-// Rate limiters
-const musicStateLimiter = rateLimit({
-  windowMs: 1000, // 1 second
-  max: 50, // 50 requests per second
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Ensure no CORS headers are added
-  handler: (req, res) => {
-    res.status(429).json({ error: 'Too many requests' });
-  }
-});
-
-router.use('/state', musicStateLimiter);
-
-router.get('/search', searchLimiter, async (req: Request, res: Response) => {
+// Search endpoint
+router.get('/search', async (req: Request, res: Response) => {
   try {
     const query = req.query.q as string;
     if (!query) {
       return res.status(400).json({ error: 'Search query is required' });
     }
 
-    // Use regular YouTube search instead of YouTube Music
     const results = await searchYoutube(query);
-    
-    // Results are already in the correct format, no need to transform
     res.json(results);
   } catch (error) {
     console.error('Search failed:', error);
@@ -168,8 +233,8 @@ router.post('/queue', async (req: Request, res: Response) => {
     }
 
     // Extract YouTube ID
-    const youtubeId = await getYoutubeId(url);
-    if (!youtubeId) {
+    const youtubeIdResult = await getYoutubeId(url);
+    if (!youtubeIdResult || !youtubeIdResult.videoId) {
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
@@ -177,7 +242,7 @@ router.post('/queue', async (req: Request, res: Response) => {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
     const recentRequest = await prisma.request.findFirst({
       where: {
-        youtubeId,
+        youtubeId: youtubeIdResult.videoId,
         requestedAt: {
           gte: oneHourAgo
         },
@@ -198,7 +263,7 @@ router.post('/queue', async (req: Request, res: Response) => {
     }
 
     // Get track info to check duration
-    const trackInfo = await getYoutubeInfo(youtubeId);
+    const trackInfo = await getYoutubeInfo(youtubeIdResult.videoId, youtubeIdResult.isMusicUrl);
     if (trackInfo.duration > MAX_DURATION) {
       return res.status(400).json({ 
         error: `Track duration exceeds limit of ${Math.floor(MAX_DURATION / 60)} minutes` 
@@ -208,13 +273,14 @@ router.post('/queue', async (req: Request, res: Response) => {
     // Add to queue
     const track = await client.player.play(
       null, // No voice state for web requests
-      youtubeId,
+      youtubeIdResult.videoId,
       user.id,
       {
         username: user.username,
         discriminator: user.discriminator || '0000',
         avatar: user.avatar
-      }
+      },
+      youtubeIdResult.isMusicUrl
     );
 
     console.log('\x1b[36m%s\x1b[0m', `[TRACK ADDED] 🎵 "${trackInfo.title}" by ${user.username} (${user.id}) via web_request`);
@@ -244,21 +310,6 @@ router.get('/state', async (req: Request, res: Response) => {
       }
     });
 
-    // Get queued tracks
-    const queuedTracks = await prisma.request.findMany({
-      where: {
-        status: RequestStatus.QUEUED
-      },
-      orderBy: [
-        { isAutoplay: 'asc' },
-        { requestedAt: 'asc' }
-      ],
-      include: {
-        track: true,
-        user: true
-      }
-    });
-
     // Format track for response
     const formatTrack = (request: RequestWithTrack): TrackResponse => {
       // For YouTube Music tracks, use the original ID to maintain consistency
@@ -280,8 +331,7 @@ router.get('/state', async (req: Request, res: Response) => {
     };
 
     // Ensure the database and player queue are in sync
-    const playerQueue = client.player.getQueue();
-    const playerQueueMap = new Map(playerQueue.map(track => [track.youtubeId, track]));
+    const playerQueue = client.player.getQueue(); // This includes both regular and autoplay tracks
     
     // First, mark all queued tracks as stale
     await prisma.request.updateMany({
@@ -296,45 +346,6 @@ router.get('/state', async (req: Request, res: Response) => {
     // Then, update or create entries for tracks in the player queue
     for (const track of playerQueue) {
       try {
-        // Check if the track was recently played, is playing, or is queued
-        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
-        const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000); // 5 hours ago
-
-        // Check for any recent or current instances of this track
-        const recentOrCurrentRequest = await prisma.request.findFirst({
-          where: {
-            track: {
-              youtubeId: track.youtubeId
-            },
-            OR: [
-              // Check for recently completed tracks
-              {
-                status: RequestStatus.COMPLETED,
-                playedAt: {
-                  gte: track.isAutoplay ? fiveHoursAgo : oneHourAgo
-                }
-              },
-              // Check for currently playing or queued tracks
-              {
-                status: {
-                  in: [RequestStatus.PLAYING, RequestStatus.QUEUED]
-                }
-              }
-            ]
-          },
-          orderBy: {
-            requestedAt: 'desc'
-          }
-        });
-
-        if (recentOrCurrentRequest) {
-          const reason = recentOrCurrentRequest.status === RequestStatus.COMPLETED ? 
-            `too recent (${track.isAutoplay ? '5h' : '1h'} cooldown)` : 
-            `${recentOrCurrentRequest.status.toLowerCase()} in queue`;
-          console.log(`Skipping ${track.title} - ${reason}`);
-          continue;
-        }
-
         // Create or update track entry
         const trackEntry = await prisma.track.upsert({
           where: { youtubeId: track.youtubeId },
@@ -352,101 +363,86 @@ router.get('/state', async (req: Request, res: Response) => {
           update: {} // No updates needed
         });
 
-        // Create request entry for the track
-        await prisma.request.create({
-          data: {
-            status: RequestStatus.QUEUED,
-            isAutoplay: track.isAutoplay || false,
-            requestedAt: new Date(),
-            user: {
-              connect: { id: client.user?.id || 'bot' }
-            },
-            track: {
-              connect: { youtubeId: track.youtubeId }
-            }
+        // Try to find an existing request for this track
+        const existingRequest = await prisma.request.findFirst({
+          where: {
+            youtubeId: track.youtubeId,
+            OR: [
+              { status: RequestStatus.QUEUED },
+              { status: RequestStatus.SKIPPED }
+            ]
+          },
+          orderBy: {
+            requestedAt: 'desc'
           }
         });
+
+        if (existingRequest) {
+          // Update existing request using compound unique key
+          await prisma.request.update({
+            where: {
+              youtubeId_requestedAt: {
+                youtubeId: existingRequest.youtubeId,
+                requestedAt: existingRequest.requestedAt
+              }
+            },
+            data: {
+              status: RequestStatus.QUEUED,
+              isAutoplay: track.isAutoplay || false
+            }
+          });
+        } else {
+          // Create new request entry with a unique timestamp
+          const requestedAt = await ensureUniqueRequestTimestamp(track.youtubeId, new Date());
+          
+          await prisma.request.create({
+            data: {
+              status: RequestStatus.QUEUED,
+              isAutoplay: track.isAutoplay || false,
+              requestedAt,
+              youtubeId: track.youtubeId,
+              userId: track.requestedBy?.userId || client.user?.id || 'bot'
+            }
+          });
+        }
       } catch (error) {
         console.error('Error syncing track:', error);
       }
     }
 
-    // Get the updated queue, including only tracks that haven't been played recently
+    // Helper function to ensure unique timestamp
+    async function ensureUniqueRequestTimestamp(youtubeId: string, baseTime: Date): Promise<Date> {
+      let timestamp = new Date(baseTime);
+      let attempts = 0;
+      const maxAttempts = 10;
+
+      while (attempts < maxAttempts) {
+        // Check if a request with this timestamp exists
+        const existingRequest = await prisma.request.findUnique({
+          where: {
+            youtubeId_requestedAt: {
+              youtubeId,
+              requestedAt: timestamp
+            }
+          }
+        });
+
+        if (!existingRequest) {
+          return timestamp;
+        }
+
+        // Add 1 millisecond and try again
+        timestamp = new Date(timestamp.getTime() + 1);
+        attempts++;
+      }
+
+      throw new Error('Could not generate unique timestamp after maximum attempts');
+    }
+
+    // Get the updated queue
     const updatedQueuedTracks = await prisma.request.findMany({
       where: {
-        status: RequestStatus.QUEUED,
-        AND: [
-          // Base conditions
-          { status: RequestStatus.QUEUED },
-          {
-            OR: [
-              // For user requests
-              {
-                isAutoplay: false,
-                NOT: {
-                  track: {
-                    requests: {
-                      some: {
-                        OR: [
-                          // No recent completions
-                          {
-                            status: RequestStatus.COMPLETED,
-                            playedAt: { gte: new Date(Date.now() - 60 * 60 * 1000) }
-                          },
-                          // No current playing or queued instances except self
-                          {
-                            AND: [
-                              {
-                                status: { in: [RequestStatus.PLAYING, RequestStatus.QUEUED] }
-                              },
-                              {
-                                NOT: {
-                                  requestedAt: { equals: new Date() } // This will exclude the current request
-                                }
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }
-              },
-              // For autoplay tracks
-              {
-                isAutoplay: true,
-                NOT: {
-                  track: {
-                    requests: {
-                      some: {
-                        OR: [
-                          // No recent completions (5 hour cooldown)
-                          {
-                            status: RequestStatus.COMPLETED,
-                            playedAt: { gte: new Date(Date.now() - 5 * 60 * 60 * 1000) }
-                          },
-                          // No current playing or queued instances except self
-                          {
-                            AND: [
-                              {
-                                status: { in: [RequestStatus.PLAYING, RequestStatus.QUEUED] }
-                              },
-                              {
-                                NOT: {
-                                  requestedAt: { equals: new Date() } // This will exclude the current request
-                                }
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        ]
+        status: RequestStatus.QUEUED
       },
       orderBy: [
         { isAutoplay: 'asc' },
@@ -457,6 +453,16 @@ router.get('/state', async (req: Request, res: Response) => {
         user: true
       }
     });
+
+    // After updating the state, broadcast to all SSE clients
+    const state = {
+      status: client.player.getStatus(),
+      currentTrack: currentTrack ? formatTrack(currentTrack as RequestWithTrack) : undefined,
+      queue: updatedQueuedTracks.map((track: RequestWithTrack) => formatTrack(track)),
+      position: client.player.getPosition()
+    };
+
+    broadcastPlayerState(state);
 
     res.json({
       status: client.player.getStatus(),
@@ -970,6 +976,7 @@ router.get('/position', async (req: Request, res: Response) => {
   }
 });
 
+// History endpoint
 router.get('/history', async (req: Request, res: Response) => {
   try {
     const tracks = await prisma.request.findMany({
@@ -982,30 +989,51 @@ router.get('/history', async (req: Request, res: Response) => {
       },
       take: 50,
       include: {
-        track: true,
-        user: true
+        track: {
+          select: {
+            youtubeId: true,
+            title: true,
+            thumbnail: true,
+            duration: true,
+            isMusicUrl: true
+          }
+        },
+        user: {
+          select: {
+            id: true,
+            username: true,
+            avatar: true
+          }
+        }
       }
     });
 
-    res.json({
-      tracks: tracks.map((request: RequestWithTrack) => ({
-        youtubeId: request.track.youtubeId,
-        title: request.track.title,
-        thumbnail: request.track.thumbnail,
-        duration: request.track.duration,
-        requestedBy: {
-          id: request.user.id,
-          username: request.user.username,
-          avatar: request.user.avatar || undefined
-        },
-        requestedAt: request.requestedAt.toISOString(),
-        playedAt: request.playedAt!.toISOString(),
-        isAutoplay: request.isAutoplay
-      }))
-    });
+    if (!Array.isArray(tracks)) {
+      throw new Error('Invalid history data format');
+    }
+
+    const formattedTracks = tracks.map(request => ({
+      youtubeId: request.track.youtubeId,
+      title: request.track.title,
+      thumbnail: request.track.thumbnail,
+      duration: request.track.duration,
+      requestedBy: {
+        id: request.user.id,
+        username: request.user.username,
+        avatar: request.user.avatar || undefined
+      },
+      requestedAt: request.requestedAt.toISOString(),
+      playedAt: request.playedAt?.toISOString(),
+      isAutoplay: request.isAutoplay || false
+    }));
+
+    res.json(formattedTracks);
   } catch (error) {
     console.error('Error getting history:', error);
-    res.status(500).json({ error: 'Failed to get history' });
+    res.status(500).json({ 
+      error: 'Failed to get history',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 });
 
@@ -1021,6 +1049,355 @@ router.get('/history', async (req: Request, res: Response) => {
  */
 router.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'ok' });
+});
+
+// Helper function to convert QueueItem to RequestWithTrack
+function queueItemToRequestWithTrack(item: QueueItem): RequestWithTrack {
+  return {
+    track: {
+      youtubeId: item.youtubeId,
+      title: item.title,
+      thumbnail: item.thumbnail,
+      duration: item.duration,
+      resolvedYtId: null,
+      isMusicUrl: false
+    },
+    user: {
+      id: item.requestedBy.userId,
+      username: item.requestedBy.username,
+      avatar: item.requestedBy.avatar
+    },
+    requestedAt: item.requestedAt,
+    isAutoplay: item.isAutoplay
+  };
+}
+
+// SSE endpoint for live state updates
+router.get('/state/live', (req: Request, res: Response) => {
+  try {
+    // Check authentication from query parameter or user session
+    const token = req.query.token as string;
+    if (!req.user && !token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const headers = {
+      'Content-Type': 'text/event-stream',
+      'Connection': 'keep-alive',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': req.headers.origin || '*',
+      'Access-Control-Allow-Credentials': 'true'
+    };
+    res.writeHead(200, headers);
+
+    // Flush headers immediately
+    res.flushHeaders();
+
+    const clientId = Math.random().toString(36).substring(7);
+    const client: SSEClient = {
+      id: clientId,
+      response: res,
+      lastEventId: req.headers['last-event-id'] as string
+    };
+
+    // Send initial state
+    const player = getPlayer();
+    if (!player) {
+      throw new Error('Player not available');
+    }
+
+    const currentTrack = player.getCurrentTrack();
+    const queuedTracks = player.getQueue();
+
+    const initialState = {
+      status: player.getStatus(),
+      currentTrack: currentTrack ? formatTrack(queueItemToRequestWithTrack({
+        ...currentTrack,
+        requestedBy: {
+          userId: currentTrack.requestedBy.userId,
+          username: currentTrack.requestedBy.username,
+          discriminator: '0000',
+          avatar: currentTrack.requestedBy.avatar || null
+        }
+      })) : null,
+      queue: queuedTracks.map(track => formatTrack(queueItemToRequestWithTrack({
+        ...track,
+        requestedBy: {
+          userId: track.requestedBy.userId,
+          username: track.requestedBy.username,
+          discriminator: '0000',
+          avatar: track.requestedBy.avatar || null
+        }
+      }))),
+      position: player.getPosition()
+    };
+
+    broadcastToClient(client, 'state', initialState);
+
+    // Add client to active clients
+    sseClients.add(client);
+
+    // Set up keep-alive interval
+    const keepAliveInterval = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write('event: heartbeat\ndata: {}\n\n');
+      } else {
+        cleanup();
+      }
+    }, 30000); // Send keepalive every 30 seconds to match Apache's keepalive settings
+
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log(`SSE client ${clientId} disconnected`);
+      cleanup();
+    });
+
+    // Handle errors
+    res.on('error', (error) => {
+      console.error(`SSE connection error for client ${clientId}:`, error);
+      cleanup();
+    });
+
+    // Cleanup function
+    function cleanup() {
+      clearInterval(keepAliveInterval);
+      sseClients.delete(client);
+      if (!res.writableEnded) {
+        try {
+          res.end();
+        } catch (error) {
+          console.error(`Error ending SSE connection for client ${clientId}:`, error);
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error('Error in SSE connection:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to establish SSE connection' });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  }
+});
+
+// Update the player state broadcast
+export function broadcastPlayerState(data: any) {
+  // Send all state updates in a single event to prevent race conditions
+  broadcast('state', {
+    status: data.status,
+    currentTrack: data.currentTrack || null,
+    queue: data.queue || [],
+    position: data.position
+  });
+}
+
+// HLS Endpoints
+router.get('/hls/:youtubeId/playlist.m3u8', async (req: Request, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { youtubeId } = req.params;
+    const filePath = path.join(env.getString('CACHE_DIR'), 'audio', `${youtubeId}.m4a`);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Track not found' });
+    }
+
+    // Generate m3u8 playlist
+    const segmentDuration = 10; // 10 seconds per segment
+    const audioInfo = await getAudioDuration(filePath);
+    const duration = audioInfo.duration;
+    const segmentCount = Math.ceil(duration / segmentDuration);
+
+    let playlist = '#EXTM3U\n';
+    playlist += '#EXT-X-VERSION:3\n';
+    playlist += '#EXT-X-TARGETDURATION:' + segmentDuration + '\n';
+    playlist += '#EXT-X-MEDIA-SEQUENCE:0\n';
+    playlist += '#EXT-X-PLAYLIST-TYPE:VOD\n';
+
+    for (let i = 0; i < segmentCount; i++) {
+      const segmentDur = Math.min(segmentDuration, duration - (i * segmentDuration));
+      playlist += '#EXTINF:' + segmentDur.toFixed(3) + ',\n';
+      playlist += `segment_${i}.ts\n`;
+    }
+
+    playlist += '#EXT-X-ENDLIST';
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'max-age=3600');
+    res.send(playlist);
+  } catch (error) {
+    console.error('HLS: Error generating playlist:', error);
+    res.status(500).json({ error: 'Failed to generate playlist' });
+  }
+});
+
+router.get('/hls/:youtubeId/segment_:index.ts', async (req: Request, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { youtubeId, index } = req.params;
+    const filePath = path.join(env.getString('CACHE_DIR'), 'audio', `${youtubeId}.m4a`);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Track not found' });
+    }
+
+    const segmentIndex = parseInt(index);
+    const segmentDuration = 10; // 10 seconds per segment
+    const startTime = segmentIndex * segmentDuration;
+
+    try {
+      // Create a readable stream for the segment
+      const segmentStream = await createSegmentStream(filePath, startTime, segmentDuration);
+      
+      res.setHeader('Content-Type', 'video/MP2T');
+      res.setHeader('Cache-Control', 'max-age=3600');
+      
+      segmentStream.pipe(res);
+
+      // Handle client disconnect
+      req.on('close', () => {
+        segmentStream.destroy();
+      });
+    } catch (error) {
+      console.error('HLS: Error creating segment stream:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error creating segment' });
+      }
+    }
+  } catch (error) {
+    console.error('HLS: Error creating segment stream:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error creating segment' });
+    }
+  }
+});
+
+// Helper function to create segment stream
+async function createSegmentStream(filePath: string, startTime: number, duration: number): Promise<Readable> {
+  return new Promise((resolve, reject) => {
+    try {
+      const segmentStream = new PassThrough();
+      const ffmpeg = spawn('ffmpeg', [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', filePath,
+        '-ss', startTime.toString(),
+        '-t', duration.toString(),
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-ac', '2',
+        '-ar', '44100',
+        '-f', 'mpegts',
+        'pipe:1'
+      ]);
+
+      ffmpeg.stdout.pipe(segmentStream);
+
+      ffmpeg.stderr.on('data', (data) => {
+        console.error('FFmpeg stderr:', data.toString());
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`FFmpeg exited with code ${code}`));
+        }
+      });
+
+      resolve(segmentStream);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+// Helper function to get audio duration
+async function getAudioDuration(filePath: string): Promise<{ duration: number }> {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_format',
+      filePath
+    ]);
+
+    let output = '';
+    ffprobe.stdout.on('data', (data) => {
+      output += data;
+    });
+
+    ffprobe.stderr.on('data', (data) => {
+      console.error('FFprobe error:', data.toString());
+    });
+
+    ffprobe.on('close', (code) => {
+      if (code === 0) {
+        try {
+          const info = JSON.parse(output);
+          resolve({ duration: parseFloat(info.format.duration) });
+        } catch (error) {
+          reject(new Error('Failed to parse FFprobe output'));
+        }
+      } else {
+        reject(new Error(`FFprobe exited with code ${code}`));
+      }
+    });
+  });
+}
+
+// Public endpoint to get current track state
+router.get('/current', async (_req: Request, res: Response) => {
+  try {
+    const client = getDiscordClient();
+    if (!client) {
+      return res.status(500).json({ error: 'Discord client not available' });
+    }
+
+    // Get current playing track
+    const currentTrack = await prisma.request.findFirst({
+      where: {
+        status: RequestStatus.PLAYING
+      },
+      include: {
+        track: true,
+        user: true
+      }
+    });
+
+    if (!currentTrack) {
+      return res.json({ status: 'stopped', currentTrack: null });
+    }
+
+    // Format track for response
+    const formattedTrack = {
+      youtubeId: currentTrack.track.youtubeId,
+      title: currentTrack.track.title,
+      thumbnail: currentTrack.track.thumbnail,
+      duration: currentTrack.track.duration,
+      requestedBy: {
+        id: currentTrack.user.id,
+        username: currentTrack.user.username,
+        avatar: currentTrack.user.avatar || undefined
+      },
+      requestedAt: currentTrack.requestedAt.toISOString()
+    };
+
+    res.json({
+      status: client.player.getStatus(),
+      currentTrack: formattedTrack,
+      position: client.player.getPosition()
+    });
+  } catch (error) {
+    console.error('Error getting current track:', error);
+    res.status(500).json({ error: 'Failed to get current track' });
+  }
 });
 
 export { router as musicRouter };

@@ -19,23 +19,37 @@ import ffmpeg from 'ffmpeg-static';
 import { createReadStream } from 'fs';
 import { Readable, PassThrough } from 'stream';
 import { prisma } from '../db.js';
-import { Prisma } from '@prisma/client';
 import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
 import fs from 'fs';
 import { youtube } from '../utils/youtube.js';
-import type { PlaylistMode } from '@prisma/client';
-import { RequestStatus } from '@prisma/client';
-import type { Track as PrismaTrack } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
 import { ChildProcessWithoutNullStreams } from 'child_process';
 import { resolveYouTubeMusicId } from '../utils/youtubeMusic.js';
+import { RequestStatus, PlaylistMode } from '../types/enums.js';
+import { broadcastPlayerState } from '../routes/music.js';
 
-// Base types from Prisma
-type Track = PrismaTrack;
-type Request = Prisma.RequestGetPayload<{}>;
+// Base types
+interface Track {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  duration: number;
+  isMusicUrl?: boolean;
+  resolvedYtId?: string | null;
+  isActive?: boolean;
+}
+
+interface Request {
+  youtubeId: string;
+  userId: string;
+  requestedAt: Date;
+  playedAt?: Date | null;
+  isAutoplay: boolean;
+  status: RequestStatus;
+}
 
 // Common interfaces
 interface BaseTrackResult {
@@ -610,8 +624,11 @@ export class Player {
         this.queue.push(queueItem);
       }
 
+      // Immediately update player state to reflect queue changes
+      await this.updatePlayerState();
+
       // Start downloading audio for this track in the background
-      this.prefetchAudioForTrack(resolvedId, trackInfo.title); // Use resolved ID
+      this.prefetchAudioForTrack(resolvedId, trackInfo.title);
 
       // Update database in background
       Promise.all([
@@ -802,7 +819,17 @@ export class Player {
 
   getQueue(): QueueItem[] {
     // Return combined queue for display, with user requests first
-    return [...this.queue, ...this.autoplayQueue];
+    const formatQueueItem = (item: QueueItem): QueueItem => ({
+      ...item,
+      requestedBy: {
+        id: item.requestedBy?.userId || 'unknown',  // Map userId to id
+        userId: item.requestedBy?.userId || 'unknown',  // Keep userId for backward compatibility
+        username: item.requestedBy?.username || 'Unknown User',
+        avatar: item.requestedBy?.avatar || null
+      }
+    });
+    
+    return [...this.queue, ...this.autoplayQueue].map(formatQueueItem);
   }
 
   removeFromQueue(position: number): boolean {
@@ -854,7 +881,17 @@ export class Player {
   }
 
   getCurrentTrack(): QueueItem | undefined {
-    return this.currentTrack;
+    if (!this.currentTrack) return undefined;
+    
+    return {
+      ...this.currentTrack,
+      requestedBy: {
+        id: this.currentTrack.requestedBy?.userId || 'unknown',  // Map userId to id
+        userId: this.currentTrack.requestedBy?.userId || 'unknown',  // Keep userId for backward compatibility
+        username: this.currentTrack.requestedBy?.username || 'Unknown User',
+        avatar: this.currentTrack.requestedBy?.avatar || null
+      }
+    };
   }
 
   getStatus(): 'playing' | 'paused' | 'stopped' {
@@ -901,7 +938,7 @@ export class Player {
     }
   }
 
-  private isTrackDuplicate(youtubeId: string, trackId?: string, isAutoplay: boolean = false): boolean {
+  private isTrackDuplicate(youtubeId: string, trackId?: string): boolean {
     // Clean up expired entries first
     this.cleanupPlayedTracks();
     
@@ -922,14 +959,13 @@ export class Player {
       return true;
     }
 
-    // For playlist tracks in linear mode, skip the played tracks check
-    if (this.currentPlaylistId) {
-      return false;
-    }
+    return false;
+  }
 
+  private isTrackInCooldown(youtubeId: string, isAutoplay: boolean = false): boolean {
     const now = Date.now();
     const ytKey = `yt_${youtubeId}`;
-    const timestamp = this.playedTracks.get(ytKey) || this.playedTracks.get(youtubeId) || (trackId ? this.playedTracks.get(trackId) : undefined);
+    const timestamp = this.playedTracks.get(ytKey) || this.playedTracks.get(youtubeId);
 
     if (timestamp) {
       const elapsed = now - timestamp;
@@ -969,12 +1005,12 @@ export class Player {
 
         console.log(`\x1b[35m[PLAYLIST]\x1b[0m Using "${playlist.name}" (${playlist.mode} mode)`);
 
-        const activeTracks = await prisma.$queryRaw<TrackResult[]>`
+        const activeTracks = await prisma.$queryRaw`
           SELECT t.* FROM "Track" t
           INNER JOIN "DefaultPlaylistTrack" dpt ON t."youtubeId" = dpt."trackId"
           WHERE dpt."playlistId" = ${this.currentPlaylistId}::text
           AND t."isActive" = true
-          ORDER BY ${playlist.mode === 'POOL' ? Prisma.sql`RANDOM()` : Prisma.sql`dpt.position ASC`}
+          ORDER BY ${playlist.mode === 'POOL' ? 'RANDOM()' : 'dpt.position ASC'}
           LIMIT 1
         `;
 
@@ -1004,8 +1040,15 @@ export class Player {
             const info = await getYoutubeInfo(selectedTrack.youtubeId);
             console.log(`📑 [PLAYLIST] Selected: ${info.title}`);
 
-            if (this.isTrackDuplicate(selectedTrack.youtubeId, undefined, true)) {
+            // Check for actual duplicates first
+            if (this.isTrackDuplicate(selectedTrack.youtubeId)) {
               console.log(`⏭️ [PLAYLIST] Skipping duplicate: ${info.title}`);
+              return null;
+            }
+
+            // Then check for cooldown
+            if (this.isTrackInCooldown(selectedTrack.youtubeId, true)) {
+              console.log(`⏭️ [PLAYLIST] Skipping due to cooldown: ${info.title}`);
               return null;
             }
 
@@ -1298,10 +1341,19 @@ export class Player {
         }))
       ];
 
-      // Filter out duplicates
-      const filteredTracks = weightedTracks.filter(
-        item => !this.isTrackDuplicate((item.track as any).youtubeId, undefined, true)
-      );
+      // Filter out duplicates and tracks in cooldown
+      const filteredTracks = weightedTracks.filter(item => {
+        const trackId = (item.track as any).youtubeId;
+        // Check for actual duplicates first
+        if (this.isTrackDuplicate(trackId)) {
+          return false;
+        }
+        // Then check for cooldown
+        if (this.isTrackInCooldown(trackId, true)) {
+          return false;
+        }
+        return true;
+      });
 
       // Select tracks based on weights
       for (let i = 0; i < tracksNeeded && filteredTracks.length > 0; i++) {
@@ -1341,7 +1393,7 @@ export class Player {
             duration: info.duration,
             requestedBy: {
               userId: botUser.id,
-              username: selected.source,
+              username: botUser.username || 'MIU',  // Use bot's actual username instead of source
               avatar: botUser.avatar || undefined
             },
             requestedAt,
@@ -1480,7 +1532,6 @@ export class Player {
         }
       });
 
-      // THIS is where we should mark the track as played for the cooldown system
       // Mark the track as played in our internal tracking
       const ytKey = `yt_${this.currentTrack.youtubeId}`;
       const now = Date.now();
@@ -1488,16 +1539,33 @@ export class Player {
       console.log(`Marked track ${this.currentTrack.youtubeId} (${this.currentTrack.title}) as played at ${new Date(now).toISOString()}`);
       console.log(`This track will be available for autoplay again after ${new Date(now + this.AUTOPLAY_TRACKS_EXPIRY).toISOString()}`);
 
+      // Store track info before clearing
+      const oldTrack = this.currentTrack;
+      
       // Clear current track reference
       this.currentTrack = undefined;
       
-      // Update state to reflect the change
+      // Update state to reflect the change and wait for it to complete
       await this.updatePlayerState();
+      
+      console.log(`Track finished: ${oldTrack.title}`);
       console.log('=== Track Finish Complete ===\n');
-    }
 
-    // Play next track
-    await this.playNext();
+      // Check if we have any tracks in the queue
+      if (this.queue.length > 0 || this.autoplayQueue.length > 0) {
+        console.log('Found tracks in queue, playing next track');
+        await this.playNext();
+      } else if (this.isAutoplayEnabled()) {
+        console.log('No tracks in queue, attempting autoplay');
+        // Try to get a new track from autoplay
+        await this.handleAutoplay();
+      } else {
+        console.log('No tracks in queue and autoplay is disabled');
+      }
+    } else {
+      // If somehow we got here without a current track, try to play next anyway
+      await this.playNext();
+    }
   }
 
   resetAutoplayTracking() {
@@ -1534,6 +1602,40 @@ export class Player {
           }
         });
       }
+
+      // Format requestedBy data
+      const formatRequestedBy = (requestedBy: any) => ({
+        id: requestedBy?.userId || 'unknown',
+        userId: requestedBy?.userId || 'unknown',  // Keep userId for backward compatibility
+        username: requestedBy?.username || 'Unknown User',
+        avatar: requestedBy?.avatar || null
+      });
+
+      // Broadcast state update to all SSE clients
+      const state = {
+        status: this.getStatus(),
+        currentTrack: this.currentTrack ? {
+          youtubeId: this.currentTrack.youtubeId,
+          title: this.currentTrack.title,
+          thumbnail: this.currentTrack.thumbnail,
+          duration: this.currentTrack.duration,
+          requestedBy: formatRequestedBy(this.currentTrack.requestedBy),
+          requestedAt: this.currentTrack.requestedAt,
+          isAutoplay: this.currentTrack.isAutoplay
+        } : null,
+        queue: allQueueTracks.map(track => ({
+          youtubeId: track.youtubeId,
+          title: track.title,
+          thumbnail: track.thumbnail,
+          duration: track.duration,
+          requestedBy: formatRequestedBy(track.requestedBy),
+          requestedAt: track.requestedAt,
+          isAutoplay: track.isAutoplay
+        })),
+        position: this.getPosition()
+      };
+
+      broadcastPlayerState(state);
     } catch (error) {
       console.error('Error updating player state:', error);
     }

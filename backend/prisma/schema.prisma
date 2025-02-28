@@ -75,6 +75,7 @@ model Request {
   requestedAt DateTime      @default(now())
   playedAt    DateTime?
   isAutoplay  Boolean       @default(false)
+  status      RequestStatus @default(PENDING)
   user        User          @relation(fields: [userId], references: [id])
   track       Track         @relation(fields: [youtubeId], references: [youtubeId])
 

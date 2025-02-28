@@ -483,13 +483,16 @@ export async function getYoutubeId(query: string): Promise<{ videoId: string | u
         const videoId = response.data.items?.[0]?.id?.videoId;
         return { videoId: videoId || undefined, isMusicUrl: false };
       } catch (error: any) {
-        if (error?.response?.status === 403 && error?.errors?.[0]?.reason === 'quotaExceeded') {
+        if (error?.response?.status === 403) {
           const key = error.config?.params?.key;
-          if (key) {
+          const reason = error?.errors?.[0]?.reason;
+          
+          if (reason === 'quotaExceeded' && key) {
+            console.log(`YouTube API quota exceeded for key *****${key.slice(-5)}`);
             getKeyManager().markKeyAsQuotaExceeded(key);
+            retries--;
+            if (retries > 0) continue;
           }
-          retries--;
-          if (retries > 0) continue;
         }
         console.error('YouTube search failed:', error?.errors?.[0]?.reason || 'Unknown error');
         break;
@@ -706,7 +709,7 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
           const thumbnailUrl = await getBestThumbnail(videoId);
           await downloadAndCacheThumbnail(videoId, thumbnailUrl);
         } catch (error) {
-          console.error(`Failed to download thumbnail for ${videoId}:`, error);
+          console.error(`Failed to download thumbnail for ${videoId}`);
         }
       }
 
@@ -718,61 +721,68 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
     }
 
     // If we get here, we need to fetch from YouTube API
-    const apiKey = await getKeyManager().getCurrentKey('videos.list');
-    const response = await youtube.videos.list({
-      key: apiKey,
-      part: ['snippet', 'contentDetails'],
-      id: [videoId]
-    });
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        const apiKey = await getKeyManager().getCurrentKey('videos.list');
+        const response = await youtube.videos.list({
+          key: apiKey,
+          part: ['snippet', 'contentDetails'],
+          id: [videoId]
+        });
 
-    const video = response.data.items?.[0] as Video | undefined;
-    if (!video) {
-      throw new Error('Video not found');
-    }
+        const video = response.data.items?.[0];
+        if (!video) {
+          throw new Error('Video not found');
+        }
 
-    // Parse duration from ISO 8601 format
-    const duration = video.contentDetails?.duration || 'PT0S';
-    const durationInSeconds = parseDuration(duration);
-    if (durationInSeconds === 0) {
-      throw new Error('Invalid duration received from YouTube API');
-    }
+        // Parse duration from ISO 8601 format
+        const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
+        const title = video.snippet?.title || 'Unknown Title';
+        const thumbnail = video.snippet?.thumbnails?.maxres?.url ||
+                        video.snippet?.thumbnails?.high?.url ||
+                        video.snippet?.thumbnails?.medium?.url ||
+                        video.snippet?.thumbnails?.default?.url ||
+                        '';
 
-    // Get full title without parsing
-    const title = (video.snippet?.title || '').trim();
+        // Cache the track info
+        await prisma.track.upsert({
+          where: { youtubeId: videoId },
+          update: {
+            title,
+            thumbnail,
+            duration,
+            isMusicUrl
+          },
+          create: {
+            youtubeId: videoId,
+            title,
+            thumbnail,
+            duration,
+            isMusicUrl
+          }
+        });
 
-    // Download and cache thumbnail
-    const thumbnailUrl = await getBestThumbnail(videoId);
-    await downloadAndCacheThumbnail(videoId, thumbnailUrl);
-
-    // Use API endpoint URL for thumbnail access
-    const apiThumbnailUrl = `${API_BASE_URL}/api/albumart/${videoId}`;
-
-    // Create or update track entry
-    const newTrack = await prisma.track.upsert({
-      where: { youtubeId: videoId },
-      update: {
-        title,
-        duration: durationInSeconds,
-        thumbnail: apiThumbnailUrl,
-        isMusicUrl,
-        updatedAt: new Date()
-      },
-      create: {
-        youtubeId: videoId,
-        title,
-        duration: durationInSeconds,
-        thumbnail: apiThumbnailUrl,
-        isMusicUrl
+        return { title, thumbnail, duration };
+      } catch (error: any) {
+        if (error?.response?.status === 403) {
+          const key = error.config?.params?.key;
+          const reason = error?.errors?.[0]?.reason;
+          
+          if (reason === 'quotaExceeded' && key) {
+            console.log(`YouTube API quota exceeded for key *****${key.slice(-5)}`);
+            getKeyManager().markKeyAsQuotaExceeded(key);
+            retries--;
+            if (retries > 0) continue;
+          }
+        }
+        console.error(`YouTube info fetch failed for ${videoId}:`, error?.errors?.[0]?.reason || 'Unknown error');
+        break;
       }
-    });
-
-    return {
-      title: newTrack.title,
-      thumbnail: newTrack.thumbnail,
-      duration: newTrack.duration
-    };
+    }
+    throw new Error('Failed to fetch video info after retries');
   } catch (error) {
-    console.error(`Failed to get info for ${videoId}: ${(error as Error).message}`);
+    console.error(`Failed to get YouTube info for ${videoId}`);
     throw error;
   }
 }
@@ -784,7 +794,7 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
   // Check if download is already in progress
   const existingDownload = activeDownloads.get(youtubeId);
   if (existingDownload) {
-    console.log(`Download already in progress for ${youtubeId}, waiting...`);
+    console.log(`⏳ [${youtubeId}] Download already in progress, waiting...`);
     return existingDownload;
   }
 
@@ -851,10 +861,24 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
 
           // Move temp file to final location
           await fs.promises.rename(uniqueTempPath, finalPath);
+          console.log(`✅ [${youtubeId}] Download complete`);
           return finalPath;
-        } catch (error) {
-          lastError = error as Error;
-          console.error(`Download attempt ${4 - retries} failed:`, error);
+        } catch (error: any) {
+          lastError = error;
+          const errorMessage = error?.stderr || error?.message || 'Unknown error';
+          
+          // Extract just the yt-dlp error message if present
+          const ytdlpError = errorMessage.match(/ERROR: \[youtube\].*?: (.*?)(\n|$)/)?.[1];
+          
+          // Check if video is unavailable - no need to retry in this case
+          if (errorMessage.includes('Video unavailable') || 
+              errorMessage.includes('This video is not available') ||
+              errorMessage.includes('This video has been removed')) {
+            console.log(`❌ [${youtubeId}] Video is unavailable`);
+            throw error; // Propagate error without retrying
+          }
+          
+          console.log(`⚠️ [${youtubeId}] Attempt ${4 - retries}/3 failed: ${ytdlpError || errorMessage}`);
           retries--;
 
           // Clean up failed attempt
@@ -872,7 +896,8 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
         }
       }
 
-      throw new Error(`Failed to download audio after multiple attempts: ${lastError?.message}`);
+      console.log(`❌ [${youtubeId}] Download failed after 3 attempts`);
+      throw new Error('Download failed after retries');
     } finally {
       // Always clean up temp files and remove from active downloads
       try {

@@ -1,24 +1,63 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-
 import { useAuth } from '@/providers/AuthProvider';
 import { useAuthStore } from '@/lib/store/authStore';
-import { usePlayerStore } from '@/lib/store/playerStore';
-
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+import { ThemeProvider } from '@/providers/ThemeProvider';
+import env from '@/utils/env';
 
-type LoginPageProps = {
-  // Add props if needed in the future
-};
+interface CurrentTrack {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  duration: number;
+  requestedBy: {
+    id: string;
+    username: string;
+    avatar?: string;
+  };
+  requestedAt: string;
+}
 
-export default function LoginPage({}: LoginPageProps) {
+interface PlayerState {
+  status: 'playing' | 'paused' | 'stopped';
+  currentTrack: CurrentTrack | null;
+  position: number;
+}
+
+function LoginContent() {
   const router = useRouter();
   const { login } = useAuth();
   const { token, isLoading, error } = useAuthStore();
-  const currentTrack = usePlayerStore((state) => state.currentTrack);
+  const [playerState, setPlayerState] = useState<PlayerState | null>(null);
+  const [isLoadingTrack, setIsLoadingTrack] = useState(true);
+
+  // Fetch current track state
+  useEffect(() => {
+    const fetchCurrentTrack = async () => {
+      try {
+        const response = await fetch(`${env.apiUrl}/api/music/current`);
+        if (!response.ok) throw new Error('Failed to fetch current track');
+        const data = await response.json();
+        setPlayerState(data);
+      } catch (error) {
+        console.error('Error fetching current track:', error);
+      } finally {
+        setIsLoadingTrack(false);
+      }
+    };
+
+    // Initial fetch
+    fetchCurrentTrack();
+
+    // Poll every 5 seconds
+    const interval = setInterval(fetchCurrentTrack, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!isLoading && token) {
@@ -41,8 +80,8 @@ export default function LoginPage({}: LoginPageProps) {
   }
 
   const defaultTitle = "休み";
-  const imageUrl = currentTrack?.thumbnail ?? "/images/DEFAULT.jpg";
-  const imageAlt = currentTrack?.title ?? defaultTitle;
+  const imageUrl = playerState?.currentTrack?.thumbnail ?? "/images/DEFAULT.jpg";
+  const imageAlt = playerState?.currentTrack?.title ?? defaultTitle;
 
   return (
     <main className="h-screen flex flex-col items-center justify-between bg-theme-background p-8">
@@ -54,21 +93,32 @@ export default function LoginPage({}: LoginPageProps) {
       {/* Middle section - Image and title */}
       <div className="w-full flex-[2] flex flex-col items-center justify-center gap-6">
         <div className="relative w-[16rem] h-[16rem] sm:w-[20rem] sm:h-[20rem] md:w-[24rem] md:h-[24rem] lg:w-[28rem] lg:h-[28rem]">
-          <Image
-            src={imageUrl}
-            alt={imageAlt}
-            width={448}
-            height={448}
-            className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
-            priority
-            unoptimized
-          />
+          {isLoadingTrack ? (
+            <div className="w-full h-full flex items-center justify-center bg-theme-background/50 rounded-lg">
+              <LoadingSpinner size="lg" className="text-theme-accent" />
+            </div>
+          ) : (
+            <Image
+              src={imageUrl}
+              alt={imageAlt}
+              width={448}
+              height={448}
+              className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
+              priority
+              unoptimized
+            />
+          )}
         </div>
 
         <div className="text-center">
           <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-theme-accent">
-            {currentTrack?.title ?? defaultTitle}
+            {playerState?.currentTrack?.title ?? defaultTitle}
           </h2>
+          {playerState?.currentTrack?.requestedBy && (
+            <p className="mt-2 text-sm text-theme-accent/70">
+              Requested by {playerState.currentTrack.requestedBy.username}
+            </p>
+          )}
         </div>
       </div>
 
@@ -102,5 +152,13 @@ export default function LoginPage({}: LoginPageProps) {
         </button>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <ThemeProvider>
+      <LoginContent />
+    </ThemeProvider>
   );
 } 

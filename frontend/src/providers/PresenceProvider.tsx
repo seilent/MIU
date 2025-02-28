@@ -1,53 +1,88 @@
 'use client';
 
-import { createContext, useContext, useEffect } from 'react';
+import { createContext, useContext, useEffect, useRef } from 'react';
 import { useAuthStore } from '@/lib/store/authStore';
-import { usePlayerStore } from '@/lib/store/playerStore';
 import env from '@/utils/env';
 
 interface PresenceProviderProps {
   children: React.ReactNode;
 }
 
-const PresenceContext = createContext({});
-
-export const usePresence = () => useContext(PresenceContext);
+const PresenceContext = createContext<null>(null);
 
 export function PresenceProvider({ children }: PresenceProviderProps) {
   const { token } = useAuthStore();
-  const { currentTrack } = usePlayerStore();
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const consecutiveErrorsRef = useRef(0);
 
   useEffect(() => {
     if (!token) return;
 
-    // Send heartbeat immediately
     const sendHeartbeat = async () => {
       try {
-        await fetch(`${env.apiUrl}/api/presence/heartbeat`, {
+        const response = await fetch(`${env.apiUrl}/api/discord/presence`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${token}`,
-            'X-Internal-Request': 'true',
-            'X-Keep-Playing': currentTrack ? 'true' : 'false'  // Signal to keep music playing if we have a track
+            'Content-Type': 'application/json'
           }
         });
+
+        if (!response.ok) {
+          throw new Error('Failed to update presence');
+        }
+
+        // Reset error count on success
+        consecutiveErrorsRef.current = 0;
       } catch (error) {
-        // Failed to send heartbeat
+        consecutiveErrorsRef.current++;
+        console.error('Presence update error:', error);
+
+        // Implement exponential backoff
+        if (consecutiveErrorsRef.current > 3) {
+          const backoffTime = Math.min(Math.pow(2, consecutiveErrorsRef.current - 3) * 30000, 300000);
+          if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+          }
+          retryTimeoutRef.current = setTimeout(() => {
+            startHeartbeat();
+          }, backoffTime);
+          return;
+        }
       }
     };
 
-    // Send initial heartbeat
-    sendHeartbeat();
+    const startHeartbeat = () => {
+      // Clear any existing intervals
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
 
-    // Set up interval for heartbeat (every 30 seconds)
-    const interval = setInterval(sendHeartbeat, 30000);
+      // Start with an immediate update
+      sendHeartbeat();
+      
+      // Then set up the interval
+      heartbeatIntervalRef.current = setInterval(sendHeartbeat, 30000);
+    };
 
-    // Cleanup interval on unmount or token change
-    return () => clearInterval(interval);
-  }, [token, currentTrack]); // Add currentTrack to dependencies
+    startHeartbeat();
+
+    return () => {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
+    };
+  }, [token]);
 
   return (
-    <PresenceContext.Provider value={{}}>
+    <PresenceContext.Provider value={null}>
       {children}
     </PresenceContext.Provider>
   );
