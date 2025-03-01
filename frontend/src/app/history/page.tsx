@@ -19,7 +19,7 @@ export default function HistoryPage() {
 
   // Add function to transform thumbnail URL
   const getThumbnailUrl = (youtubeId: string): string => {
-    return `${env.apiUrl}/api/albumart/${youtubeId}`;
+    return `${env.apiUrl}/api/albumart/${youtubeId}?square=1`;
   };
 
   // Use SSE for history updates
@@ -129,7 +129,9 @@ export default function HistoryPage() {
             >
               <div className="relative h-16 w-16 flex-shrink-0">
                 <img
-                  src={track.thumbnail}
+                  src={track.thumbnail.startsWith('http') && !track.thumbnail.includes('/api/albumart/') 
+                    ? track.thumbnail 
+                    : getThumbnailUrl(track.youtubeId)}
                   alt={track.title}
                   className="h-16 w-16 rounded-md object-cover"
                 />

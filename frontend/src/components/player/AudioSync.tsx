@@ -37,6 +37,12 @@ export default function AudioSync() {
   const setupStream = useCallback(async () => {
     if (!mountedRef.current || !audioRef.current || !currentTrack) return;
 
+    console.log('Audio: Setting up stream', {
+      trackId: currentTrack.youtubeId,
+      loading: loadingRef.current,
+      initialized: isInitialized
+    });
+
     if (loadingRef.current) {
       let retryCount = 0;
       while (loadingRef.current && retryCount < 10) {
@@ -53,8 +59,10 @@ export default function AudioSync() {
       
       const hlsManager = HLSManager.getInstance();
       if (hlsManager.isSupported()) {
+        console.log('Audio: Using HLS for playback');
         await hlsManager.attachMedia(audio, currentTrack.youtubeId);
       } else {
+        console.log('Audio: Using direct stream URL for playback');
         const streamUrl = `${env.apiUrl}/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
         audio.src = streamUrl;
         audio.load();
@@ -64,11 +72,13 @@ export default function AudioSync() {
         new Promise<void>((resolve, reject) => {
           const handleMetadata = () => {
             cleanup();
+            console.log('Audio: Metadata loaded successfully');
             resolve();
           };
 
           const handleError = (error: Event) => {
             cleanup();
+            console.error('Audio: Metadata loading error', error);
             reject(error);
           };
 
@@ -86,10 +96,12 @@ export default function AudioSync() {
       ]);
 
       trackIdRef.current = currentTrack.youtubeId;
+      console.log('Audio: Stream setup complete for track', currentTrack.youtubeId);
 
       if (statusRef.current === 'playing') {
         const response = await fetch(`${env.apiUrl}/api/music/position`);
         const data = await response.json();
+        console.log('Audio: Setting position from API', data.position);
         audio.currentTime = data.position;
         await audio.play();
       }
@@ -167,6 +179,12 @@ export default function AudioSync() {
     if (!audioRef.current || !mountedRef.current || !isInitialized || loadingRef.current) return;
 
     const audio = audioRef.current;
+    console.log('Audio: Status change effect triggered', { 
+      status, 
+      isPaused: audio.paused,
+      isInitialized,
+      currentTrack: currentTrack?.youtubeId
+    });
 
     const startPlayback = async () => {
       try {
@@ -178,6 +196,7 @@ export default function AudioSync() {
         const response = await fetch(`${env.apiUrl}/api/music/position`);
         const data = await response.json();
         audio.currentTime = data.position;
+        console.log('Audio: Starting playback from position', data.position);
         await audio.play();
       } catch (error) {
         console.error('Audio: Failed to start playback:', error);
@@ -262,6 +281,10 @@ export default function AudioSync() {
         }
       });
 
+      // Set isInitialized to true after audio is set up
+      setIsInitialized(true);
+      console.log('Audio: Initialization complete');
+
       return () => {
         audio.removeEventListener('error', handleError);
       };
@@ -287,145 +310,43 @@ export default function AudioSync() {
     sseManagerRef.current = sseManager;
     sseSubscriptionRef.current = true;
 
+    // Only listen for position updates for audio synchronization
+    // Other state updates are handled by the PlayerProvider
     const handlePosition = (data: any) => {
       if (!mountedRef.current || !audioRef.current || !audioRef.current.paused) return;
       audioRef.current.currentTime = data.position;
       setPosition(data.position);
     };
 
-    const handleTrack = (data: any) => {
-      if (!mountedRef.current) return;
-      if (data.youtubeId !== trackIdRef.current) {
-        setupStream();
-      }
-    };
-
-    const handleStatus = (data: any) => {
-      if (!mountedRef.current) return;
-      statusRef.current = data.status;
-      setPlayerState({ status: data.status });
-    };
-
-    const handleState = (data: any) => {
-      if (!mountedRef.current) return;
-      
-      const oldTrackId = trackIdRef.current;
-      const newTrackId = data.currentTrack?.youtubeId;
-      
-      console.log('AudioSync: State update details', {
-        oldTrackId,
-        newTrackId,
-        status: {
-          current: statusRef.current,
-          new: data.status
-        },
-        track: data.currentTrack ? {
-          id: data.currentTrack.youtubeId,
-          title: data.currentTrack.title,
-          requestedBy: {
-            username: data.currentTrack.requestedBy?.username,
-            avatar: data.currentTrack.requestedBy?.avatar,
-            id: data.currentTrack.requestedBy?.id
-          }
-        } : null,
-        queueLength: data.queue?.length || 0,
-        isTrackChange: oldTrackId !== newTrackId,
-        isInitialized
-      });
-      
-      // Update all state at once to prevent race conditions
-      const playerState = usePlayerStore.getState();
-      const oldTrack = playerState.currentTrack;
-      
-      usePlayerStore.getState().setPlayerState({
-        status: data.status,
-        currentTrack: data.currentTrack,
-        queue: data.queue,
-        position: data.position
-      });
-      
-      // Log state change details
-      console.log('AudioSync: Player state updated', {
-        oldTrack: oldTrack ? {
-          id: oldTrack.youtubeId,
-          title: oldTrack.title,
-          requestedBy: {
-            username: oldTrack.requestedBy?.username,
-            avatar: oldTrack.requestedBy?.avatar,
-            id: oldTrack.requestedBy?.id
-          }
-        } : null,
-        newTrack: data.currentTrack ? {
-          id: data.currentTrack.youtubeId,
-          title: data.currentTrack.title,
-          requestedBy: {
-            username: data.currentTrack.requestedBy?.username,
-            avatar: data.currentTrack.requestedBy?.avatar,
-            id: data.currentTrack.requestedBy?.id
-          }
-        } : null,
-        statusChanged: statusRef.current !== data.status
-      });
-      
-      // Update track ID and initialize if needed
-      if (data.currentTrack) {
-        trackIdRef.current = data.currentTrack.youtubeId;
-        setIsInitialized(true);
-        
-        // Log track change
-        if (oldTrackId !== data.currentTrack.youtubeId) {
-          console.log('AudioSync: Track change details', {
-            from: {
-              id: oldTrackId,
-              track: oldTrack ? {
-                title: oldTrack.title,
-                requestedBy: {
-                  username: oldTrack.requestedBy?.username,
-                  avatar: oldTrack.requestedBy?.avatar,
-                  id: oldTrack.requestedBy?.id
-                }
-              } : null
-            },
-            to: {
-              id: data.currentTrack.youtubeId,
-              track: {
-                title: data.currentTrack.title,
-                requestedBy: {
-                  username: data.currentTrack.requestedBy?.username,
-                  avatar: data.currentTrack.requestedBy?.avatar,
-                  id: data.currentTrack.requestedBy?.id
-                }
-              }
-            }
-          });
-          
-          // Setup stream if track changed
-          setupStream();
-        }
-      }
-    };
-
     sseManager.addEventListener('position', handlePosition);
-    sseManager.addEventListener('track', handleTrack);
-    sseManager.addEventListener('status', handleStatus);
-    sseManager.addEventListener('state', handleState);
-
-    sseManager.connect(token).catch(error => {
-      console.error('Failed to establish SSE connection:', error);
-    });
 
     return () => {
       sseSubscriptionRef.current = false;
       sseManager.removeEventListener('position', handlePosition);
-      sseManager.removeEventListener('track', handleTrack);
-      sseManager.removeEventListener('status', handleStatus);
-      sseManager.removeEventListener('state', handleState);
     };
   }, [token]);
 
   // Track change effect
   useEffect(() => {
-    if (!currentTrack || !mountedRef.current || loadingRef.current || !isInitialized) return;
+    if (!currentTrack) {
+      console.log('AudioSync: No current track available');
+      return;
+    }
+    
+    if (!mountedRef.current) {
+      console.log('AudioSync: Component not mounted');
+      return;
+    }
+    
+    if (loadingRef.current) {
+      console.log('AudioSync: Loading in progress, skipping track change');
+      return;
+    }
+    
+    if (!isInitialized) {
+      console.log('AudioSync: Not initialized yet, skipping track change');
+      return;
+    }
     
     console.log('AudioSync: Track change effect triggered', {
       id: currentTrack.youtubeId,
@@ -442,29 +363,65 @@ export default function AudioSync() {
     trackIdRef.current = currentTrack.youtubeId;
 
     if ('mediaSession' in navigator) {
+      // Always use the original youtubeId for artwork
+      const originalYoutubeId = currentTrack.youtubeId;
+      
       const img = new Image();
       img.onload = () => {
         console.log('AudioSync: Setting media session metadata', {
           title: currentTrack.title,
           artist: currentTrack.requestedBy.username,
-          artwork: currentTrack.thumbnail
+          originalId: originalYoutubeId
         });
         
+        // Create base URL for artwork using the original youtubeId
+        // This is important because the database stores thumbnails using the original ID, not any resolved ID
+        const baseUrl = env.apiUrl 
+          ? `${env.apiUrl}/api/albumart/${originalYoutubeId}`
+          : `/api/albumart/${originalYoutubeId}`;
+            
+        // For mobile lockscreen players, we need to ensure square images
+        // Add a crop parameter to force square aspect ratio
+        const artworkUrl = `${baseUrl}?square=1`;
+            
+        console.log('AudioSync: Using artwork URL:', artworkUrl);
+
         navigator.mediaSession.metadata = new MediaMetadata({
           title: currentTrack.title,
           artist: currentTrack.requestedBy.username,
-          artwork: [{
-            src: currentTrack.thumbnail.startsWith('http') 
-              ? currentTrack.thumbnail 
-              : `${env.apiUrl}/api/albumart/${currentTrack.youtubeId}`,
-            sizes: `${img.width}x${img.height}`,
-            type: 'image/jpeg'
-          }]
+          // Provide multiple sizes with the square parameter for different devices
+          artwork: [
+            { src: artworkUrl, sizes: '96x96', type: 'image/jpeg' },
+            { src: artworkUrl, sizes: '128x128', type: 'image/jpeg' },
+            { src: artworkUrl, sizes: '192x192', type: 'image/jpeg' },
+            { src: artworkUrl, sizes: '256x256', type: 'image/jpeg' },
+            { src: artworkUrl, sizes: '384x384', type: 'image/jpeg' },
+            { src: artworkUrl, sizes: '512x512', type: 'image/jpeg' }
+          ]
+        });
+        
+        // Set media session action handlers
+        navigator.mediaSession.setActionHandler('play', () => {
+          const audio = document.querySelector('audio');
+          if (audio && audio.paused) {
+            audio.play().catch(err => console.error('Failed to play:', err));
+          }
+        });
+        
+        navigator.mediaSession.setActionHandler('pause', () => {
+          const audio = document.querySelector('audio');
+          if (audio && !audio.paused) {
+            audio.pause();
+          }
         });
       };
+      
+      // Load the image to trigger onload - use the same originalYoutubeId for consistency
       img.src = currentTrack.thumbnail.startsWith('http') 
         ? currentTrack.thumbnail 
-        : `${env.apiUrl}/api/albumart/${currentTrack.youtubeId}`;
+        : env.apiUrl 
+          ? `${env.apiUrl}/api/albumart/${originalYoutubeId}?square=1`
+          : `/api/albumart/${originalYoutubeId}?square=1`;
     }
     
     setupStream().catch(error => {

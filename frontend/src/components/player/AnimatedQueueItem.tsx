@@ -83,7 +83,11 @@ export function AnimatedQueueItem({
       {/* Track thumbnail */}
       <div className="relative h-16 w-16 flex-shrink-0">
         <Image
-          src={track.thumbnail.startsWith('http') ? track.thumbnail : `${env.apiUrl}/api/albumart/${track.youtubeId}`}
+          src={track.thumbnail.startsWith('http') 
+            ? track.thumbnail 
+            : env.apiUrl 
+              ? `${env.apiUrl}/api/albumart/${track.youtubeId}?square=1`
+              : `/api/albumart/${track.youtubeId}?square=1`}
           alt={track.title}
           fill
           className="object-cover rounded-md"

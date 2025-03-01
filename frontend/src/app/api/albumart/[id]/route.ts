@@ -4,9 +4,17 @@ import { NextResponse } from 'next/server';
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   const { id } = params;
+  const searchParams = request.nextUrl.searchParams;
+  const square = searchParams.get('square');
   
   try {
-    const response = await fetch(`${env.apiUrl}/api/albumart/${id}`, {
+    // Construct URL with query parameters if present
+    let url = `${env.apiUrl}/api/albumart/${id}`;
+    if (square) {
+      url += `?square=${square}`;
+    }
+    
+    const response = await fetch(url, {
       headers: {
         'X-Internal-Request': 'true'
       }

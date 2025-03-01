@@ -3,6 +3,7 @@ import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlayIcon, PauseIcon } from '@heroicons/react/24/solid';
 import { PlayerControls } from '@/components/player/PlayerControls';
+import env from '@/utils/env';
 
 interface AnimatedNowPlayingProps {
   track: any;
@@ -34,7 +35,11 @@ export function AnimatedNowPlaying({
         whileTap={{ scale: 0.98 }}
       >
         <Image
-          src={track.thumbnail}
+          src={track.thumbnail.startsWith('http') 
+            ? track.thumbnail 
+            : env.apiUrl 
+              ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
+              : `/api/albumart/${track.youtubeId}`}
           alt={track.title}
           fill
           className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"

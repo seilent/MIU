@@ -16,6 +16,7 @@ import { swaggerSpec } from './swagger.js';
 import cors from 'cors';
 import { albumArtRouter } from './routes/albumart.js';
 import { initializeDiscordClient } from './discord/client.js';
+import { initializeYouTubeAPI } from './utils/youtube.js';
 import getEnv from './utils/env.js';
 import http from 'http';
 import bodyParser from 'body-parser';
@@ -33,6 +34,15 @@ export async function createServer() {
   } catch (error) {
     logger.error('Failed to initialize Discord client:', error);
     throw error; // This will prevent the server from starting if Discord init fails
+  }
+
+  // Initialize YouTube API
+  try {
+    await initializeYouTubeAPI();
+    logger.info('YouTube API initialized successfully');
+  } catch (error) {
+    logger.error('Failed to initialize YouTube API:', error);
+    // Don't throw error here, as the server can still function with some API keys
   }
 
   // Middleware setup

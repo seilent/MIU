@@ -1,214 +1,154 @@
 'use client';
 
-import { createContext, useContext, useEffect, useRef, useCallback, useState } from 'react';
-import { usePlayerStore } from '@/lib/store/playerStore';
+import { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { useAuthStore } from '@/lib/store/authStore';
-import { QueueItem } from '@/lib/types';
-import { useRouter } from 'next/navigation';
-import { toast } from 'react-hot-toast';
+import { usePlayerStore } from '@/lib/store/playerStore';
 import env from '@/utils/env';
 import SSEManager from '@/lib/sse/SSEManager';
 
-type MusicCommand = 
-  | 'search'
-  | 'queue'
-  | 'playback'
-  | 'skip'
-  | 'history';
-
-interface SearchCommandPayload {
-  query: string;
+interface PlayerContextType {
+  sendCommand: (command: string, params?: Record<string, any>) => Promise<any>;
+  isConnected: boolean;
 }
 
-interface QueueCommandPayload {
-  youtubeId: string;
-}
+const PlayerContext = createContext<PlayerContextType | null>(null);
 
-interface PlaybackCommandPayload {
-  action: 'play' | 'pause';
-}
-
-type CommandPayload = 
-  | SearchCommandPayload 
-  | QueueCommandPayload 
-  | PlaybackCommandPayload 
-  | Record<string, never>;
-
-interface PlayerProviderContextType {
-  sendCommand: (command: MusicCommand, data?: CommandPayload) => Promise<void>;
-}
-
-const PlayerProviderContext = createContext<PlayerProviderContextType>({
-  sendCommand: async () => {},
-});
-
-export const usePlayerProvider = () => useContext(PlayerProviderContext);
-
-interface PlayerProviderProps {
-  children: React.ReactNode;
-}
-
-export function PlayerProvider({ children }: PlayerProviderProps) {
+export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore();
-  const { logout } = useAuthStore();
-  const {
-    setPlayerState,
-    setHistory,
-    setLoading,
-  } = usePlayerStore();
-  const router = useRouter();
-  const [serverError, setServerError] = useState<string | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected'>('connected');
-  const sseManager = useRef<SSEManager>(SSEManager.getInstance());
+  const { setPlayerState, setQueue } = usePlayerStore();
+  const [isConnected, setIsConnected] = useState(false);
+  const sseConnectionRef = useRef(false);
 
-  const fetchState = useCallback(async () => {
-    if (!token) return;
-    
-    try {
-      setLoading(true);
-      const response = await fetch(`${env.apiUrl}/api/music/state`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (response.status === 401) {
-        logout();
-        return;
-      }
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      setPlayerState(data);
-      setLoading(false);
-    } catch (err) {
-      setLoading(false);
-      console.error('Error fetching state:', err);
-    }
-  }, [token, logout, setPlayerState, setLoading]);
-
-  const fetchHistory = useCallback(async () => {
-    if (!token) return;
-    
-    try {
-      const response = await fetch(`${env.apiUrl}/api/music/history`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (response.status === 401) {
-        logout();
-        return;
-      }
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      setHistory(data);
-    } catch (err) {
-      console.error('Error fetching history:', err);
-    }
-  }, [token, logout, setHistory]);
-
-  // Initialize SSE connection
+  // Centralized SSE connection management
   useEffect(() => {
-    if (!token) {
-      sseManager.current.disconnect();
-      return;
-    }
+    if (!token || sseConnectionRef.current) return;
 
-    // Set up event listeners
+    const sseManager = SSEManager.getInstance();
+    sseConnectionRef.current = true;
+    
+    // Handle state updates (current track, status, position)
     const handleState = (data: any) => {
-      setPlayerState(data);
-    };
-
-    const handleHistory = (data: any) => {
-      setHistory(data.tracks);
-    };
-
-    const handleHeartbeat = () => {
-      setConnectionStatus('connected');
-      setServerError(null);
-    };
-
-    const handleError = () => {
-      setConnectionStatus('disconnected');
-      setServerError('Server connection lost');
-    };
-
-    // Add listeners
-    sseManager.current.addEventListener('state', handleState);
-    sseManager.current.addEventListener('history', handleHistory);
-    sseManager.current.addEventListener('heartbeat', handleHeartbeat);
-    sseManager.current.addErrorListener(handleError);
-
-    // Connect to SSE
-    sseManager.current.connect();
-
-    // Initial data fetch
-    fetchState();
-    fetchHistory();
-
-    return () => {
-      // Remove listeners
-      sseManager.current.removeEventListener('state', handleState);
-      sseManager.current.removeEventListener('history', handleHistory);
-      sseManager.current.removeEventListener('heartbeat', handleHeartbeat);
-      sseManager.current.removeErrorListener(handleError);
-    };
-  }, [token, fetchState, fetchHistory, setPlayerState]);
-
-  // Show error toast when server connection is lost
-  useEffect(() => {
-    if (serverError) {
-      toast.error(serverError, {
-        position: 'bottom-right',
-        duration: 5000,
+      console.log('PlayerProvider: State update received', {
+        status: data.status,
+        track: data.currentTrack ? {
+          id: data.currentTrack.youtubeId,
+          title: data.currentTrack.title
+        } : null
       });
-    }
-  }, [serverError]);
+      
+      // Update all state at once to prevent race conditions
+      if (data.currentTrack) {
+        setPlayerState({
+          status: data.status,
+          position: data.position,
+          currentTrack: {
+            ...data.currentTrack,
+            requestedBy: data.currentTrack.requestedBy ? {
+              id: data.currentTrack.requestedBy.id,
+              username: data.currentTrack.requestedBy.username,
+              avatar: data.currentTrack.requestedBy.avatar || undefined,
+              hasAvatar: !!data.currentTrack.requestedBy.avatar
+            } : null,
+            requestedAt: data.currentTrack.requestedAt || new Date().toISOString()
+          }
+        });
+      } else {
+        setPlayerState({
+          status: data.status,
+          position: data.position,
+          currentTrack: undefined
+        });
+      }
+      
+      // Process queue data from state event if available
+      if (data.queue && Array.isArray(data.queue)) {
+        console.log('PlayerProvider: Queue update from state event', { 
+          queueLength: data.queue.length 
+        });
+        
+        const processedQueue = data.queue.map((track: any) => ({
+          ...track,
+          requestedBy: track.requestedBy ? {
+            id: track.requestedBy.id,
+            username: track.requestedBy.username,
+            avatar: track.requestedBy.avatar || undefined,
+            hasAvatar: !!track.requestedBy.avatar
+          } : null,
+          requestedAt: track.requestedAt || new Date().toISOString(),
+          isAutoplay: !!track.isAutoplay
+        }));
+        
+        setQueue(processedQueue);
+      }
+    };
+    
+    // Handle heartbeat for connection status
+    const handleHeartbeat = () => {
+      setIsConnected(true);
+    };
+    
+    // Handle connection errors
+    const handleConnectionError = () => {
+      setIsConnected(false);
+    };
+    
+    // Add event listeners
+    sseManager.addEventListener('state', handleState);
+    sseManager.addEventListener('heartbeat', handleHeartbeat);
+    sseManager.addErrorListener(handleConnectionError);
+    
+    // Connect with token
+    sseManager.connect(token).catch(error => {
+      console.error('PlayerProvider: Failed to connect SSE:', error);
+      setIsConnected(false);
+    });
+    
+    return () => {
+      sseConnectionRef.current = false;
+      sseManager.removeEventListener('state', handleState);
+      sseManager.removeEventListener('heartbeat', handleHeartbeat);
+      sseManager.removeErrorListener(handleConnectionError);
+    };
+  }, [token, setPlayerState, setQueue]);
 
-  const sendCommand = useCallback(async (command: MusicCommand, payload?: CommandPayload) => {
-    if (!token) return;
+  const sendCommand = useCallback(async (command: string, params: Record<string, any> = {}) => {
+    if (!token) {
+      throw new Error('Not authenticated');
+    }
 
     try {
-      setLoading(true);
-      
-      const response = await fetch(`${env.apiUrl}/api/music/${command.toLowerCase()}`, {
+      const response = await fetch(`${env.apiUrl}/api/music/command/${command}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
           'X-Internal-Request': 'true'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(params)
       });
 
       if (!response.ok) {
-        if (response.status === 401) {
-          logout();
-          return;
-        }
-        throw new Error('Failed to send command');
+        throw new Error(`Command failed: ${response.statusText}`);
       }
-    } catch (err) {
-      console.error('Error sending command:', err);
-    } finally {
-      setLoading(false);
+
+      return await response.json();
+    } catch (error) {
+      console.error(`Error sending command ${command}:`, error);
+      throw error;
     }
-  }, [token, setLoading, logout]);
+  }, [token]);
 
   return (
-    <PlayerProviderContext.Provider value={{ sendCommand }}>
+    <PlayerContext.Provider value={{ sendCommand, isConnected }}>
       {children}
-    </PlayerProviderContext.Provider>
+    </PlayerContext.Provider>
   );
 }
 
-export default PlayerProvider;
+export function usePlayerProvider() {
+  const context = useContext(PlayerContext);
+  if (!context) {
+    throw new Error('usePlayerProvider must be used within a PlayerProvider');
+  }
+  return context;
+}

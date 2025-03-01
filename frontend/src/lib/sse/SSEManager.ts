@@ -58,92 +58,85 @@ class SSEManager {
 
   private async setupConnection(token: string): Promise<void> {
     if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
+      this.disconnect();
     }
-    
-    if (!token || token === 'undefined') {
-      throw new Error('SSE: Cannot establish connection - Invalid token');
-    }
-    
+
     this.isConnecting = true;
     this.currentToken = token;
 
-    return new Promise((resolve, reject) => {
-      try {
-        const url = new URL(`${env.apiUrl}/api/music/state/live`);
-        url.searchParams.append('token', token);
-        url.searchParams.append('_', Date.now().toString());
-        if (this.lastEventId) {
-          url.searchParams.append('lastEventId', this.lastEventId);
-        }
-        
-        this.eventSource = new EventSource(url.toString(), {
-          withCredentials: true
-        });
+    try {
+      const url = new URL(`${env.apiUrl}/api/music/state/live`);
+      url.searchParams.append('token', token);
+      
+      console.log('SSE: Connecting to URL', url.toString());
+      
+      this.eventSource = new EventSource(url.toString());
+      
+      this.eventSource.onopen = () => {
+        console.log('SSE: Connection opened');
+        this.consecutiveErrors = 0;
+      };
 
-        this.eventSource.onopen = () => {
-          console.log('SSE: Connection opened');
-          this.consecutiveErrors = 0;
-          this.isConnecting = false;
-          this.setupEventListeners();
+      this.eventSource.onerror = (event) => {
+        console.error('SSE: Connection error', event);
+        this.handleError(event);
+      };
+
+      // Set up event handlers for each event type
+      for (const eventType in this.listeners) {
+        const handler = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data);
+            this.listeners[eventType].forEach((callback) => {
+              try {
+                callback(data);
+              } catch (error) {
+                console.error(`SSE: Error in ${eventType} callback:`, error);
+              }
+            });
+          } catch (error) {
+            console.error(`SSE: Error parsing ${eventType} event data:`, error);
+          }
+        };
+        
+        this.eventHandlers.set(eventType, handler);
+        this.eventSource.addEventListener(eventType, handler);
+      }
+
+      // Wait for the connection to be established or fail
+      await new Promise<void>((resolve, reject) => {
+        if (!this.eventSource) {
+          reject(new Error('EventSource not initialized'));
+          return;
+        }
+
+        const onOpen = () => {
+          cleanup();
           resolve();
         };
 
-        this.eventSource.onerror = (error) => {
-          console.error('SSE: Connection error:', error);
-          this.handleError(error);
-          reject(error);
+        const onError = (event: Event) => {
+          cleanup();
+          reject(event);
         };
 
-        // Add message handler for lastEventId tracking
-        this.eventSource.onmessage = (event) => {
-          this.lastEventId = event.lastEventId;
+        const cleanup = () => {
+          this.eventSource?.removeEventListener('open', onOpen);
+          this.eventSource?.removeEventListener('error', onError);
         };
 
-      } catch (error) {
-        console.error('SSE: Setup error:', error);
-        this.handleError(error as Event);
-        reject(error);
-      }
-    });
-  }
+        this.eventSource.addEventListener('open', onOpen);
+        this.eventSource.addEventListener('error', onError);
 
-  private setupEventListeners() {
-    if (!this.eventSource) return;
-
-    // Clear existing event listeners
-    this.eventHandlers.forEach((handler, eventType) => {
-      this.eventSource?.removeEventListener(eventType, handler);
-    });
-    this.eventHandlers.clear();
-
-    // Add heartbeat handler
-    const heartbeatHandler = () => this.handleHeartbeat();
-    this.eventSource.addEventListener('heartbeat', heartbeatHandler);
-    this.eventHandlers.set('heartbeat', heartbeatHandler);
-
-    // Set up event listeners for each registered event type
-    Object.entries(this.listeners).forEach(([eventType, listeners]) => {
-      const handler = (event: MessageEvent) => {
-        try {
-          const data = JSON.parse(event.data);
-          this.lastEventId = event.lastEventId; // Track lastEventId
-          listeners.forEach(listener => {
-            try {
-              listener(data);
-            } catch (error) {
-              console.error(`SSE: Error in listener for ${eventType}:`, error);
-            }
-          });
-        } catch (error) {
-          console.error(`SSE: Error handling ${eventType} event:`, error);
-        }
-      };
-
-      this.eventSource?.addEventListener(eventType, handler);
-      this.eventHandlers.set(eventType, handler);
-    });
+        // Add timeout for connection
+        setTimeout(() => {
+          cleanup();
+          reject(new Error('Connection timeout after 10 seconds'));
+        }, 10000);
+      });
+    } finally {
+      this.isConnecting = false;
+    }
   }
 
   private handleError(error: Event) {

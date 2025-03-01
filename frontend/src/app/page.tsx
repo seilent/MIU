@@ -30,7 +30,7 @@ export default function Home() {
     setPlayerState
   } = usePlayerStore();
   const { user, token } = useAuthStore();
-  const { sendCommand } = usePlayerProvider();
+  const { sendCommand, isConnected } = usePlayerProvider();
   const [isPlaying, setIsPlaying] = useState(false);
   const { showHistory, toggleView } = useView();
   const [history, setHistory] = useState<any[]>([]);
@@ -43,6 +43,8 @@ export default function Home() {
   const animationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [loading, setLoading] = useState(false);
   const sseSubscriptionRef = useRef(false);
+  const [showEmptyState, setShowEmptyState] = useState(false);
+  const emptyStateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Add queue state validation
   const validQueue = queue?.filter(track => 
@@ -100,16 +102,39 @@ export default function Home() {
           setPreviousTrack(null);
           setIsTransitioning(false);
         }, 300);
+        
+        // Set a timeout to show the empty state after 5 seconds of no track
+        if (emptyStateTimeoutRef.current) {
+          clearTimeout(emptyStateTimeoutRef.current);
+        }
+        
+        emptyStateTimeoutRef.current = setTimeout(() => {
+          if (!currentTrack) {
+            console.log('Page: No track playing for 5 seconds, showing empty state');
+            setShowEmptyState(true);
+          }
+        }, 5000);
+      } else {
+        // If there was no previous track, show empty state immediately
+        setShowEmptyState(true);
       }
-      return;
+    } else {
+      // Reset empty state when a track is playing
+      setShowEmptyState(false);
+      
+      // Clear any pending empty state timeout
+      if (emptyStateTimeoutRef.current) {
+        clearTimeout(emptyStateTimeoutRef.current);
+        emptyStateTimeoutRef.current = null;
+      }
     }
 
     // Only trigger transition if track ID changed
-    const trackChanged = !previousTrack || previousTrack.youtubeId !== currentTrack.youtubeId;
-    const avatarChanged = previousTrack && 
+    const trackChanged = !previousTrack || previousTrack.youtubeId !== currentTrack?.youtubeId;
+    const avatarChanged = previousTrack && currentTrack && 
       previousTrack.requestedBy?.avatar !== currentTrack.requestedBy?.avatar;
 
-    if (trackChanged || avatarChanged) {
+    if (currentTrack && (trackChanged || avatarChanged)) {
       // Deep clone the current track to prevent reference issues
       const currentTrackData = {
         ...currentTrack,
@@ -170,6 +195,9 @@ export default function Home() {
       if (transitionTimeoutRef.current) {
         clearTimeout(transitionTimeoutRef.current);
       }
+      if (emptyStateTimeoutRef.current) {
+        clearTimeout(emptyStateTimeoutRef.current);
+      }
     };
   }, [currentTrack?.youtubeId, currentTrack?.requestedBy?.avatar]); // Only trigger on track ID or avatar changes
 
@@ -187,27 +215,13 @@ export default function Home() {
   useEffect(() => {
     if (!token) return;
     
-    const sseManager = SSEManager.getInstance();
+    // Update connection error state based on isConnected from PlayerProvider
+    setConnectionError(!isConnected);
     
-    const handleConnectionError = () => {
-      setConnectionError(true);
-      if (currentTrack) {
-        router.replace('/');
-      }
-    };
-
-    const handleHeartbeat = () => {
-      setConnectionError(false);
-    };
-
-    sseManager.addEventListener('heartbeat', handleHeartbeat);
-    sseManager.addErrorListener(handleConnectionError);
-
-    return () => {
-      sseManager.removeEventListener('heartbeat', handleHeartbeat);
-      sseManager.removeErrorListener(handleConnectionError);
-    };
-  }, [token, currentTrack, router]);
+    if (!isConnected && currentTrack) {
+      router.replace('/');
+    }
+  }, [isConnected, token, currentTrack, router]);
 
   // Fetch history effect
   useEffect(() => {
@@ -278,141 +292,6 @@ export default function Home() {
     }
   }, [currentTrack?.youtubeId, currentTrack?.requestedBy?.avatar]); // Only log on actual changes
 
-  // Replace the SSE effect with improved version
-  useEffect(() => {
-    if (!token) return;
-
-    const sseManager = SSEManager.getInstance();
-    let isSubscribed = false;
-
-    const setupSSE = async () => {
-      if (isSubscribed) return;
-      isSubscribed = true;
-
-      const stateListener = (data: any) => {
-        console.log('Page: State update received', {
-          status: data.status,
-          track: data.currentTrack ? {
-            id: data.currentTrack.youtubeId,
-            title: data.currentTrack.title,
-            requestedBy: {
-              username: data.currentTrack.requestedBy?.username,
-              avatar: data.currentTrack.requestedBy?.avatar,
-              id: data.currentTrack.requestedBy?.id,
-              hasAvatar: !!data.currentTrack.requestedBy?.avatar
-            }
-          } : null
-        });
-        if (setStatus && setPosition) {
-          setStatus(data.status);
-          setPosition(data.position);
-        }
-      };
-
-      const statusListener = (data: any) => {
-        if (setStatus) {
-          setStatus(data.status);
-          if (data.status === 'stopped' && setCurrentTrack) {
-            setCurrentTrack(undefined);
-          }
-        }
-      };
-
-      const trackListener = (data: any) => {
-        console.log('Page: Track update received', {
-          id: data.youtubeId,
-          title: data.title,
-          requestedBy: data.requestedBy ? {
-            username: data.requestedBy.username,
-            avatar: data.requestedBy.avatar,
-            id: data.requestedBy.id,
-            hasAvatar: !!data.requestedBy.avatar
-          } : null
-        });
-        
-        if (setCurrentTrack) {
-          if (!data || !data.youtubeId) {
-            setCurrentTrack(undefined);
-          } else if (data.youtubeId !== currentTrack?.youtubeId || 
-                     data.requestedBy?.avatar !== currentTrack?.requestedBy?.avatar) {
-            // Deep clone to prevent reference issues and ensure requestedBy data is complete
-            setCurrentTrack({
-              ...data,
-              requestedBy: data.requestedBy ? {
-                id: data.requestedBy.id,
-                username: data.requestedBy.username,
-                avatar: data.requestedBy.avatar || undefined,
-                hasAvatar: !!data.requestedBy.avatar
-              } : null,
-              requestedAt: data.requestedAt || new Date().toISOString()
-            });
-          }
-        }
-      };
-
-      const queueListener = (data: any) => {
-        if (!data) {
-          console.log('Queue update received empty data');
-          return;
-        }
-        
-        console.log('Queue update received:', data);
-        
-        if (setQueue) {
-          const processedQueue = data.map((track: any) => ({
-            ...track,
-            requestedBy: track.requestedBy ? {
-              id: track.requestedBy.id,
-              username: track.requestedBy.username,
-              avatar: track.requestedBy.avatar || undefined,
-              hasAvatar: !!track.requestedBy.avatar
-            } : null,
-            requestedAt: track.requestedAt || new Date().toISOString(),
-            isAutoplay: !!track.isAutoplay // Ensure boolean
-          }));
-          
-          // Only update if queue has changed
-          setQueue(prevQueue => {
-            const hasChanged = JSON.stringify(prevQueue) !== JSON.stringify(processedQueue);
-            if (hasChanged) {
-              console.log('Queue changed, updating state');
-            }
-            return hasChanged ? processedQueue : prevQueue;
-          });
-        }
-      };
-
-      // Add event listeners
-      sseManager.addEventListener('state', stateListener);
-      sseManager.addEventListener('status', statusListener);
-      sseManager.addEventListener('track', trackListener);
-      sseManager.addEventListener('queue', queueListener);
-
-      // Connect with token and handle errors
-      try {
-        await sseManager.connect(token);
-        console.log('SSE connection established');
-      } catch (error) {
-        console.error('Failed to connect SSE:', error);
-        setConnectionError(true);
-      }
-
-      return () => {
-        isSubscribed = false;
-        sseManager.removeEventListener('state', stateListener);
-        sseManager.removeEventListener('status', statusListener);
-        sseManager.removeEventListener('track', trackListener);
-        sseManager.removeEventListener('queue', queueListener);
-      };
-    };
-
-    setupSSE();
-
-    return () => {
-      isSubscribed = false;
-    };
-  }, [token, setQueue, setStatus, setPosition, setCurrentTrack, currentTrack]);
-
   const handlePlayPause = async () => {
     try {
       const audio = document.querySelector('audio');
@@ -447,7 +326,7 @@ export default function Home() {
     return null;
   }
 
-  // Show player if we have a track to display
+  // If no track to display, show empty state
   if (displayTrack) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -549,6 +428,118 @@ export default function Home() {
     );
   }
 
-  // If no track to display, return null
-  return null;
+  // If no track to display and we've waited long enough, show empty state
+  if (showEmptyState) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
+          <div className="relative w-[16rem] h-[16rem] sm:w-[20rem] sm:h-[20rem] md:w-[24rem] md:h-[24rem] mb-8">
+            <Image
+              src="/images/DEFAULT.jpg"
+              alt="No music playing"
+              width={448}
+              height={448}
+              className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
+              priority
+            />
+          </div>
+          <h2 className="text-2xl font-bold text-theme-accent mb-4">No music playing</h2>
+          <p className="text-theme-accent/70 mb-8 max-w-md">
+            Request a song in Discord to start the music player.
+          </p>
+          
+          {connectionError && (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-sm text-red-500 mb-4 max-w-md">
+              Connection to server lost. Trying to reconnect...
+            </div>
+          )}
+          
+          {/* Queue Section */}
+          <div className="w-full max-w-2xl mt-8">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-x-2">
+                <h2 className="text-2xl font-bold text-white">{showHistory ? "History" : "Queue"}</h2>
+                <button
+                  onClick={toggleView}
+                  className="p-2 rounded-full hover:bg-theme-accent/10 transition-colors flex-shrink-0"
+                  title={showHistory ? "Show Queue" : "Show History"}
+                >
+                  <ClockIcon className="h-5 w-5 text-theme-accent transform rotate-135" />
+                </button>
+              </div>
+            </div>
+
+            <div className="relative overflow-hidden">
+              <div className="relative w-full">
+                {/* History View */}
+                <motion.div
+                  initial={false}
+                  animate={{
+                    opacity: showHistory ? 1 : 0,
+                    x: showHistory ? 0 : 20,
+                    position: 'relative',
+                    zIndex: showHistory ? 1 : 0,
+                    display: showHistory ? 'block' : 'none'
+                  }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <div className="space-y-4">
+                    {history.map((track, index) => (
+                      <AnimatedQueueItem
+                        key={`${track.youtubeId}-${track.requestedAt}-${index}`}
+                        track={track}
+                        position={index + 1}
+                        showPosition={false}
+                      />
+                    ))}
+                    {history.length === 0 && (
+                      <div className="text-center text-gray-400 py-8">
+                        No history available
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+
+                {/* Queue View */}
+                <motion.div
+                  initial={false}
+                  animate={{
+                    opacity: showHistory ? 0 : 1,
+                    x: showHistory ? -20 : 0,
+                    position: 'relative',
+                    zIndex: showHistory ? 0 : 1,
+                    display: showHistory ? 'none' : 'block'
+                  }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <div className="space-y-4">
+                    {displayQueue.map((track) => (
+                      <AnimatedQueueItem
+                        key={track.key}
+                        track={track}
+                        position={track.queuePosition}
+                        showPosition={true}
+                      />
+                    ))}
+                    {displayQueue.length === 0 && (
+                      <div className="text-center text-gray-400 py-8">
+                        Queue is empty
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  // Show loading state during transitions
+  return (
+    <div className="container mx-auto px-4 py-8 flex items-center justify-center min-h-[60vh]">
+      <LoadingSpinner size="lg" />
+    </div>
+  );
 }

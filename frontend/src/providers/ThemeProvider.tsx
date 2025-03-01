@@ -92,6 +92,11 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         /^https:\/\/sv-miu\.vercel\.app\/api\/albumart\//,
         `${env.apiUrl}/api/albumart/`
       );
+      
+      // Add square parameter if not already present
+      if (!transformedUrl.includes('?square=')) {
+        transformedUrl += '?square=1';
+      }
     }
     
     // Handle YouTube Music thumbnails
@@ -101,6 +106,11 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         /\/[^/]+\.jpg$/,
         '/maxresdefault.jpg'
       );
+    }
+    
+    // Add square parameter to our own API URLs if not already present
+    if (transformedUrl.includes('/api/albumart/') && !transformedUrl.includes('?square=')) {
+      transformedUrl += '?square=1';
     }
 
     // Create an image element to load the thumbnail

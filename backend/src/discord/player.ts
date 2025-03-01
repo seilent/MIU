@@ -236,6 +236,11 @@ export class Player {
       }
     });
 
+    // Ensure bot user exists in database
+    this.ensureBotUser().catch(error => {
+      console.error('Failed to ensure bot user exists:', error);
+    });
+
     // Clean up any stuck states from previous sessions
     this.cleanupStuckStates().catch(error => {
       console.error('Failed to cleanup stuck states:', error);
@@ -285,6 +290,34 @@ export class Player {
 
     // Start user presence check interval
     this.startUserPresenceCheck();
+  }
+
+  private async ensureBotUser(): Promise<void> {
+    if (!this.client.user) {
+      console.error('Bot user not available');
+      return;
+    }
+
+    try {
+      await prisma.user.upsert({
+        where: { id: this.client.user.id },
+        create: {
+          id: this.client.user.id,
+          username: this.client.user.username || 'Bot',
+          discriminator: this.client.user.discriminator || '0000',
+          avatar: this.client.user.avatar
+        },
+        update: {
+          username: this.client.user.username || 'Bot',
+          discriminator: this.client.user.discriminator || '0000',
+          avatar: this.client.user.avatar
+        }
+      });
+      console.log('✓ Bot user ensured in database');
+    } catch (error) {
+      console.error('Failed to ensure bot user:', error);
+      throw error;
+    }
   }
 
   private async initializeVoiceConnection() {
@@ -530,66 +563,192 @@ export class Player {
   ): Promise<QueuedTrack> {
     try {
       console.log(`=== Starting play request for: ${youtubeId}`);
+      console.log(`Initial state - isMusicUrl: ${isMusicUrl}`);
 
-      // If it's a YouTube Music URL, resolve it first
+      let trackInfo;
       let resolvedId = youtubeId;
-      if (isMusicUrl) {
-        const resolved = await resolveYouTubeMusicId(youtubeId);
-        if (!resolved) {
-          throw new Error('Failed to resolve YouTube Music URL');
-        }
-        resolvedId = resolved;
+      let useCachedData = false;
+
+      // Check if we have a cached track with valid files
+      console.log('=== Checking cache using original youtubeId ===');
+      const cachedTrack = await prisma.track.findUnique({
+        where: { youtubeId }
+      });
+      console.log('Cache lookup result:', cachedTrack ? 'Found in database' : 'Not in database');
+
+      const audioCache = await prisma.audioCache.findUnique({
+        where: { youtubeId }
+      });
+      console.log('Audio cache lookup result:', audioCache ? 'Found' : 'Not found');
+
+      // If we have cache and files exist, verify them
+      if (cachedTrack && audioCache && fs.existsSync(audioCache.filePath)) {
+        console.log('=== Found valid cache entries, checking thumbnail ===');
+        const thumbnailCache = await prisma.thumbnailCache.findUnique({
+          where: { youtubeId }  // Always use original youtubeId
+        });
+        console.log('Thumbnail cache lookup result:', thumbnailCache ? 'Found' : 'Not found');
+
+        // First verify audio duration
+        console.log('=== Verifying audio duration ===');
+        const duration = await getAudioFileDuration(audioCache.filePath);
+        console.log(`Duration check - Cached: ${cachedTrack.duration}, Actual: ${duration}`);
         
-        // Update the original track with resolved ID immediately
+        if (Math.abs(duration - cachedTrack.duration) < 1) { // Allow 1 second difference
+          // If thumbnail exists and file exists, we can use cache
+          if (thumbnailCache && fs.existsSync(thumbnailCache.filePath)) {
+            console.log(`🎵 [CACHE] All cache components valid, using cached track: ${cachedTrack.title}`);
+            console.log(`Original resolvedYtId from cache: ${cachedTrack.resolvedYtId || 'none'}`);
+            trackInfo = {
+              title: cachedTrack.title,
+              thumbnail: cachedTrack.thumbnail,
+              duration: cachedTrack.duration
+            };
+            // Use resolvedId from cache if available for music URLs
+            resolvedId = cachedTrack.resolvedYtId || youtubeId;
+            console.log(`Using resolvedId: ${resolvedId} (from cache)`);
+            isMusicUrl = false; // Skip music URL resolution since we have cache
+            console.log('Set isMusicUrl to false since using cache');
+            useCachedData = true;
+          } else {
+            console.log('❌ Thumbnail missing or invalid, attempting to recreate...');
+            // If thumbnail is missing but we have other cache, try to recreate it
+            try {
+              // Use cached resolvedId if available for recreation
+              const infoId = cachedTrack.resolvedYtId || youtubeId;
+              console.log(`Fetching info for thumbnail using ID: ${infoId}`);
+              const info = await getYoutubeInfo(infoId);
+              await prisma.thumbnailCache.upsert({
+                where: { youtubeId },
+                create: {
+                  youtubeId,
+                  filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
+                },
+                update: {
+                  filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
+                }
+              });
+              console.log('✓ Thumbnail cache recreated');
+              // Now we can use the cache
+              trackInfo = {
+                title: cachedTrack.title,
+                thumbnail: cachedTrack.thumbnail,
+                duration: cachedTrack.duration
+              };
+              resolvedId = cachedTrack.resolvedYtId || youtubeId;
+              isMusicUrl = false;
+              useCachedData = true;
+            } catch (error) {
+              console.error('Failed to recreate thumbnail cache:', error);
+            }
+          }
+        } else {
+          console.log('❌ Duration mismatch, cannot use cache');
+        }
+      } else {
+        console.log('❌ Cache validation failed - Missing database entry or audio file');
+      }
+
+      // Get track info if not using cache
+      if (!useCachedData) {
+        console.log('=== No valid cache found or cache incomplete, getting fresh track info ===');
+        // First resolve YouTube Music URL if needed
+        if (isMusicUrl) {
+          console.log('Detected YouTube Music URL, attempting to resolve to regular YouTube ID...');
+          try {
+            const resolved = await resolveYouTubeMusicId(youtubeId);
+            if (!resolved) {
+              console.log('⚠️ Failed to resolve YouTube Music URL, using original ID as fallback');
+              // Use original ID as fallback
+              resolvedId = youtubeId;
+            } else {
+              resolvedId = resolved;
+              console.log(`Successfully resolved to: ${resolvedId}`);
+            }
+          } catch (resolveError) {
+            console.log('⚠️ Error resolving YouTube Music URL:', resolveError);
+            console.log('Using original ID as fallback');
+            // Use original ID as fallback
+            resolvedId = youtubeId;
+          }
+        }
+
+        // Get track info using the resolved ID
+        console.log(`Fetching track info for ID: ${resolvedId}`);
+        trackInfo = await getYoutubeInfo(resolvedId);
+        console.log(`Retrieved track info: ${trackInfo.title}`);
+
+        // Save track info using original youtubeId
+        console.log('=== Saving track info to database ===');
+        console.log(`Using original youtubeId for all cache: ${youtubeId}`);
+        console.log(`Current resolvedId (for content only): ${resolvedId}`);
+        
+        // Save track info
         await prisma.track.upsert({
-          where: { youtubeId },
+          where: { youtubeId },  // Always use original youtubeId
           create: {
-            youtubeId,
-            title: 'Loading...', // Temporary title
-            duration: 0,
-            thumbnail: `${process.env.API_URL || 'http://localhost:3000'}/api/albumart/${youtubeId}`,
-            isMusicUrl: true,
-            resolvedYtId: resolvedId,
+            youtubeId,  // Always use original youtubeId
+            title: trackInfo.title,
+            duration: trackInfo.duration,
+            thumbnail: trackInfo.thumbnail,
+            isMusicUrl,
+            resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
             isActive: true
           },
           update: {
-            isMusicUrl: true,
-            resolvedYtId: resolvedId,
+            title: trackInfo.title,
+            duration: trackInfo.duration,
+            thumbnail: trackInfo.thumbnail,
+            isMusicUrl,
+            resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
             isActive: true
           }
         });
+        console.log('✓ Track info saved to database');
+
+        // Save thumbnail cache with original youtubeId
+        await prisma.thumbnailCache.upsert({
+          where: { youtubeId },  // Always use original youtubeId
+          create: {
+            youtubeId,  // Always use original youtubeId
+            filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
+          },
+          update: {
+            filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
+          }
+        });
+        console.log('✓ Thumbnail cache entry saved');
+
+        // Download and cache audio using original youtubeId
+        console.log('=== Downloading and caching audio ===');
+        console.log(`Using original youtubeId for cache: ${youtubeId}`);
+        console.log(`Using resolvedId for content: ${resolvedId}`);
+        await this.downloadTrackAudio(youtubeId, resolvedId);
       }
 
       // Get voice connection
+      console.log('=== Setting up playback ===');
       const connection = await this.getVoiceConnection(voiceState);
       if (!connection) {
+        console.log('❌ Failed to get voice connection');
         throw new Error('Failed to join voice channel');
       }
-
-      // Get track info using the resolved ID
-      const trackInfo = await getYoutubeInfo(resolvedId, isMusicUrl);
-
-      // Check duration limit
-      if (trackInfo.duration > this.MAX_DURATION) {
-        throw new Error(`Track duration exceeds limit of ${Math.floor(this.MAX_DURATION / 60)} minutes`);
-      }
-
-      // Update both original and resolved track entries with complete metadata
-      if (isMusicUrl) {
-        await prisma.track.update({
-          where: { youtubeId },
-          data: {
-            title: trackInfo.title,
-            duration: trackInfo.duration,
-            thumbnail: trackInfo.thumbnail
-          }
-        });
-      }
+      console.log('✓ Voice connection ready');
 
       // Create queue item with complete metadata
       const requestedAt = new Date();
+      console.log('Creating queue item:', {
+        youtubeId: youtubeId,  // Always use original youtubeId
+        title: trackInfo.title,
+        requestedBy: {
+          userId,
+          username: userInfo.username
+        },
+        isAutoplay: false
+      });
+
       const queueItem: QueueItem = {
-        youtubeId: isMusicUrl ? youtubeId : resolvedId, // Use original ID for music URLs
+        youtubeId: youtubeId,  // Always use original youtubeId
         title: trackInfo.title,
         thumbnail: trackInfo.thumbnail,
         duration: trackInfo.duration,
@@ -609,22 +768,27 @@ export class Player {
         
         // Start audio download and playback
         try {
-          const resource = await this.getAudioResource(resolvedId); // Use resolved ID
+          console.log(`Getting audio resource using original youtubeId: ${youtubeId}`);
+          const resource = await this.getAudioResource(youtubeId); // Use original youtubeId
           if (resource) {
             this.audioPlayer.play(resource);
-            console.log('Started immediate playback');
+            console.log('✓ Started immediate playback');
+          } else {
+            console.log('❌ Failed to get audio resource, adding to queue instead');
+            this.queue.push(queueItem);
           }
         } catch (error) {
           console.error('Failed to start immediate playback:', error);
-          // If immediate playback fails, add to queue
+          console.log('Adding to queue due to playback error');
           this.queue.push(queueItem);
         }
       } else {
-        // Add to queue if something is already playing
+        console.log('Player busy, adding track to queue');
         this.queue.push(queueItem);
       }
 
       // Immediately update player state to reflect queue changes
+      console.log('=== Updating player state ===');
       await this.updatePlayerState();
 
       // Start downloading audio for this track in the background
@@ -695,9 +859,9 @@ export class Player {
       });
 
       // Calculate response
-      const willPlayNext = this.audioPlayer.state.status === AudioPlayerStatus.Idle || (this.queue.length === 1);
+      const willPlayNext = this.audioPlayer.state.status === AudioPlayerStatus.Idle;
       const response = {
-        youtubeId: resolvedId, // Use resolved ID
+        youtubeId: youtubeId, // Use original youtubeId for consistency
         title: trackInfo.title,
         thumbnail: trackInfo.thumbnail,
         duration: trackInfo.duration,
@@ -711,9 +875,117 @@ export class Player {
       return response;
 
     } catch (error) {
-      console.error('Error playing track:', error);
+      console.error('Error in play:', error);
       throw error;
     }
+  }
+
+  private async downloadTrackAudio(youtubeId: string, resolvedId: string): Promise<void> {
+    try {
+      // Check if already downloaded
+      const audioCache = await prisma.audioCache.findUnique({
+        where: { youtubeId }
+      });
+
+      if (audioCache && fs.existsSync(audioCache.filePath)) {
+        console.log(`🎵 [CACHE] Found cached audio for: ${youtubeId}`);
+        return;
+      }
+
+      console.log(`⬇️ [DOWNLOAD] Starting download for: ${youtubeId}`);
+      
+      // Download using resolvedId but save as youtubeId
+      const tempPath = await downloadYoutubeAudio(resolvedId);
+      const finalPath = path.join(path.dirname(tempPath), `${youtubeId}${path.extname(tempPath)}`);
+      
+      // Rename the file to use original youtubeId
+      fs.renameSync(tempPath, finalPath);
+      
+      await prisma.audioCache.upsert({
+        where: { youtubeId },
+        create: {
+          youtubeId,
+          filePath: finalPath
+        },
+        update: {
+          filePath: finalPath
+        }
+      });
+
+      console.log(`✓ [DOWNLOAD] Completed for: ${youtubeId}`);
+    } catch (error: any) {
+      const errorMessage = error?.message || 'Unknown error';
+      if (errorMessage.includes('Video unavailable')) {
+        console.log(`❌ [DOWNLOAD] ${errorMessage}`);
+      } else {
+        console.error(`❌ [DOWNLOAD] Failed for ${youtubeId}: ${errorMessage}`);
+      }
+      throw error;
+    }
+  }
+
+  private async getAudioResource(youtubeId: string): Promise<AudioResource | null> {
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    while (retryCount < maxRetries) {
+      try {
+        // Get cached audio file
+        const audioCache = await prisma.audioCache.findUnique({
+          where: { youtubeId }
+        });
+
+        if (!audioCache || !fs.existsSync(audioCache.filePath)) {
+          const track = await prisma.track.findUnique({
+            where: { youtubeId }
+          });
+
+          if (!track) {
+            console.error(`Track not found in database: ${youtubeId}`);
+            return null;
+          }
+
+          console.log(`Track found in database, resolvedYtId: ${track.resolvedYtId || 'none'}`);
+          // Download using resolvedId if available, otherwise use original id
+          const downloadId = track.resolvedYtId || youtubeId;
+          console.log(`Using ID for download: ${downloadId}`);
+          await this.downloadTrackAudio(youtubeId, downloadId);
+        } else {
+          console.log(`Found cached audio file for: ${youtubeId}`);
+        }
+
+        // Get the updated cache entry
+        const updatedCache = await prisma.audioCache.findUnique({
+          where: { youtubeId }
+        });
+
+        if (!updatedCache || !fs.existsSync(updatedCache.filePath)) {
+          throw new Error(`Failed to get audio file for: ${youtubeId}`);
+        }
+
+        console.log(`Creating audio resource from file: ${path.basename(updatedCache.filePath)}`);
+        const stream = createReadStream(updatedCache.filePath);
+        const { stream: probeStream, type } = await demuxProbe(stream);
+        
+        return createAudioResource(probeStream, {
+          inputType: type,
+          inlineVolume: true
+        });
+      } catch (error) {
+        console.error(`Attempt ${retryCount + 1} failed for ${youtubeId}:`, error);
+        retryCount++;
+        
+        if (retryCount === maxRetries) {
+          console.error(`All attempts failed for ${youtubeId}`);
+          return null;
+        }
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    return null;
   }
 
   async skip() {
@@ -1478,17 +1750,15 @@ export class Player {
   }
 
   private handlePlaybackError() {
-    this.retryCount++;
-    
-    if (this.retryCount >= this.maxRetries) {
-      console.log(`Max retries (${this.maxRetries}) reached for track, skipping...`);
-      this.retryCount = 0;
-      this.onTrackFinish();
-      return;
+    if (this.currentTrack) {
+      // Remove the current track from the queue since it's unavailable
+      this.queue = this.queue.filter(item => item.youtubeId !== this.currentTrack?.youtubeId);
+      console.log(`Removed unavailable track ${this.currentTrack.youtubeId} from queue`);
     }
-
-    console.log(`Retrying playback (attempt ${this.retryCount} of ${this.maxRetries})...`);
-    setTimeout(() => this.playNext(), this.retryDelay);
+    
+    // Reset retry count and try next track
+    this.retryCount = 0;
+    this.playNext();
   }
 
   private async onTrackFinish() {
@@ -1638,197 +1908,6 @@ export class Player {
       broadcastPlayerState(state);
     } catch (error) {
       console.error('Error updating player state:', error);
-    }
-  }
-
-  private async getAudioResource(youtubeId: string): Promise<AudioResource | null> {
-    let retryCount = 0;
-    const maxRetries = 3;
-
-    while (retryCount < maxRetries) {
-      try {
-        let audioFilePath: string;
-        let finalYoutubeId = youtubeId;
-        
-        // Get cached audio file and track info
-        const track = await prisma.track.findUnique({
-          where: { youtubeId }
-        });
-
-        if (!track) {
-          console.error(`Track not found in database: ${youtubeId}`);
-          return null;
-        }
-
-        // If this is a YouTube Music track that hasn't been resolved yet
-        if (track.isMusicUrl && !track.resolvedYtId) {
-          console.log(`🎵 [YT-MUSIC] Resolving ID: ${youtubeId}`);
-          const resolvedId = await resolveYouTubeMusicId(youtubeId);
-          
-          if (resolvedId) {
-            finalYoutubeId = resolvedId;
-            
-            // Update both tracks with complete metadata
-            const info = await getYoutubeInfo(resolvedId);
-            await prisma.track.update({
-              where: { youtubeId },
-              data: {
-                resolvedYtId: resolvedId,
-                title: info.title,
-                duration: info.duration,
-                thumbnail: info.thumbnail,
-                isActive: true
-              }
-            });
-          } else {
-            console.log(`❌ [YT-MUSIC] Failed to resolve ID: ${youtubeId}`);
-            await prisma.track.update({
-              where: { youtubeId },
-              data: { isActive: false }
-            });
-            throw new Error(`Could not resolve YouTube Music ID: ${youtubeId}`);
-          }
-        } else if (track.resolvedYtId) {
-          // Use resolved ID if available
-          finalYoutubeId = track.resolvedYtId;
-        }
-
-        // Get cached audio file
-        const audioCache = await prisma.audioCache.findUnique({
-          where: { youtubeId: finalYoutubeId }
-        });
-
-        if (!audioCache || !fs.existsSync(audioCache.filePath)) {
-          // Download if not in cache or file missing
-          console.log(`⬇️ [DOWNLOAD] Starting: ${track.title}`);
-          try {
-            audioFilePath = await downloadYoutubeAudio(finalYoutubeId);
-          } catch (error: any) {
-            // Check if error indicates video is unavailable
-            if (error.stderr?.includes('Video unavailable') || 
-                error.stderr?.includes('This video is not available') ||
-                error.stderr?.includes('This video has been removed')) {
-              console.log(`🎵 [CACHE] Video ${finalYoutubeId} is unavailable, marking as inactive in database`);
-              // Mark track as inactive in database
-              await prisma.track.update({
-                where: { youtubeId },
-                data: { isActive: false }
-              });
-              return null;
-            }
-            throw error;
-          }
-          
-          // Create or update the audio cache
-          await prisma.audioCache.upsert({
-            where: { youtubeId: finalYoutubeId },
-            create: {
-              youtubeId: finalYoutubeId,
-              filePath: audioFilePath
-            },
-            update: {
-              filePath: audioFilePath
-            }
-          });
-        } else {
-          audioFilePath = audioCache.filePath;
-        }
-
-        // Create audio resource
-        console.log(`Creating audio resource from: ${audioFilePath}`);
-        const stream = createReadStream(audioFilePath);
-        const { type } = await demuxProbe(stream);
-        const resource = createAudioResource(stream, {
-          inputType: type,
-          inlineVolume: false,
-          metadata: {
-            title: track.title
-          }
-        });
-
-        return resource;
-      } catch (error) {
-        console.error(`Attempt ${retryCount + 1}/${maxRetries} failed:`, error);
-        retryCount++;
-        
-        if (retryCount < maxRetries) {
-          // Wait before retrying
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-    }
-
-    console.error(`Failed to get audio resource for ${youtubeId} after ${maxRetries} attempts`);
-    return null;
-  }
-
-  private async downloadTrackAudio(youtubeId: string): Promise<void> {
-    try {
-      // Check if already downloaded
-      const audioCache = await prisma.audioCache.findUnique({
-        where: { youtubeId },
-        include: {
-          track: true
-        }
-      });
-
-      if (audioCache && fs.existsSync(audioCache.filePath)) {
-        console.log(`🎵 [CACHE] Found cached audio: ${audioCache.track?.title || youtubeId}`);
-        return;
-      }
-
-      const track = await prisma.track.findUnique({
-        where: { youtubeId }
-      });
-
-      if (!track) {
-        throw new Error(`Track not found in database: ${youtubeId}`);
-      }
-
-      let finalYoutubeId = youtubeId;
-
-      // If this is a YouTube Music track that hasn't been resolved yet
-      if (track.isMusicUrl && !track.resolvedYtId) {
-        console.log(`🎵 [YT-MUSIC] Resolving ID: ${youtubeId}`);
-        const resolvedId = await resolveYouTubeMusicId(youtubeId);
-        
-        if (resolvedId) {
-          finalYoutubeId = resolvedId;
-          await prisma.track.update({
-            where: { youtubeId },
-            data: { resolvedYtId: resolvedId }
-          });
-        } else {
-          console.log(`❌ [YT-MUSIC] Failed to resolve ID: ${youtubeId}`);
-          await prisma.track.update({
-            where: { youtubeId },
-            data: { isActive: false }
-          });
-          throw new Error(`Could not resolve YouTube Music ID: ${youtubeId}`);
-        }
-      } else if (track.resolvedYtId) {
-        finalYoutubeId = track.resolvedYtId;
-      }
-
-      console.log(`⬇️ [DOWNLOAD] Starting: ${track.title}`);
-      
-      const audioPath = await downloadYoutubeAudio(finalYoutubeId);
-      
-      await prisma.audioCache.upsert({
-        where: { youtubeId: finalYoutubeId },
-        create: {
-          youtubeId: finalYoutubeId,
-          filePath: audioPath
-        },
-        update: {
-          filePath: audioPath
-        }
-      });
-
-      console.log(`✅ [DOWNLOAD] Complete: ${track.title}`);
-    } catch (error) {
-      console.error('❌ [DOWNLOAD] Failed:', error);
-      throw error;
     }
   }
 
@@ -2115,7 +2194,7 @@ export class Player {
         
         // Download in background
         console.log(`Prefetching audio for track: ${title} (${youtubeId})`);
-        await this.downloadTrackAudio(youtubeId);
+        await this.downloadTrackAudio(youtubeId, youtubeId);
         console.log(`Prefetch complete for: ${title} (${youtubeId})`);
       } catch (error) {
         console.error(`Failed to prefetch audio for ${title} (${youtubeId}):`, error);

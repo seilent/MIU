@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import { fileURLToPath } from 'url';
+import sharp from 'sharp';
 
 const router = Router();
 
@@ -22,6 +23,12 @@ const ROOT_DIR = process.cwd();
  *         schema:
  *           type: string
  *         description: The YouTube video ID
+ *       - in: query
+ *         name: square
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: If set to 1, forces the image to be square (for media players)
  *     responses:
  *       200:
  *         description: The album artwork image
@@ -36,6 +43,8 @@ const ROOT_DIR = process.cwd();
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const { square } = req.query;
+    const forceSquare = square === '1';
     const artworkPath = path.join(ROOT_DIR, 'cache', 'albumart', `${id}.jpg`);
 
     // Check if file exists
@@ -50,7 +59,39 @@ router.get('/:id', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
     res.setHeader('Content-Type', 'image/jpeg');
 
-    // Stream the file
+    // If square parameter is set, process the image to ensure it's square
+    if (forceSquare) {
+      try {
+        // Read the image file
+        const imageBuffer = await fsPromises.readFile(artworkPath);
+        
+        // Process with sharp to make it square
+        const image = sharp(imageBuffer);
+        const metadata = await image.metadata();
+        
+        if (metadata.width && metadata.height) {
+          // Determine the size for the square crop (use the smaller dimension)
+          const size = Math.min(metadata.width, metadata.height);
+          
+          // Calculate crop position (center crop)
+          const left = Math.floor((metadata.width - size) / 2);
+          const top = Math.floor((metadata.height - size) / 2);
+          
+          // Crop to square and output
+          const squareImage = await image
+            .extract({ left, top, width: size, height: size })
+            .jpeg({ quality: 90 })
+            .toBuffer();
+          
+          return res.send(squareImage);
+        }
+      } catch (sharpError) {
+        console.error('Error processing image to square:', sharpError);
+        // Fall back to original image if processing fails
+      }
+    }
+
+    // Stream the file (original image if not square or if processing failed)
     const fileStream = fs.createReadStream(artworkPath);
     fileStream.pipe(res);
   } catch (error) {

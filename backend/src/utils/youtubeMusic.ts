@@ -359,7 +359,7 @@ export function isYoutubeMusicUrl(url: string): boolean {
 // Function to resolve a YouTube Music ID to a regular YouTube ID
 export async function resolveYouTubeMusicId(musicId: string): Promise<string | null> {
   try {
-    console.log('\n=== Starting YouTube Music ID resolution ===');
+    console.log(`=== Resolving YouTube Music ID: ${musicId} ===`);
     
     // First try oEmbed to check if the video is directly available
     const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${musicId}&format=json`;
@@ -370,7 +370,12 @@ export async function resolveYouTubeMusicId(musicId: string): Promise<string | n
       const oembedData = await response.json();
       const channelId = oembedData.author_url?.split('/channel/')?.[1];
       
-      // Try verifying video availability first
+      if (!channelId) {
+        console.log('✗ Could not get channel ID from oEmbed');
+        return null;
+      }
+
+      // Try verifying video availability and channel match
       try {
         // First verify with yt-dlp that the video is actually available
         const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
@@ -381,45 +386,50 @@ export async function resolveYouTubeMusicId(musicId: string): Promise<string | n
           '--quiet'
         ]);
         
-        // Only if yt-dlp check passes, try getting video info
+        // If video is available, verify the channel ID matches
         try {
-          const info = await getYoutubeInfo(musicId);
-          if (info) {
-            // Update track entry to mark it as a music URL
-            await prisma.track.update({
-              where: { youtubeId: musicId },
-              data: { isMusicUrl: true }
-            });
-            
-            console.log('✓ Original video is available');
+          const youtubeApi = google.youtube('v3');
+          let apiKey;
+          try {
+            apiKey = await youtube.keyManager().getCurrentKey();
+          } catch (keyError) {
+            console.log('✗ No valid YouTube API keys available for verification');
+            // If we can't verify the channel, but the video is available, use it anyway
+            console.log('✓ Original video is available (channel verification skipped)');
             return musicId;
           }
-        } catch (infoError) {
-          console.log('✗ Failed to get video info');
+          
+          const videoResponse = await youtubeApi.videos.list({
+            key: apiKey,
+            part: ['snippet'],
+            id: [musicId]
+          });
+
+          const video = videoResponse.data.items?.[0];
+          if (video && video.snippet?.channelId === channelId) {
+            // Video exists and channel matches
+            console.log('✓ Original video is available and channel matches');
+            return musicId;
+          } else {
+            console.log('✗ Video exists but channel does not match');
+          }
+        } catch (infoError: any) {
+          // Check if this is a quota exceeded error
+          const reason = infoError?.errors?.[0]?.reason;
+          if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+            console.log('✗ API quota exceeded during channel verification');
+            // If we can't verify the channel due to quota, but the video is available, use it anyway
+            console.log('✓ Original video is available (channel verification skipped due to quota)');
+            return musicId;
+          } else {
+            console.log('✗ Failed to verify channel ID:', infoError);
+          }
         }
-      } catch (error) {
+      } catch (ytdlpError) {
         // If video is not available but we have oEmbed data, try finding alternative video
         if (oembedData.title && channelId) {
           const alternativeId = await findAlternativeVideoId(oembedData.title, channelId);
           if (alternativeId) {
-            // Create/update the original track entry with resolved ID
-            await prisma.track.upsert({
-              where: { youtubeId: musicId },
-              update: {
-                isMusicUrl: true,
-                resolvedYtId: alternativeId,
-                isActive: true
-              },
-              create: {
-                youtubeId: musicId,
-                title: oembedData.title,
-                isMusicUrl: true,
-                resolvedYtId: alternativeId,
-                duration: 0, // Will be updated when playing
-                thumbnail: oembedData.thumbnail_url || '',
-                isActive: true
-              }
-            });
             return alternativeId;
           }
         }
@@ -455,29 +465,10 @@ export async function resolveYouTubeMusicId(musicId: string): Promise<string | n
           '--quiet'
         ]);
         
-        // Create/update the original track entry with resolved ID
-        await prisma.track.upsert({
-          where: { youtubeId: musicId },
-          update: {
-            isMusicUrl: true,
-            resolvedYtId: extractedVideoId,
-            isActive: true
-          },
-          create: {
-            youtubeId: musicId,
-            title,
-            isMusicUrl: true,
-            resolvedYtId: extractedVideoId,
-            duration: 0,
-            thumbnail: '',
-            isActive: true
-          }
-        });
-        
         console.log('✓ Found alternative video from music page');
         return extractedVideoId;
-      } catch (error) {
-        // Continue to YouTube search if verification fails
+      } catch {
+        console.log('✗ Alternative video from music page is not available');
       }
     }
     
@@ -509,25 +500,6 @@ export async function resolveYouTubeMusicId(musicId: string): Promise<string | n
           '--no-warnings',
           '--quiet'
         ]);
-        
-        // Create/update the original track entry with resolved ID
-        await prisma.track.upsert({
-          where: { youtubeId: musicId },
-          update: {
-            isMusicUrl: true,
-            resolvedYtId: regularYoutubeId,
-            isActive: true
-          },
-          create: {
-            youtubeId: musicId,
-            title,
-            isMusicUrl: true,
-            resolvedYtId: regularYoutubeId,
-            duration: 0,
-            thumbnail: '',
-            isActive: true
-          }
-        });
         
         console.log('✓ Found alternative video from search');
         return regularYoutubeId;
@@ -627,85 +599,119 @@ async function findAlternativeVideoId(title: string, channelId: string): Promise
     console.log(`\nSearching for alternative video from channel: ${channelId}`);
     
     const youtubeApi = google.youtube('v3');
-    const apiKey = await youtube.keyManager().getCurrentKey();
     
-    // Search for videos with the exact title from the same channel
-    const searchResponse = await youtubeApi.search.list({
-      key: apiKey,
-      part: ['id', 'snippet'],
-      q: title,
-      type: ['video'],
-      channelId: channelId,
-      maxResults: 5
-    });
-
-    const videos = searchResponse.data.items;
-    if (!videos || videos.length === 0) {
-      console.log('✗ No videos found from the same channel');
+    // Try to get a valid API key
+    let apiKey;
+    try {
+      apiKey = await youtube.keyManager().getCurrentKey();
+    } catch (keyError) {
+      console.error('Error getting YouTube API key:', keyError);
+      console.log('❌ No valid YouTube API keys available for search');
+      
+      // Fallback: Try to use the original music ID directly
+      console.log('Falling back to using original music ID directly');
       return null;
     }
+    
+    // Search for videos with the exact title from the same channel
+    try {
+      const searchResponse = await youtubeApi.search.list({
+        key: apiKey,
+        part: ['id', 'snippet'],
+        q: title,
+        type: ['video'],
+        channelId: channelId,
+        maxResults: 5
+      });
 
-    // Get the first result from the same channel that's available
-    for (const video of videos) {
-      const videoId = video.id?.videoId;
-      if (!videoId) continue;
+      const videos = searchResponse.data.items;
+      if (!videos || videos.length === 0) {
+        console.log('✗ No videos found from the same channel');
+        return null;
+      }
 
-      const foundTitle = video.snippet?.title || '';
-      
-      // Verify the video is accessible
-      try {
-        // First verify with yt-dlp that the video is actually available
-        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
-        await execa(ytdlpPath, [
-          videoId,
-          '--no-download',
-          '--no-warnings',
-          '--quiet'
-        ]);
+      // Get the first result from the same channel that's available
+      for (const video of videos) {
+        const videoId = video.id?.videoId;
+        if (!videoId) continue;
+
+        const foundTitle = video.snippet?.title || '';
         
-        // Get video info from YouTube API to create track entry
-        const info = await getYoutubeInfo(videoId);
-        if (!info) continue;
+        // Verify the video is accessible
+        try {
+          // First verify with yt-dlp that the video is actually available
+          const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+          await execa(ytdlpPath, [
+            videoId,
+            '--no-download',
+            '--no-warnings',
+            '--quiet'
+          ]);
+          
+          // Get video info from YouTube API to create track entry
+          const info = await getYoutubeInfo(videoId);
+          if (!info) continue;
 
-        // Get best quality thumbnail URL
-        const thumbnails = video.snippet?.thumbnails || {};
-        const bestThumbnail = thumbnails.maxres?.url || 
-                            thumbnails.high?.url || 
-                            thumbnails.medium?.url || 
-                            thumbnails.default?.url;
+          // Get best quality thumbnail URL
+          const thumbnails = video.snippet?.thumbnails || {};
+          const bestThumbnail = thumbnails.maxres?.url || 
+                              thumbnails.high?.url || 
+                              thumbnails.medium?.url || 
+                              thumbnails.default?.url;
 
-        if (bestThumbnail) {
-          await downloadAndCacheThumbnail(videoId, bestThumbnail);
-        }
-
-        // Create track entry for the alternative video
-        await prisma.track.upsert({
-          where: { youtubeId: videoId },
-          update: {
-            title: info.title,
-            duration: info.duration,
-            thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
-            updatedAt: new Date()
-          },
-          create: {
-            youtubeId: videoId,
-            title: info.title,
-            duration: info.duration,
-            thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`
+          if (bestThumbnail) {
+            await downloadAndCacheThumbnail(videoId, bestThumbnail);
           }
-        });
+
+          // Create track entry for the alternative video
+          await prisma.track.upsert({
+            where: { youtubeId: videoId },
+            update: {
+              title: info.title,
+              duration: info.duration,
+              thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
+              updatedAt: new Date()
+            },
+            create: {
+              youtubeId: videoId,
+              title: info.title,
+              duration: info.duration,
+              thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`
+            }
+          });
+          
+          console.log(`✓ Found alternative video: ${videoId} (${info.title})`);
+          return videoId;
+        } catch (verifyError) {
+          console.log(`✗ Failed to verify video ${videoId}`);
+          continue;
+        }
+      }
+    } catch (searchError: any) {
+      // Check if this is a quota exceeded error
+      const reason = searchError?.errors?.[0]?.reason;
+      if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+        console.error('Error searching for alternative video:', searchError);
+        youtube.keyManager().markKeyAsQuotaExceeded(apiKey);
         
-        console.log(`✓ Found alternative video: ${foundTitle}`);
-        return videoId;
-      } catch (error) {
-        continue;
+        // Try again with a different key if available
+        const keyCount = youtube.keyManager().getKeyCount();
+        if (keyCount > 1) {
+          console.log('Trying again with a different API key...');
+          return findAlternativeVideoId(title, channelId);
+        } else {
+          console.log('❌ All API keys are quota exceeded');
+          return null;
+        }
+      } else {
+        console.error('Error searching for videos:', searchError);
+        return null;
       }
     }
-
-    console.log('✗ No available alternative video found');
-    return null;
   } catch (error) {
-    console.error('Error searching for alternative video:', error);
+    console.error('Error finding alternative video:', error);
     return null;
   }
+  
+  return null;
 } 

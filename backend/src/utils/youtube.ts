@@ -97,7 +97,7 @@ class YouTubeKeyManager {
     });
   }
 
-  private async validateKeys() {
+  public async validateKeys() {
     console.log('Validating YouTube API keys...');
     const validationPromises = this.keys.map(async (key) => {
       try {
@@ -277,6 +277,18 @@ function getKeyManager(): YouTubeKeyManager {
     keyManagerInstance = new YouTubeKeyManager();
   }
   return keyManagerInstance;
+}
+
+// Function to initialize the key manager at server startup
+export async function initializeYouTubeAPI(): Promise<void> {
+  console.log('Initializing YouTube API...');
+  const manager = getKeyManager();
+  try {
+    // Force validation of all keys at startup
+    await manager.validateKeys();
+  } catch (error) {
+    console.error('Error initializing YouTube API:', error);
+  }
 }
 
 // Initialize YouTube API client
@@ -837,6 +849,10 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
 const activeDownloads = new Map<string, Promise<string>>();
 
 export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
+  if (!youtubeId) {
+    throw new Error('YouTube ID is required');
+  }
+
   // Check if download is already in progress
   const existingDownload = activeDownloads.get(youtubeId);
   if (existingDownload) {
@@ -882,12 +898,16 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
       // Add retry logic for download
       let retries = 3;
       let lastError: Error | null = null;
-      let backoffDelay = 1000; // Start with 1 second delay
+      let backoffDelay = 1000;
 
       while (retries > 0) {
         try {
+          // Construct YouTube URL
+          const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+          console.log(`⬇️ [${youtubeId}] Starting download`);
+
           // Download with yt-dlp using unique temp path
-          await ytDlp(youtubeId, {
+          await ytDlp(youtubeUrl, {
             output: uniqueTempPath,
             extractAudio: true,
             audioFormat: 'm4a',
@@ -920,8 +940,8 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
           if (errorMessage.includes('Video unavailable') || 
               errorMessage.includes('This video is not available') ||
               errorMessage.includes('This video has been removed')) {
-            console.log(`❌ [${youtubeId}] Video is unavailable`);
-            throw error; // Propagate error without retrying
+            console.log(`❌ [${youtubeId}] Video unavailable`);
+            throw new Error(`Video unavailable: ${youtubeId}`);
           }
           
           console.log(`⚠️ [${youtubeId}] Attempt ${4 - retries}/3 failed: ${ytdlpError || errorMessage}`);
@@ -943,7 +963,7 @@ export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
       }
 
       console.log(`❌ [${youtubeId}] Download failed after 3 attempts`);
-      throw new Error('Download failed after retries');
+      throw lastError || new Error('Download failed after retries');
     } finally {
       // Always clean up temp files and remove from active downloads
       try {

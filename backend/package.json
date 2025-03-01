@@ -12,6 +12,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "dotenv -e .env.development -- prisma studio --port 5000",
     "prisma:create-admin": "tsx scripts/create-admin.ts",
+    "prisma:reset": "dotenv -e .env.development -- tsx scripts/reset-database.ts",
     "docker:up": "docker-compose -f docker/docker-compose.yml up -d",
     "docker:down": "docker-compose -f docker/docker-compose.yml down",
     "lint": "eslint . --ext .ts",

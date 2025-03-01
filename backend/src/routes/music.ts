@@ -90,8 +90,8 @@ interface QueueItem {
 
 // Helper function to format track response
 function formatTrack(request: RequestWithTrack): TrackResponse {
-  // For YouTube Music tracks, use the original ID to maintain consistency
-  const youtubeId = request.track.isMusicUrl ? request.track.youtubeId : (request.track.resolvedYtId || request.track.youtubeId);
+  // Always use original youtubeId for consistency
+  const youtubeId = request.track.youtubeId;
   
   return {
     youtubeId,
@@ -310,28 +310,8 @@ router.get('/state', async (req: Request, res: Response) => {
       }
     });
 
-    // Format track for response
-    const formatTrack = (request: RequestWithTrack): TrackResponse => {
-      // For YouTube Music tracks, use the original ID to maintain consistency
-      const youtubeId = request.track.isMusicUrl ? request.track.youtubeId : (request.track.resolvedYtId || request.track.youtubeId);
-      
-      return {
-        youtubeId,
-        title: request.track.title,
-        thumbnail: request.track.thumbnail,
-        duration: request.track.duration,
-        requestedBy: {
-          id: request.user.id,
-          username: request.user.username,
-          avatar: request.user.avatar || undefined
-        },
-        requestedAt: request.requestedAt.toISOString(),
-        isAutoplay: request.isAutoplay
-      };
-    };
-
     // Ensure the database and player queue are in sync
-    const playerQueue = client.player.getQueue(); // This includes both regular and autoplay tracks
+    const playerQueue = client.player.getQueue();
     
     // First, mark all queued tracks as stale
     await prisma.request.updateMany({
