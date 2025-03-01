@@ -2,6 +2,9 @@
 CREATE TYPE "RequestStatus" AS ENUM ('PENDING', 'PLAYING', 'QUEUED', 'COMPLETED', 'DOWNLOADING', 'SKIPPED', 'EXPIRED', 'READY');
 
 -- CreateEnum
+CREATE TYPE "TrackStatus" AS ENUM ('PLAYING', 'STANDBY', 'QUEUED', 'DOWNLOADING', 'READY', 'BLOCKED');
+
+-- CreateEnum
 CREATE TYPE "PlaylistMode" AS ENUM ('LINEAR', 'POOL');
 
 -- CreateTable
@@ -39,6 +42,8 @@ CREATE TABLE "Track" (
     "playCount" INTEGER NOT NULL DEFAULT 0,
     "skipCount" INTEGER NOT NULL DEFAULT 0,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "status" "TrackStatus" NOT NULL DEFAULT 'STANDBY',
+    "lastPlayed" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -63,6 +68,7 @@ CREATE TABLE "Request" (
     "requestedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "playedAt" TIMESTAMP(3),
     "isAutoplay" BOOLEAN NOT NULL DEFAULT false,
+    "status" "RequestStatus" NOT NULL DEFAULT 'PENDING',
 
     CONSTRAINT "Request_pkey" PRIMARY KEY ("youtubeId","requestedAt")
 );

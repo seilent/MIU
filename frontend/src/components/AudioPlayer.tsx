@@ -37,11 +37,33 @@ export function AudioPlayer() {
       trackIdRef.current = position.trackId;
       startTimeRef.current = Date.now();
       
-      // Start new stream
-      audioRef.current.src = `/api/music/stream?ts=${Date.now()}`;
-      if (isPlaying) {
-        audioRef.current.play().catch(console.error);
-      }
+      // Use secure streaming for track changes
+      (async () => {
+        try {
+          // First fetch a secure token
+          const tokenResponse = await fetch(`/api/music/secure-token/${position.trackId}`);
+          
+          if (tokenResponse.ok) {
+            const { token } = await tokenResponse.json();
+            // Start secure stream
+            audioRef.current!.src = `/api/music/secure-stream/${token}`;
+          } else {
+            // Fall back to regular stream if secure streaming isn't available
+            audioRef.current!.src = `/api/music/stream?ts=${Date.now()}`;
+          }
+          
+          if (isPlaying) {
+            audioRef.current!.play().catch(console.error);
+          }
+        } catch (error) {
+          console.error('Secure streaming error, falling back to regular stream:', error);
+          // Fall back to regular stream
+          audioRef.current!.src = `/api/music/stream?ts=${Date.now()}`;
+          if (isPlaying) {
+            audioRef.current!.play().catch(console.error);
+          }
+        }
+      })();
     }
   }, [position?.trackId, isPlaying]);
 
@@ -74,9 +96,27 @@ export function AudioPlayer() {
         startTimeRef.current = Date.now();
         trackIdRef.current = pos.trackId;
         
-        // Start stream
-        audioRef.current.src = `/api/music/stream?ts=${Date.now()}`;
-        await audioRef.current.play();
+        // Use secure streaming instead of direct streaming
+        try {
+          // First fetch a secure token
+          const tokenResponse = await fetch(`/api/music/secure-token/${pos.trackId}`);
+          
+          if (tokenResponse.ok) {
+            const { token } = await tokenResponse.json();
+            // Start secure stream
+            audioRef.current.src = `/api/music/secure-stream/${token}`;
+          } else {
+            // Fall back to regular stream if secure streaming isn't available
+            audioRef.current.src = `/api/music/stream?ts=${Date.now()}`;
+          }
+          
+          await audioRef.current.play();
+        } catch (error) {
+          console.error('Secure streaming error, falling back to regular stream:', error);
+          // Fall back to regular stream
+          audioRef.current.src = `/api/music/stream?ts=${Date.now()}`;
+          await audioRef.current.play();
+        }
       }
       setIsPlaying(!isPlaying);
     } catch (error) {

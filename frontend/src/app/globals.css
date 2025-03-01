@@ -116,3 +116,9 @@ body {
 .text-theme-accent {
   color: var(--theme-accent, var(--color-accent));
 }
+
+/* Thumbnail image filtering to reduce sharpness */
+.filter-thumbnail {
+  filter: brightness(1.05) contrast(0.95) saturate(1.1);
+  image-rendering: auto;
+}

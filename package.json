@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.7",
-    "hls.js": "^1.5.20"
+    "hls.js": "^1.5.20",
+    "ntp-time": "^2.0.6"
   }
 }

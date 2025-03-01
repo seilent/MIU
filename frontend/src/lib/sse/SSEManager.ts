@@ -8,6 +8,15 @@ interface SSEListeners {
   [key: string]: Map<string, EventCallback>;
 }
 
+// Add sync play message type for playback synchronization
+export interface SyncPlayMessage {
+  type: 'sync_play';
+  trackId: string;
+  position: number;
+  serverTime: number;
+  playAt: number;
+}
+
 class SSEManager {
   private static instance: SSEManager;
   private eventSource: EventSource | null = null;
@@ -22,6 +31,9 @@ class SSEManager {
   private lastEventId: string | null = null;
   private readonly MAX_RECONNECT_DELAY = 30000; // 30 seconds
   private readonly INITIAL_RECONNECT_DELAY = 1000; // 1 second
+
+  // Track when sync_play messages are received for performance timing
+  private syncPlayReceivedTime: Map<string, number> = new Map();
 
   private constructor() {}
 
@@ -196,9 +208,39 @@ class SSEManager {
       console.log(`SSE: Added listener for ${eventType}`);
       
       if (this.eventSource?.readyState === EventSource.OPEN) {
-        this.setupEventListeners();
+        this.setupEventListener(eventType);
       }
     }
+  }
+
+  private setupEventListener(eventType: string) {
+    if (!this.eventSource || this.eventHandlers.has(eventType)) return;
+    
+    const handler = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        // If this is a sync_play message, record the exact time it was received
+        if (eventType === 'sync_play' && data.trackId) {
+          this.syncPlayReceivedTime.set(data.trackId, performance.now());
+          console.log(`SSE: Received sync_play for track ${data.trackId} at ${this.syncPlayReceivedTime.get(data.trackId)}`);
+        }
+        
+        this.listeners[eventType]?.forEach(callback => {
+          try {
+            callback(data);
+          } catch (error) {
+            console.error(`SSE: Error in ${eventType} callback:`, error);
+          }
+        });
+      } catch (error) {
+        console.error(`SSE: Error parsing ${eventType} event data:`, error);
+      }
+    };
+    
+    this.eventHandlers.set(eventType, handler);
+    this.eventSource.addEventListener(eventType, handler);
+    console.log(`SSE: Set up event listener for ${eventType}`);
   }
 
   removeEventListener(eventType: string, callback: EventCallback) {
@@ -244,6 +286,11 @@ class SSEManager {
     this.lastEventId = null;
     
     console.log('SSE: Disconnected');
+  }
+
+  // Method to get the timestamp when a sync play message was received
+  getSyncPlayReceivedTime(trackId: string): number | undefined {
+    return this.syncPlayReceivedTime.get(trackId);
   }
 }
 

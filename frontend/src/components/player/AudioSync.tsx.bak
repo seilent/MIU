@@ -11,6 +11,23 @@ import HLSManager from '@/lib/hls/HLSManager';
 // Constant for track playback offset (in seconds)
 const TRACK_PLAYBACK_OFFSET = 0;
 
+// Settings for drift correction
+const DRIFT_SETTINGS = {
+  // Threshold below which we don't correct (ms)
+  minDriftThreshold: 100,
+  // Mobile-specific settings
+  mobile: {
+    // Longer minimum time between full position checks on mobile (ms)
+    minTimeBetweenChecks: 60000, // 1 minute
+    // Higher drift threshold before correcting on mobile
+    minDriftThreshold: 300, // 300ms
+    // Disable crossfade on mobile (more resource intensive)
+    disableCrossfade: true,
+    // Minimum time between any corrections on mobile (ms)
+    correctionCooldown: 10000, // 10 seconds
+  }
+};
+
 // Singleton audio instance
 let globalAudioInstance: HTMLAudioElement | null = null;
 
@@ -46,12 +63,13 @@ export default function AudioSync() {
   const lastStatusChangeTimeRef = useRef<number>(0); // Track time of last status change
   
   const lastSyncTimeRef = useRef<number>(0);
+  const driftCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isApplyingCorrectionRef = useRef<boolean>(false);
   const originalPlaybackRateRef = useRef<number>(1);
   const crossfadeAudioRef = useRef<HTMLAudioElement | null>(null);
-  
-  // Add reference for tracking playback start timestamp
-  const playbackStartedAtRef = useRef<number>(0);
-  const lastBackgroundReturnTimeRef = useRef<number>(0);
+  const driftHistoryRef = useRef<{timestamp: number, drift: number}[]>([]);
+  const lastCorrectionTimeRef = useRef<number>(0); // Track last correction time
+  const isMobileDeviceRef = useRef<boolean>(false); // Track if we're on a mobile device
   
   useAudioWithAuth();
 
@@ -94,29 +112,26 @@ export default function AudioSync() {
       serverTime: data.timestamp
     });
     
-    // Store the sync data with both timestamp references
-    // - performance.now() for high-precision timing when tab is active
-    // - Date.now() for absolute timestamps that work across background periods
+    // Store the initial sync data
     hasInitialSyncRef.current = true;
     initialSyncTimeRef.current = performance.now();
-    lastSyncTimeRef.current = Date.now();
     serverPositionRef.current = adjustedPosition;
     
     audio.currentTime = adjustedPosition;
-    
-    // Reset buffering compensation flag
-    bufferingCompensationAppliedRef.current = false;
+      
+      // Reset buffering compensation flag
+      bufferingCompensationAppliedRef.current = false;
     
     // Record time before attempting to play
     playbackStartTimeRef.current = performance.now();
     
     const handlePlaybackStart = () => {
-      if (bufferingCompensationAppliedRef.current) {
-        console.log('Audio: Buffering compensation already applied, skipping');
-        return;
-      }
-      
-      bufferingCompensationAppliedRef.current = true;
+        if (bufferingCompensationAppliedRef.current) {
+          console.log('Audio: Buffering compensation already applied, skipping');
+          return;
+        }
+        
+        bufferingCompensationAppliedRef.current = true;
       const playbackStartDelay = performance.now() - playbackStartTimeRef.current;
       console.log(`Audio: Playback actually started after ${playbackStartDelay.toFixed(2)}ms (includes buffering)`);
       const bufferingCompensation = playbackStartDelay / 1000;
@@ -143,41 +158,16 @@ export default function AudioSync() {
       return 0; // Will trigger a fetch from server
     }
     
-    // Calculate based on absolute timestamps instead of performance metrics
-    // This is more reliable with background tabs
-    const now = Date.now();
-    const serverTimestamp = lastSyncTimeRef.current;
-    const elapsedWallClockTime = (now - serverTimestamp) / 1000; // in seconds
-    
-    // Use wall clock time for background-resilient position calculation
-    const calculatedPosition = serverPositionRef.current + elapsedWallClockTime;
-    
-    // Backup calculation using performance API (more accurate when tab is active)
     const elapsedSinceSync = (performance.now() - initialSyncTimeRef.current) / 1000;
-    const perfCalculatedPosition = serverPositionRef.current + elapsedSinceSync;
+    const calculatedPosition = serverPositionRef.current + elapsedSinceSync;
     
-    // Log only occasionally to reduce spam
-    if (Math.random() < 0.05) { // ~5% of calls
     console.log('Audio: Calculated position', {
       initial: serverPositionRef.current,
-        wallClockElapsed: elapsedWallClockTime,
-        perfElapsed: elapsedSinceSync,
-        wallClockCalculated: calculatedPosition,
-        perfCalculated: perfCalculatedPosition,
-        difference: calculatedPosition - perfCalculatedPosition
-      });
-    }
+      elapsed: elapsedSinceSync,
+      calculated: calculatedPosition
+    });
     
-    // If the tab has been in the background (performance API and wall clock differ significantly),
-    // prefer the wall clock calculation as it's more reliable across background periods
-    const timingDifference = Math.abs(elapsedWallClockTime - elapsedSinceSync);
-    if (timingDifference > 1) {
-      console.log('Audio: Significant timing difference detected, likely due to background tab:', timingDifference.toFixed(2) + 's');
-      return calculatedPosition; // Use wall clock calculation
-    }
-    
-    // When tab is active, performance API is more accurate, so prefer that
-    return perfCalculatedPosition;
+    return calculatedPosition;
   }, []);
 
   // Function to set position with buffering compensation
@@ -559,16 +549,16 @@ export default function AudioSync() {
       const adjustedCurrentTime = currentTime + TRACK_PLAYBACK_OFFSET;
       const timeRemaining = trackDuration - adjustedCurrentTime;
       
-      // Only log at meaningful intervals - remaining time is linear
-      // Just log at 30, 20, 10, 5, 3, 2, 1 seconds remaining
-      if ([30, 20, 10, 5, 3, 2, 1].includes(Math.round(timeRemaining))) {
+      // Log remaining time for debugging (every 5 seconds)
+      if (Math.floor(timeRemaining) % 5 === 0 && timeRemaining < 30) {
+        // Only log time remaining at key intervals to reduce verbosity
         console.log(`AudioSync: Track time remaining: ${timeRemaining.toFixed(1)}s`);
       }
       
       // If we're close to the end of the track (within 0.5 second) or passed it
       if (timeRemaining <= 0.5) {
         console.log('AudioSync: Track end timer detected end of track');
-        console.log(`AudioSync: Current time: ${currentTime.toFixed(2)}s, Adjusted time: ${adjustedCurrentTime.toFixed(2)}s, Track duration: ${trackDuration.toFixed(2)}s`);
+        console.log(`AudioSync: Adjusted time: ${adjustedCurrentTime.toFixed(2)}s, Track duration: ${trackDuration.toFixed(2)}s, Remaining: ${timeRemaining.toFixed(2)}s`);
         handleTrackEnd();
         
         // Clear this timer
@@ -577,7 +567,7 @@ export default function AudioSync() {
           trackEndTimerRef.current = null;
         }
       }
-    }, 500); // Check twice a second is plenty for reliable end detection
+    }, 1000); // Check every second
     
     return () => {
       if (trackEndTimerRef.current) {
@@ -595,6 +585,9 @@ export default function AudioSync() {
     
     // Flag that we're mounted at the beginning of initialization
     mountedRef.current = true;
+    
+    // Check if we're on a mobile device right when component mounts
+    checkIfMobile();
     
     const initAudio = async () => {
       const audio = audioRef.current;
@@ -846,116 +839,343 @@ export default function AudioSync() {
     });
   }, [currentTrack?.youtubeId, isInitialized, setupStream, resetSyncState]);
 
-  // Modify user activity detection to remove drift check calls
+  // Function to check if we're on a mobile device
+  const checkIfMobile = useCallback(() => {
+    // Simple mobile detection
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    isMobileDeviceRef.current = isMobile;
+    console.log(`AudioSync: Running on ${isMobile ? 'mobile' : 'desktop'} device`);
+    return isMobile;
+  }, []);
+
+  // Function to correct drift with tiered approach
+  const correctDrift = useCallback(async (audio: HTMLAudioElement, serverPosition: number, currentPosition: number) => {
+    if (isApplyingCorrectionRef.current || !audio || audio.paused) {
+      return;
+    }
+
+    const isMobile = isMobileDeviceRef.current;
+    
+    // Check if we're in the cooldown period on mobile
+    const now = Date.now();
+    if (isMobile) {
+      const timeSinceLastCorrection = now - lastCorrectionTimeRef.current;
+      if (timeSinceLastCorrection < DRIFT_SETTINGS.mobile.correctionCooldown) {
+        // Skip correction during cooldown period on mobile
+        return;
+      }
+    }
+
+    // Calculate drift (positive = client ahead, negative = client behind)
+    // Apply offset to server position for drift calculation
+    const adjustedServerPosition = Math.max(0, serverPosition - TRACK_PLAYBACK_OFFSET);
+    const drift = currentPosition - adjustedServerPosition;
+    const absDrift = Math.abs(drift);
+    
+    // Add to drift history (store last 5 measurements)
+    driftHistoryRef.current.push({timestamp: now, drift});
+    if (driftHistoryRef.current.length > 5) {
+      driftHistoryRef.current.shift();
+    }
+    
+    // Determine minimum drift threshold based on device
+    const minDriftThreshold = isMobile ? 
+      DRIFT_SETTINGS.mobile.minDriftThreshold / 1000 : 
+      DRIFT_SETTINGS.minDriftThreshold / 1000;
+    
+    // Only log drift if it's significant or for occasional status updates
+    const shouldLogDrift = absDrift >= minDriftThreshold || Math.random() < 0.1; // Log significant drift or ~10% of checks
+    if (shouldLogDrift) {
+      console.log(`AudioSync: Measured drift: ${drift.toFixed(3)}s (${drift > 0 ? 'ahead' : 'behind'})`);
+    }
+    
+    // Skip correction if drift is below the threshold for the current device
+    if (absDrift < minDriftThreshold) {
+      if (shouldLogDrift) {
+        console.log('AudioSync: Drift within acceptable range, no correction needed');
+      }
+      return;
+    }
+    
+    // Update the last correction time
+    lastCorrectionTimeRef.current = now;
+    
+    // Set correction flag
+    isApplyingCorrectionRef.current = true;
+    
+    try {
+      // TIER 1: Small drift correction via playback rate adjustment (< 300ms)
+      if (absDrift < 0.3) {
+        console.log('AudioSync: Applying TIER 1 correction (playback rate adjustment)');
+        
+        // Store original playback rate if not already stored
+        if (originalPlaybackRateRef.current === 1) {
+          originalPlaybackRateRef.current = audio.playbackRate;
+        }
+        
+        // Calculate adjustment factor (0.95 to 1.05 range)
+        // Larger drift = more aggressive correction
+        // More gentle for mobile devices
+        const adjustmentRange = isMobile ? 0.03 : 0.05; // 3% vs 5% adjustment
+        
+        const adjustmentFactor = drift > 0 
+          ? Math.max(1 - adjustmentRange, 1 - absDrift/6) // Playing ahead, slow down
+          : Math.min(1 + adjustmentRange, 1 + absDrift/6); // Playing behind, speed up
+          
+        // Apply the adjusted playback rate
+        audio.playbackRate = adjustmentFactor;
+        
+        console.log(`AudioSync: Adjusted playback rate to ${adjustmentFactor.toFixed(3)}x to correct ${drift.toFixed(3)}s drift`);
+        
+        // Schedule restoration of normal playback rate after correction period
+        // Calculate time needed for drift correction based on the adjustment factor
+        const correctionDuration = absDrift / Math.abs(1 - adjustmentFactor);
+        const correctionTime = Math.min(10000, correctionDuration * 1000); // Cap at 10 seconds
+        
+        console.log(`AudioSync: Will restore normal playback in ${(correctionTime/1000).toFixed(1)}s`);
+        
+        setTimeout(() => {
+          if (audio && !audio.paused) {
+            audio.playbackRate = originalPlaybackRateRef.current;
+            console.log('AudioSync: Restored original playback rate');
+          }
+          isApplyingCorrectionRef.current = false;
+          originalPlaybackRateRef.current = 1;
+        }, correctionTime);
+      }
+      
+      // TIER 2: Medium drift correction via crossfade (300ms - 1.5s)
+      // Skip crossfade on mobile if configured to do so
+      else if (absDrift < 1.5 && !(isMobile && DRIFT_SETTINGS.mobile.disableCrossfade)) {
+        console.log('AudioSync: Applying TIER 2 correction (crossfade)');
+        
+        // Create crossfade audio element if needed
+        if (!crossfadeAudioRef.current) {
+          crossfadeAudioRef.current = new Audio();
+          crossfadeAudioRef.current.volume = 0;
+        }
+        
+        const crossfadeAudio = crossfadeAudioRef.current;
+        
+        // Set up crossfade audio with same source
+        crossfadeAudio.src = audio.src;
+        // Apply offset to server position when setting crossfade time
+        crossfadeAudio.currentTime = adjustedServerPosition;
+        
+        // Wait for crossfade audio to be ready
+        await new Promise<void>((resolve) => {
+          const canPlayHandler = () => {
+            crossfadeAudio.removeEventListener('canplay', canPlayHandler);
+            resolve();
+          };
+          
+          crossfadeAudio.addEventListener('canplay', canPlayHandler, { once: true });
+          crossfadeAudio.load();
+        });
+        
+        // Start playing the crossfade audio (muted initially)
+        await crossfadeAudio.play();
+        
+        // Perform crossfade over 300ms
+        const crossfadeDuration = 300; // ms
+        const startTime = performance.now();
+        const fadeInterval = setInterval(() => {
+          const elapsed = performance.now() - startTime;
+          const progress = Math.min(1, elapsed / crossfadeDuration);
+          
+          // Fade out original audio, fade in crossfade audio
+          if (audio && crossfadeAudio) {
+            audio.volume = Math.max(0, 1 - progress) * usePlayerStore.getState().volume;
+            crossfadeAudio.volume = Math.min(1, progress) * usePlayerStore.getState().volume;
+          }
+          
+          // When crossfade complete, switch to crossfade audio position and restore original audio
+          if (progress >= 1) {
+            clearInterval(fadeInterval);
+            
+            if (audio && crossfadeAudio) {
+              audio.currentTime = crossfadeAudio.currentTime;
+              audio.volume = usePlayerStore.getState().volume;
+              crossfadeAudio.pause();
+              crossfadeAudio.src = '';
+            }
+            
+            console.log(`AudioSync: Crossfade complete, corrected ${drift.toFixed(3)}s drift`);
+            isApplyingCorrectionRef.current = false;
+          }
+        }, 16); // ~60fps
+      }
+      
+      // TIER 3: Large drift correction via immediate seek (> 1.5s)
+      // Or if we're on mobile and crossfade is disabled
+      else {
+        console.log('AudioSync: Applying TIER 3 correction (immediate seek)');
+        
+        // For very large drifts, just seek immediately
+        audio.currentTime = adjustedServerPosition;
+        console.log(`AudioSync: Performed immediate seek to correct ${drift.toFixed(3)}s drift`);
+        
+        isApplyingCorrectionRef.current = false;
+      }
+    } catch (error) {
+      console.error('AudioSync: Error during drift correction:', error);
+      isApplyingCorrectionRef.current = false;
+    }
+  }, []);
+
+  // Add a periodic drift check effect
+  useEffect(() => {
+    // Don't run drift checks if not initialized or no track
+    if (!isInitialized || !currentTrack || !audioRef.current) {
+      return;
+    }
+    
+    // Check if we're on a mobile device
+    const isMobile = checkIfMobile();
+    
+    const checkDrift = async () => {
+      // Skip if audio is paused, not initialized, or correction in progress
+      if (!audioRef.current || audioRef.current.paused || isApplyingCorrectionRef.current) {
+        return;
+      }
+      
+      try {
+        // Only do a server check if we haven't done one recently
+        // Use longer interval for mobile
+        const now = Date.now();
+        const timeSinceLastSync = now - lastSyncTimeRef.current;
+        const minTimeBetweenChecks = isMobile 
+          ? DRIFT_SETTINGS.mobile.minTimeBetweenChecks 
+          : 30000; // 30 seconds for desktop
+        
+        // Get accurate server position
+        let serverPosition;
+        
+        if (timeSinceLastSync > minTimeBetweenChecks) {
+          // Do a full server sync periodically
+          const response = await fetch(`${env.apiUrl}/api/music/position`);
+          const data = await response.json();
+          
+          // Compensate for network latency (calculate based on request duration)
+          const requestDuration = Date.now() - now;
+          serverPosition = Math.max(0, data.position + (requestDuration / 1000));
+          
+          // Update our reference points
+          lastSyncTimeRef.current = now;
+          serverPositionRef.current = serverPosition;
+          initialSyncTimeRef.current = performance.now();
+          
+          console.log('AudioSync: Periodic full server position check:', serverPosition);
+        } else {
+          // Use calculated position for more frequent checks
+          const elapsedSinceSync = (performance.now() - initialSyncTimeRef.current) / 1000;
+          serverPosition = serverPositionRef.current + elapsedSinceSync;
+        }
+        
+        // Get current client-side position
+        const currentPosition = audioRef.current.currentTime;
+        
+        // Apply correction if needed
+        correctDrift(audioRef.current, serverPosition, currentPosition);
+        
+      } catch (error) {
+        console.error('AudioSync: Error checking drift:', error);
+      }
+    };
+    
+    // Set up interval for checking drift - less frequent checks on mobile
+    // and more frequent checks for longer songs
+    const baseInterval = isMobile ? 15000 : 10000; // 15 sec for mobile, 10 sec for desktop
+    const checkInterval = currentTrack.duration > 180 ? 
+      Math.max(5000, baseInterval / 2) : // For long songs, faster but not too fast
+      baseInterval;
+    
+    // Clear any existing interval
+    if (driftCheckIntervalRef.current) {
+      clearInterval(driftCheckIntervalRef.current);
+    }
+    
+    // Set up new interval
+    driftCheckIntervalRef.current = setInterval(checkDrift, checkInterval);
+    console.log(`AudioSync: Set up drift checks every ${checkInterval/1000}s`);
+    
+    // Run an initial check after a longer delay on mobile (to allow for initial sync)
+    const initialCheckDelay = isMobile ? 6000 : 3000;
+    setTimeout(checkDrift, initialCheckDelay);
+    
+    return () => {
+      if (driftCheckIntervalRef.current) {
+        clearInterval(driftCheckIntervalRef.current);
+        driftCheckIntervalRef.current = null;
+      }
+    };
+  }, [isInitialized, currentTrack, correctDrift, checkIfMobile]);
+
+  // User activity detection for opportunistic sync
   useEffect(() => {
     if (!isInitialized || !audioRef.current) return;
     
-    // Use a specific visibility change handler that's more robust
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        console.log('AudioSync: Page became visible, performing immediate sync');
-        
-        const audio = audioRef.current;
-        if (!audio || audio.paused) return;
-        
-        // Mark the time we returned from background to enable post-background sync period
-        lastBackgroundReturnTimeRef.current = Date.now();
-        
-        // Calculate how long we were in background
-        const now = Date.now();
-        const lastSyncAge = now - lastSyncTimeRef.current;
-        
-        console.log(`AudioSync: Last sync was ${lastSyncAge/1000}s ago`);
-        
-        // When returning from background, always force a resync with server
-        const syncAfterBackground = async () => {
-          try {
-            // Force immediate server position check
-            requestTimeRef.current = performance.now();
-            const response = await fetch(`${env.apiUrl}/api/music/position`);
-            const data = await response.json();
-            
-            // Compensate for network latency
-            const requestDuration = performance.now() - requestTimeRef.current;
-            const actualServerPosition = Math.max(0, data.position - (requestDuration / 1000));
-            
-            console.log('AudioSync: After background, fetched server position:', actualServerPosition);
-            
-            // Update our reference points
-            lastSyncTimeRef.current = now;
-            serverPositionRef.current = actualServerPosition;
-            initialSyncTimeRef.current = performance.now();
-            
-            // Apply server position directly
-            audio.currentTime = Math.max(0, actualServerPosition - TRACK_PLAYBACK_OFFSET);
-            
-            console.log('AudioSync: Applied server position after background');
-          } catch (error) {
-            console.error('AudioSync: Error during visibility change sync:', error);
-          }
-        };
-        
-        // Always run background sync correction when becoming visible
-        syncAfterBackground();
-      } else if (document.visibilityState === 'hidden') {
-        // When going to background, record the timestamp for later calculation
-        console.log('AudioSync: Page hidden, recording timestamp for later sync calculation');
-        
-        // Store current state before going to background
-        if (audioRef.current && !audioRef.current.paused) {
-          const audio = audioRef.current;
-          const currentPosition = audio.currentTime;
+    const handleUserActivity = () => {
+      // Only use this opportunity if we have significant drift
+      if (driftHistoryRef.current.length > 0) {
+        const latestDrift = driftHistoryRef.current[driftHistoryRef.current.length - 1];
+        if (Math.abs(latestDrift.drift) > 0.2 && audioRef.current && !audioRef.current.paused) {
+          console.log('AudioSync: User activity detected, using opportunity for sync check');
           
-          // Calculate current server position estimate
-          const elapsedSinceSync = (performance.now() - initialSyncTimeRef.current) / 1000;
-          const estimatedServerPosition = serverPositionRef.current + elapsedSinceSync;
+          // Reset the last sync time to force a server check
+          lastSyncTimeRef.current = 0;
           
-          console.log('AudioSync: Before background -', 
-            {clientPos: currentPosition, 
-             serverEstimate: estimatedServerPosition,
-             timestamp: Date.now()}
-          );
+          // Request an immediate drift check in 500ms (after the user interaction completes)
+          setTimeout(() => {
+            if (driftCheckIntervalRef.current) {
+              clearInterval(driftCheckIntervalRef.current);
+              driftCheckIntervalRef.current = null;
+            }
+            
+            // Run drift check and then resume normal interval
+            const audio = audioRef.current;
+            if (audio && !audio.paused) {
+              const checkDrift = async () => {
+                try {
+                  const response = await fetch(`${env.apiUrl}/api/music/position`);
+                  const data = await response.json();
+                  
+                  // Compensate for network latency
+                  const requestDuration = performance.now() - requestTimeRef.current;
+                  const serverPosition = Math.max(0, data.position - (requestDuration / 1000));
+                  
+                  // Update our reference points
+                  lastSyncTimeRef.current = Date.now();
+                  serverPositionRef.current = serverPosition;
+                  initialSyncTimeRef.current = performance.now();
+                  
+                  // Apply correction if needed
+                  correctDrift(audio, serverPosition, audio.currentTime);
+                  
+                  // Resume normal interval checks
+                  const checkInterval = currentTrack?.duration && currentTrack.duration > 180 ? 5000 : 10000;
+                  driftCheckIntervalRef.current = setInterval(checkDrift, checkInterval);
+                } catch (error) {
+                  console.error('AudioSync: Error during user activity sync:', error);
+                }
+              };
+              
+              checkDrift();
+            }
+          }, 500);
         }
       }
     };
     
-    // Use our specialized visibility handler
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // Detect various user interactions that are good opportunities for sync
+    window.addEventListener('click', handleUserActivity);
+    document.addEventListener('visibilitychange', handleUserActivity);
     
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('click', handleUserActivity);
+      document.removeEventListener('visibilitychange', handleUserActivity);
     };
-  }, [isInitialized, currentTrack, getCalculatedPosition]);
-
-  // Update audio play event to record playback start time
-  useEffect(() => {
-    if (!isInitialized || !audioRef.current) return;
-    
-    const audio = audioRef.current;
-    
-    const handlePlay = () => {
-      // Record when playback starts to enable initial playback sync period
-      playbackStartedAtRef.current = Date.now();
-      console.log('AudioSync: Playback started, setting playback start time for initial sync period');
-      
-      if (mountedRef.current) {
-        statusRef.current = 'playing';
-        setPlayerState({ status: 'playing' });
-      }
-    };
-    
-    // Only attach if not already attached
-    if (!audio.hasAttribute('playstart-listener')) {
-      audio.addEventListener('play', handlePlay);
-      audio.setAttribute('playstart-listener', 'true');
-      
-      return () => {
-        audio.removeEventListener('play', handlePlay);
-      };
-    }
-    
-    return undefined;
-  }, [isInitialized, setPlayerState]);
+  }, [isInitialized, currentTrack, correctDrift]);
 
   // Cleanup effect
   useEffect(() => {
@@ -1033,8 +1253,8 @@ export default function AudioSync() {
         acquireWakeLock().then(() => {
           wakeLockAcquired = true;
         }).catch(error => {
-        console.warn('AudioSync: Play event - Failed to acquire Wake Lock:', error);
-      });
+          console.warn('AudioSync: Play event - Failed to acquire Wake Lock:', error);
+        });
       }
     };
     
@@ -1043,33 +1263,33 @@ export default function AudioSync() {
         releaseWakeLock().then(() => {
           wakeLockAcquired = false;
         }).catch(error => {
-        console.warn('Audio: Pause event - Failed to release Wake Lock:', error);
-      });
+          console.warn('Audio: Pause event - Failed to release Wake Lock:', error);
+        });
       }
     };
     
     // Only attach these listeners once
     if (!audio.hasAttribute('wakelock-listeners')) {
-    audio.addEventListener('play', handlePlay);
-    audio.addEventListener('pause', handlePause);
+      audio.addEventListener('play', handlePlay);
+      audio.addEventListener('pause', handlePause);
       audio.setAttribute('wakelock-listeners', 'true');
     
-    // Also manage wake lock based on document visibility
-    const handleVisibilityChange = () => {
+      // Also manage wake lock based on document visibility
+      const handleVisibilityChange = () => {
         if (document.visibilityState === 'visible' && statusRef.current === 'playing' && !wakeLockAcquired) {
           acquireWakeLock().then(() => {
             wakeLockAcquired = true;
           }).catch(console.warn);
-      }
-    };
+        }
+      };
     
     document.addEventListener('visibilitychange', handleVisibilityChange);
     
     // Check initial status
-      if (statusRef.current === 'playing' && !audio.paused && !wakeLockAcquired) {
-        acquireWakeLock().then(() => {
-          wakeLockAcquired = true;
-        }).catch(console.warn);
+    if (statusRef.current === 'playing' && !audio.paused && !wakeLockAcquired) {
+      acquireWakeLock().then(() => {
+        wakeLockAcquired = true;
+      }).catch(console.warn);
     }
     
     return () => {
@@ -1077,9 +1297,8 @@ export default function AudioSync() {
       audio.removeEventListener('pause', handlePause);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (wakeLockAcquired) {
-      releaseWakeLock().catch(console.warn);
+        releaseWakeLock().catch(console.warn);
       }
-    }
     };
   }, [isInitialized, acquireWakeLock, releaseWakeLock]);
 

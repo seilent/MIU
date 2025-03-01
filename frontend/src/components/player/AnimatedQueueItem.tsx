@@ -90,7 +90,7 @@ export function AnimatedQueueItem({
               : `/api/albumart/${track.youtubeId}?square=1`}
           alt={track.title}
           fill
-          className="object-cover rounded-md"
+          className="object-cover rounded-md filter-thumbnail"
           unoptimized={track.thumbnail.startsWith('http')}
         />
         {track.isAutoplay && (

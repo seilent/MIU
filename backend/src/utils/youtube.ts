@@ -72,14 +72,20 @@ class YouTubeKeyManager {
 
   constructor() {
     // Get API keys from environment variables
-    const apiKeys = process.env.YOUTUBE_API_KEYS?.split(',') || [];
+    const apiKeys = process.env.YOUTUBE_API_KEYS?.split(',').filter(Boolean) || [];
     const singleKey = process.env.YOUTUBE_API_KEY;
 
-    // Combine all available keys
-    this.keys = [...new Set([...apiKeys, ...(singleKey ? [singleKey] : [])])];
+    // Combine all available keys and remove duplicates
+    const allKeys = [...apiKeys, ...(singleKey ? [singleKey] : [])];
+    this.keys = [...new Set(allKeys)];
     
     if (this.keys.length === 0) {
       throw new Error('No YouTube API keys configured');
+    }
+
+    // Log if duplicates were found
+    if (allKeys.length !== this.keys.length) {
+      console.warn(`Found ${allKeys.length - this.keys.length} duplicate YouTube API keys. Duplicates have been removed.`);
     }
 
     this.keyUsage = new Map();
@@ -91,15 +97,28 @@ class YouTubeKeyManager {
     // Log number of available keys
     console.log(`Initialized YouTube API with ${this.keys.length} API key(s)`);
 
-    // Validate keys on startup
-    this.validateKeys().catch(error => {
-      console.error('Error validating YouTube API keys:', error);
-    });
+    // Remove automatic validation since it's done in initializeYouTubeAPI
+    // validateKeys() will be called explicitly when needed
   }
 
   public async validateKeys() {
     console.log('Validating YouTube API keys...');
+    
+    // Track validation results
+    let validCount = 0;
+    let invalidCount = 0;
+    let quotaExceededCount = 0;
+    
+    // Use Promise.all to validate all keys in parallel
     const validationPromises = this.keys.map(async (key) => {
+      // Skip validation if we already know the key is quota exceeded
+      const usage = this.keyUsage.get(key);
+      if (usage?.quotaExceeded) {
+        console.log(`✗ API key *****${key.slice(-5)} is already marked as quota exceeded, skipping validation`);
+        quotaExceededCount++;
+        return false;
+      }
+      
       try {
         // Try a simple API call to check if the key works and isn't rate limited
         await youtube.search.list({
@@ -110,30 +129,33 @@ class YouTubeKeyManager {
           type: ['video']
         });
         console.log(`✓ API key *****${key.slice(-5)} is valid`);
+        validCount++;
         return true;
       } catch (error: any) {
         const reason = error?.errors?.[0]?.reason;
         if (reason === 'quotaExceeded') {
           console.log(`✗ API key *****${key.slice(-5)} is quota exceeded`);
           this.markKeyAsQuotaExceeded(key);
+          quotaExceededCount++;
           return false;
         } else if (reason === 'dailyLimitExceeded') {
           console.log(`✗ API key *****${key.slice(-5)} has reached daily limit`);
           this.markKeyAsQuotaExceeded(key);
+          quotaExceededCount++;
           return false;
         } else {
           console.log(`✗ API key *****${key.slice(-5)} is invalid:`, reason || 'Unknown error');
           this.markKeyAsQuotaExceeded(key);
+          invalidCount++;
           return false;
         }
       }
     });
 
-    const results = await Promise.all(validationPromises);
-    const validKeys = results.filter(result => result).length;
-    console.log(`YouTube API key validation complete: ${validKeys}/${this.keys.length} keys are valid`);
+    await Promise.all(validationPromises);
+    console.log(`YouTube API key validation complete: ${validCount}/${this.keys.length} keys are valid (${quotaExceededCount} quota exceeded, ${invalidCount} invalid)`);
 
-    if (validKeys === 0) {
+    if (validCount === 0) {
       console.error('WARNING: All YouTube API keys are invalid or quota exceeded!');
     }
   }

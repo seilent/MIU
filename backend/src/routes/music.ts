@@ -17,6 +17,7 @@ import { getPlayer } from '../discord/player.js';
 import { RequestStatus } from '../types/enums.js';
 import { spawn } from 'child_process';
 import getEnv from '../utils/env.js';
+import crypto from 'crypto';
 
 const env = getEnv();
 
@@ -785,6 +786,30 @@ const activeStreams = new Map<string, {
   filePath: string;
 }>();
 
+// Maintain a map of token to session details
+const streamSessions = new Map<string, {
+  youtubeId: string;
+  timestamp: number;
+  filePath: string;
+}>();
+
+// Clean up old sessions periodically (every 15 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of streamSessions.entries()) {
+    // Remove sessions older than 1 hour
+    if (now - session.timestamp > 3600000) {
+      streamSessions.delete(token);
+    }
+  }
+}, 900000);
+
+// Generate a secure URL-safe token for streaming
+function generateStreamToken(length: number = 32): string {
+  const bytes = crypto.randomBytes(length);
+  return bytes.toString('base64url');
+}
+
 function getSharedStream(youtubeId: string, filePath: string): Readable {
   const existing = activeStreams.get(youtubeId);
   if (existing) {
@@ -812,6 +837,165 @@ function getSharedStream(youtubeId: string, filePath: string): Readable {
           
   return stream;
 }
+
+// New secure direct streaming endpoint
+router.get('/secure-stream/:token', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { token } = req.params;
+    const session = streamSessions.get(token);
+    
+    if (!session) {
+      return res.status(404).json({ error: 'Stream not found or expired' });
+    }
+    
+    const { filePath, youtubeId } = session;
+    
+    if (!fs.existsSync(filePath)) {
+      streamSessions.delete(token); // Clean up invalid session
+      return res.status(404).json({ error: 'Audio file not found' });
+    }
+    
+    const client = getDiscordClient();
+    if (!client) {
+      return res.status(500).json({ error: 'Discord client not available' });
+    }
+    
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+
+    // Handle range requests
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'audio/mp4',
+        // Using a random filename to prevent download managers from recognizing the content
+        'Content-Disposition': `attachment; filename="audio-${Math.random().toString(36).substring(2, 10)}.bin"`,
+        // Prevent caching
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Surrogate-Control': 'no-store',
+        // Security headers
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'X-XSS-Protection': '1; mode=block',
+        // Custom headers for player synchronization
+        'X-Initial-Position': client.player.getPosition(),
+        'X-Playback-Start': Date.now(),
+        'X-Track-Id': youtubeId,
+        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, Accept-Ranges, Content-Length, Content-Range'
+      });
+
+      // Track metrics
+      audioStreamRequestsCounter.inc({ type: 'secure-range' });
+      const startTime = Date.now();
+
+      // Handle client disconnect
+      req.on('close', () => {
+        file.destroy();
+        const latency = (Date.now() - startTime) / 1000;
+        audioStreamLatencyHistogram.observe(latency);
+      });
+
+      file.pipe(res);
+    } else {
+     
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': 'audio/mp4',
+        // Using a random filename to prevent download managers from recognizing the content
+        'Content-Disposition': `attachment; filename="audio-${Math.random().toString(36).substring(2, 10)}.bin"`,
+        'Accept-Ranges': 'bytes',
+        // Prevent caching
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Surrogate-Control': 'no-store',
+        // Security headers
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'X-XSS-Protection': '1; mode=block',
+        // Custom headers for player synchronization
+        'X-Initial-Position': client.player.getPosition(),
+        'X-Playback-Start': Date.now(),
+        'X-Track-Id': youtubeId,
+        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, Accept-Ranges, Content-Length'
+      });
+
+      // Track metrics
+      audioStreamRequestsCounter.inc({ type: 'secure-full' });
+      const startTime = Date.now();
+
+      // Create read stream with larger buffer for better performance
+      const file = fs.createReadStream(filePath, {
+        highWaterMark: 64 * 1024 // 64KB chunks
+      });
+
+      // Handle client disconnect
+      req.on('close', () => {
+        file.destroy();
+        const latency = (Date.now() - startTime) / 1000;
+        audioStreamLatencyHistogram.observe(latency);
+      });
+
+      file.pipe(res);
+    }
+  } catch (error) {
+    console.error('Secure stream error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Stream failed' });
+    }
+  }
+});
+
+// Endpoint to get secure stream token for a track
+router.get('/secure-token/:youtubeId', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { youtubeId } = req.params;
+    
+    // Get cached audio file
+    const audioCache = await prisma.audioCache.findUnique({
+      where: { youtubeId }
+    });
+
+    if (!audioCache || !fs.existsSync(audioCache.filePath)) {
+      return res.status(404).json({ error: 'Audio not found' });
+    }
+
+    // Generate a token
+    const token = generateStreamToken();
+    
+    // Store session information
+    streamSessions.set(token, {
+      youtubeId,
+      timestamp: Date.now(),
+      filePath: audioCache.filePath
+    });
+    
+    // Return the token
+    res.json({ token });
+  } catch (error) {
+    console.error('Secure token generation error:', error);
+    res.status(500).json({ error: 'Failed to generate secure token' });
+  }
+});
 
 // New streaming endpoint
 router.get('/stream', async (req, res) => {

@@ -133,7 +133,7 @@ export default function HistoryPage() {
                     ? track.thumbnail 
                     : getThumbnailUrl(track.youtubeId)}
                   alt={track.title}
-                  className="h-16 w-16 rounded-md object-cover"
+                  className="h-16 w-16 rounded-md object-cover filter-thumbnail"
                 />
               </div>
               <div className="flex-1 min-w-0">

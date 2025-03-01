@@ -57,6 +57,7 @@
     "jsonwebtoken": "^9.0.2",
     "libsodium-wrappers": "^0.7.15",
     "node-cron": "^3.0.3",
+    "ntp-time": "^2.0.6",
     "opusscript": "^0.0.8",
     "play-dl": "^1.9.7",
     "prom-client": "^15.1.0",

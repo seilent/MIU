@@ -107,7 +107,7 @@ export async function createServer() {
       }
       // Special handling for presence endpoints
       if (req.url.startsWith('/backend/api/discord/presence')) {
-        req.url = req.url.replace('/backend/api/discord/presence', '/api/presence');
+        req.url = req.url.replace('/backend/api/discord/presence', '/api/presence/heartbeat');
       } else {
         req.url = req.url.replace('/backend', '');
       }

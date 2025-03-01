@@ -5,16 +5,19 @@ import { useEffect, useState } from 'react';
 import Script from 'next/script';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
-const DEFAULT_IMAGE = `${API_BASE_URL}/DEFAULT.jpg`;
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+const DEFAULT_IMAGE = `${API_BASE_URL}/images/DEFAULT.jpg`;
 
 // Helper function to update meta tags
 function updateMetaTags({ title, description, image }: { title: string; description: string; image: string }) {
-  // OpenGraph tags
+  // OpenGraph tags 
+  // Note: These client-side updates are for when the page is already loaded
+  // For initial load or when scraped by bots, the /api/og endpoint handles dynamic metadata server-side
   document.querySelector('meta[property="og:title"]')?.setAttribute('content', title);
   document.querySelector('meta[property="og:description"]')?.setAttribute('content', description);
   document.querySelector('meta[property="og:image"]')?.setAttribute('content', image);
-  document.querySelector('meta[property="og:image:width"]')?.setAttribute('content', '1280');
-  document.querySelector('meta[property="og:image:height"]')?.setAttribute('content', '720');
+  document.querySelector('meta[property="og:image:width"]')?.setAttribute('content', '1200');
+  document.querySelector('meta[property="og:image:height"]')?.setAttribute('content', '630');
 
   // Twitter tags
   document.querySelector('meta[name="twitter:card"]')?.setAttribute('content', 'summary_large_image');
@@ -48,7 +51,14 @@ export function MetaTags() {
 
     // Add timestamp to thumbnail URL to bypass Discord's cache
     const timestamp = Date.now();
-    const thumbnailUrl = `${currentTrack.thumbnail}?t=${timestamp}`;
+    let thumbnailUrl = currentTrack.thumbnail;
+    
+    // Use the OG image API for thumbnail to ensure proper formating
+    if (APP_URL) {
+      thumbnailUrl = `${APP_URL}/api/og?t=${timestamp}`;
+    } else {
+      thumbnailUrl = `${thumbnailUrl}?t=${timestamp}`;
+    }
 
     document.title = `Now Playing: ${currentTrack.title}`;
     updateMetaTags({
@@ -69,8 +79,8 @@ export function MetaTags() {
           document.querySelector('meta[property="og:title"]')?.setAttribute('content', title);
           document.querySelector('meta[property="og:description"]')?.setAttribute('content', description);
           document.querySelector('meta[property="og:image"]')?.setAttribute('content', image);
-          document.querySelector('meta[property="og:image:width"]')?.setAttribute('content', '1280');
-          document.querySelector('meta[property="og:image:height"]')?.setAttribute('content', '720');
+          document.querySelector('meta[property="og:image:width"]')?.setAttribute('content', '1200');
+          document.querySelector('meta[property="og:image:height"]')?.setAttribute('content', '630');
 
           // Twitter tags
           document.querySelector('meta[name="twitter:card"]')?.setAttribute('content', 'summary_large_image');

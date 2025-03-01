@@ -301,17 +301,6 @@ export default function Home() {
       }
 
       if (audio.paused) {
-        // Get fresh position before playing
-        const response = await fetch(`${env.apiUrl}/api/music/position`);
-        const data = await response.json();
-        
-        console.log('Player: Fresh position before play:', {
-          position: data.position,
-          serverTime: new Date(data.timestamp).toISOString()
-        });
-        
-        // Set position and play
-        audio.currentTime = data.position;
         await audio.play();
       } else {
         audio.pause();

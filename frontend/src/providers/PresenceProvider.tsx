@@ -21,11 +21,12 @@ export function PresenceProvider({ children }: PresenceProviderProps) {
 
     const sendHeartbeat = async () => {
       try {
-        const response = await fetch(`${env.apiUrl}/api/discord/presence`, {
+        const response = await fetch(`${env.apiUrl}/api/presence/heartbeat`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'X-Keep-Playing': 'true'
           }
         });
 

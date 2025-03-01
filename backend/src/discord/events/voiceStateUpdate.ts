@@ -1,4 +1,5 @@
 import { VoiceState, Client } from 'discord.js';
+import { AudioPlayerStatus } from '@discordjs/voice';
 
 export async function handleVoiceStateUpdate(
   oldState: VoiceState,
@@ -22,7 +23,7 @@ export async function handleVoiceStateUpdate(
       if (members.size === 0) {
         // Channel is empty, pause playback but preserve queue
         await client.player.pause();
-      } else if (members.size > 0 && client.player.isPaused()) {
+      } else if (members.size > 0 && !client.player.isPlaying()) {
         // Users joined and player is paused, resume playback
         await client.player.resume();
       }
