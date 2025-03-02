@@ -229,7 +229,7 @@ export default function Home() {
       if (!token || !showHistory) return;
       
       try {
-        const response = await fetch(`${env.apiUrl}/api/history`, {
+        const response = await fetch(`${env.apiUrl}/api/music/history`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'X-Internal-Request': 'true'

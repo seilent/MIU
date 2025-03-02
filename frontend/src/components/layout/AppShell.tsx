@@ -231,11 +231,13 @@ export function AppShell({ children }: AppShellProps) {
             <Toaster
               position="top-right"
               toastOptions={{
-                className: 'backdrop-blur-lg border rounded-lg',
+                className: 'border rounded-lg',
                 style: {
                   background: 'var(--color-primary)',
                   color: 'var(--color-accent)',
                   border: '1px solid rgba(var(--color-accent-rgb), 0.1)',
+                  backdropFilter: 'blur(12px)',
+                  WebkitBackdropFilter: 'blur(12px)',
                 },
                 duration: 3000,
               }}
@@ -245,7 +247,13 @@ export function AppShell({ children }: AppShellProps) {
 
         {/* Header - hidden on login page */}
         {!isLoginPage && (
-          <header className="absolute inset-x-0 top-0 z-[100] bg-theme-primary/30 backdrop-blur-lg">
+          <header 
+            className="absolute inset-x-0 top-0 z-[100] bg-theme-primary/30"
+            style={{
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)'
+            }}
+          >
             <nav className="flex items-center justify-between p-6 lg:px-8" aria-label="Global">
               <div className="flex items-center gap-x-4">
                 <Link href="/" className="flex items-center gap-x-2">
@@ -266,11 +274,15 @@ export function AppShell({ children }: AppShellProps) {
                     placeholder="Search for songs or paste YouTube URL..."
                     className={`w-full px-4 py-2 rounded-lg bg-black/20 border 
                              text-theme-accent placeholder:text-theme-accent/40 focus:outline-none 
-                             transition-all duration-200 text-sm backdrop-blur-sm
+                             transition-all duration-200 text-sm
                              ${isUrlLoading ? 'pr-10' : ''}
                              ${urlRequestStatus === 'success' ? 'border-green-500/30 focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20' :
                                urlRequestStatus === 'error' ? 'border-red-500/30 focus:border-red-500/50 focus:ring-1 focus:ring-red-500/20' :
                                'border-theme-accent/10 focus:border-theme-accent/30 focus:bg-black/30 focus:ring-1 focus:ring-theme-accent/20'}`}
+                    style={{
+                      backdropFilter: 'blur(4px)',
+                      WebkitBackdropFilter: 'blur(4px)'
+                    }}
                     disabled={isUrlLoading}
                   />
                   {isUrlLoading && (
@@ -297,11 +309,16 @@ export function AppShell({ children }: AppShellProps) {
                 {/* Search Results Dropdown */}
                 {showResults && (
                   <div 
-                    className="absolute w-full mt-2 rounded-lg shadow-lg overflow-hidden z-50 backdrop-blur-lg border border-white/10 p-2"
-                    style={{ backgroundColor: `${colors.background}CC` }} // CC is 80% opacity in hex
+                    className="absolute w-full mt-2 rounded-lg shadow-lg overflow-hidden z-50 border border-white/10 p-2"
+                    style={{ 
+                      backgroundColor: `rgba(${colors.backgroundRgb}, 0.85)`,
+                      backdropFilter: 'blur(12px)',
+                      WebkitBackdropFilter: 'blur(12px)'
+                    }}
                   >
                     {isSearching ? (
-                      <div className="flex items-center justify-center p-4 bg-white/5 backdrop-blur-lg border border-white/5 rounded-lg">
+                      <div className="flex items-center justify-center p-4 bg-white/5 border border-white/5 rounded-lg"
+                           style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}>
                         <LoadingSpinner size="sm" className="text-theme-accent" />
                       </div>
                     ) : searchResults.length > 0 ? (
@@ -372,8 +389,12 @@ export function AppShell({ children }: AppShellProps) {
                     {/* Dropdown menu */}
                     {showUserMenu && (
                       <div 
-                        className="absolute right-0 mt-2 w-48 backdrop-blur-lg rounded-lg border border-theme-accent/10 shadow-lg overflow-hidden z-50"
-                        style={{ backgroundColor: `${colors.background}CC` }}
+                        className="absolute right-0 mt-2 w-48 rounded-lg border border-theme-accent/10 shadow-lg overflow-hidden z-50"
+                        style={{ 
+                          backgroundColor: `rgba(${colors.backgroundRgb}, 0.85)`,
+                          backdropFilter: 'blur(12px)',
+                          WebkitBackdropFilter: 'blur(12px)'
+                        }}
                       >
                         <div className="p-3 border-b border-theme-accent/10">
                           <div className="font-medium text-white">{user.username}</div>
