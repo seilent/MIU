@@ -1,0 +1,43 @@
+import { Client, VoiceState, VoiceChannel } from 'discord.js';
+import { 
+  joinVoiceChannel, 
+  createAudioPlayer, 
+  createAudioResource,
+  AudioPlayer,
+  VoiceConnection,
+  AudioPlayerStatus,
+  StreamType,
+  demuxProbe,
+  NoSubscriberBehavior,
+  AudioResource,
+  DiscordGatewayAdapterCreator,
+  VoiceConnectionStatus,
+  getVoiceConnection
+} from '@discordjs/voice';
+import path from 'path';
+import ffmpeg from 'ffmpeg-static';
+import { createReadStream } from 'fs';
+import { Readable, PassThrough } from 'stream';
+import { prisma } from '../db.js';
+import { PrismaClient, Prisma } from '@prisma/client';
+import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
+import fs from 'fs';
+import { youtube } from '../utils/youtube.js';
+import jwt from 'jsonwebtoken';
+import { spawn } from 'child_process';
+import { TrackingService } from '../tracking/service.js';
+import { RecommendationEngine } from '../recommendation/engine.js';
+import { ChildProcessWithoutNullStreams } from 'child_process';
+import { resolveYouTubeMusicId } from '../utils/youtubeMusic.js';
+import { RequestStatus, PlaylistMode, TrackStatus } from '../types/enums.js';
+import { broadcastPlayerState } from '../routes/music.js';
+
+// Base types
+interface Track {
+  youtubeId: string;
+  title: string;
+  thumbnail: string;
+  duration: number;
+  isMusicUrl?: boolean;
+  resolvedYtId?: string | null;
+  isActive?: boolean;

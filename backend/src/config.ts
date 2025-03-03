@@ -1,5 +1,6 @@
 // Duration limits
-export const MAX_DURATION = 60 * 7; // 7 minutes in seconds
+export const MAX_DURATION = parseInt(process.env.MAX_DURATION || '420'); // 7 minutes in seconds
+export const MIN_DURATION = parseInt(process.env.MIN_DURATION || '30'); // 30 seconds minimum
 
 // API configuration
 export const API_BASE_URL = process.env.API_URL || 'https://miu.gacha.boo';

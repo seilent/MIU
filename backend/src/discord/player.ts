@@ -19,6 +19,7 @@ import ffmpeg from 'ffmpeg-static';
 import { createReadStream } from 'fs';
 import { Readable, PassThrough } from 'stream';
 import { prisma } from '../db.js';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { getYoutubeInfo, downloadYoutubeAudio, getYoutubeRecommendations, getAudioFileDuration } from '../utils/youtube.js';
 import fs from 'fs';
 import { youtube } from '../utils/youtube.js';
@@ -27,7 +28,7 @@ import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
 import { ChildProcessWithoutNullStreams } from 'child_process';
-import { resolveYouTubeMusicId } from '../utils/youtubeMusic.js';
+import { resolveYouTubeMusicId, getThumbnailUrl } from '../utils/youtubeMusic.js';
 import { RequestStatus, PlaylistMode, TrackStatus } from '../types/enums.js';
 import { broadcastPlayerState } from '../routes/music.js';
 
@@ -35,7 +36,7 @@ import { broadcastPlayerState } from '../routes/music.js';
 interface Track {
   youtubeId: string;
   title: string;
-  thumbnail: string;
+  thumbnail?: string; // Mark as optional since we'll use the youtubeId to generate it
   duration: number;
   isMusicUrl?: boolean;
   resolvedYtId?: string | null;
@@ -97,6 +98,7 @@ interface QueueItem {
   };
   requestedAt: Date;
   isAutoplay: boolean;
+  autoplaySource?: 'Pool: Playlist' | 'Pool: History' | 'Pool: Popular' | 'Pool: YouTube Mix' | 'Pool: Random';
 }
 
 interface PlaylistWithTracks {
@@ -184,16 +186,27 @@ export class Player {
   private timeout?: NodeJS.Timeout;
   private autoplayEnabled: boolean = true;
   private playedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for ALL tracks
-  private readonly PLAYED_TRACKS_EXPIRY = 3600000; // 1 hour in milliseconds
-  private readonly AUTOPLAY_TRACKS_EXPIRY = 18000000; // 5 hours in milliseconds (reverted back to 5 hours)
-  private readonly MAX_DURATION = 420; // 7 minutes in seconds
+  private usedSeedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for seed tracks
+  private readonly SEED_TRACK_COOLDOWN = parseInt(process.env.SEED_TRACK_COOLDOWN || '43200000'); // 12 hours in milliseconds
+  private readonly PLAYED_TRACKS_EXPIRY = parseInt(process.env.PLAYED_TRACKS_EXPIRY || '3600000'); // 1 hour in milliseconds
+  private readonly AUTOPLAY_TRACKS_EXPIRY = parseInt(process.env.AUTOPLAY_TRACKS_EXPIRY || '18000000'); // 5 hours minimum autoplay cooldown
+  private readonly TOP_TIER_EXPIRY = parseInt(process.env.TOP_TIER_EXPIRY || '21600000'); // 6 hours for top favorites
+  private readonly MID_TIER_EXPIRY = parseInt(process.env.MID_TIER_EXPIRY || '28800000'); // 8 hours for mid-tier songs
+  private readonly LOW_TIER_EXPIRY = parseInt(process.env.LOW_TIER_EXPIRY || '36000000'); // 10 hours for low-played songs
+  private readonly MAX_DURATION = parseInt(process.env.MAX_DURATION || '420'); // 7 minutes in seconds
+  private readonly MIN_DURATION = parseInt(process.env.MIN_DURATION || '30'); // 30 seconds minimum
   private retryCount: number = 0;
-  private maxRetries: number = 3;
-  private retryDelay: number = 1000;
-  private readonly AUTOPLAY_QUEUE_SIZE = 5;
-  private readonly AUTOPLAY_BUFFER_SIZE = 5;
-  private readonly AUTOPLAY_PREFETCH_THRESHOLD = 2;
-  private readonly PLAYLIST_EXHAUSTED_THRESHOLD = 0.8;
+  private maxRetries: number = parseInt(process.env.MAX_RETRIES || '3');
+  private retryDelay: number = parseInt(process.env.RETRY_DELAY || '1000');
+  private readonly AUTOPLAY_QUEUE_SIZE = parseInt(process.env.AUTOPLAY_QUEUE_SIZE || '5');
+  private readonly AUTOPLAY_BUFFER_SIZE = parseInt(process.env.AUTOPLAY_BUFFER_SIZE || '5');
+  private readonly AUTOPLAY_PREFETCH_THRESHOLD = parseInt(process.env.AUTOPLAY_PREFETCH_THRESHOLD || '2');
+  private readonly PLAYLIST_EXHAUSTED_THRESHOLD = parseFloat(process.env.PLAYLIST_EXHAUSTED_THRESHOLD || '0.8');
+  // YouTube recommendation settings
+  private readonly YT_REC_POOL_SIZE = parseInt(process.env.YT_REC_POOL_SIZE || '50');
+  private readonly YT_REC_FETCH_COUNT = parseInt(process.env.YT_REC_FETCH_COUNT || '10');
+  private readonly YT_REC_JAPANESE_WEIGHT = parseFloat(process.env.YT_REC_JAPANESE_WEIGHT || '0.3');
+  private readonly YT_REC_MIN_RELEVANCE_SCORE = parseFloat(process.env.YT_REC_MIN_RELEVANCE_SCORE || '0.5');
   private _youtubeApiCalls?: {
     count: number;
     resetTime: number;
@@ -204,7 +217,7 @@ export class Player {
   private currentPlaylistId?: string;
   private youtubeRecommendationsPool: { youtubeId: string }[] = [];
   private volume: number = 1;
-  private readonly USER_LEAVE_TIMEOUT = 10000; // 10 seconds
+  private readonly USER_LEAVE_TIMEOUT = parseInt(process.env.USER_LEAVE_TIMEOUT || '10000'); // 10 seconds
   private userCheckInterval?: NodeJS.Timeout;
   private defaultVoiceChannelId: string;
   private defaultGuildId: string;
@@ -215,12 +228,15 @@ export class Player {
   private activeAudioStreams: Set<NodeJS.WritableStream> = new Set();
 
   private readonly WEIGHTS = {
-    PLAYLIST: 0.25,    // 25% for playlist tracks
-    FAVORITES: 0.25,   // 25% for user favorites
-    POPULAR: 0.20,     // 20% for popular tracks
+    PLAYLIST: 0.30,    // 25% for playlist tracks
+    FAVORITES: 0.15,   // 25% for user favorites
+    POPULAR: 0.15,     // 20% for popular tracks
     YOUTUBE: 0.20,     // 20% for YouTube recommendations
-    RANDOM: 0.10       // 10% for random tracks
+    RANDOM: 0.20       // 10% for random tracks
   } as const;
+
+  // Track cooldown cache to avoid database lookups on every check
+  private trackCooldownCache: Map<string, number> = new Map();
 
   constructor(
     client: Client,
@@ -290,6 +306,9 @@ export class Player {
 
     // Start user presence check interval
     this.startUserPresenceCheck();
+
+    // Start the periodic recommendation growth service
+    this.startRecommendationGrowthService();
   }
 
   private async ensureBotUser(): Promise<void> {
@@ -568,6 +587,10 @@ export class Player {
         throw new Error('Invalid YouTube ID');
       }
 
+      // When a user plays a song explicitly, give it special treatment in cooldown cache
+      // User-requested tracks have shorter cooldown periods
+      this.trackCooldownCache.set(youtubeId, this.TOP_TIER_EXPIRY);
+      
       // Ensure userId is valid
       if (!userId) {
         console.error('Invalid userId:', userId);
@@ -645,7 +668,6 @@ export class Player {
           youtubeId,
           resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
           title: info.title,
-          thumbnail: info.thumbnail,
           duration: info.duration,
           isActive: true,
           status: TrackStatus.PLAYING,
@@ -654,7 +676,6 @@ export class Player {
         update: {
           resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
           title: info.title,
-          thumbnail: info.thumbnail,
           duration: info.duration,
           isActive: true,
           status: TrackStatus.PLAYING,
@@ -711,7 +732,7 @@ export class Player {
             console.log(`Original resolvedYtId from cache: ${cachedTrack.resolvedYtId || 'none'}`);
             trackInfo = {
               title: cachedTrack.title,
-              thumbnail: cachedTrack.thumbnail,
+              thumbnail: getThumbnailUrl(youtubeId),
               duration: cachedTrack.duration
             };
             // Use resolvedId from cache if available for music URLs
@@ -742,7 +763,7 @@ export class Player {
               // Now we can use the cache
               trackInfo = {
                 title: cachedTrack.title,
-                thumbnail: cachedTrack.thumbnail,
+                thumbnail: getThumbnailUrl(youtubeId),
                 duration: cachedTrack.duration
               };
               resolvedId = cachedTrack.resolvedYtId || youtubeId;
@@ -791,7 +812,6 @@ export class Player {
             youtubeId,  // Always use original youtubeId
             title: trackInfo.title,
             duration: trackInfo.duration,
-            thumbnail: trackInfo.thumbnail,
             isMusicUrl,
             resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
             isActive: true
@@ -799,7 +819,6 @@ export class Player {
           update: {
             title: trackInfo.title,
             duration: trackInfo.duration,
-            thumbnail: trackInfo.thumbnail,
             isMusicUrl,
             resolvedYtId: resolvedId !== youtubeId ? resolvedId : null,
             isActive: true
@@ -852,7 +871,7 @@ export class Player {
       const queueItem: QueueItem = {
         youtubeId: youtubeId,  // Always use original youtubeId
         title: trackInfo.title,
-        thumbnail: trackInfo.thumbnail,
+        thumbnail: getThumbnailUrl(youtubeId),
         duration: trackInfo.duration,
         requestedBy: {
           userId: userId,
@@ -904,13 +923,11 @@ export class Player {
           create: {
             youtubeId: resolvedId, // Use resolved ID
             title: trackInfo.title,
-            thumbnail: trackInfo.thumbnail,
             duration: trackInfo.duration,
             isMusicUrl
           },
           update: {
             title: trackInfo.title,
-            thumbnail: trackInfo.thumbnail,
             duration: trackInfo.duration,
             isMusicUrl
           }
@@ -965,7 +982,7 @@ export class Player {
       const response = {
         youtubeId: youtubeId, // Use original youtubeId for consistency
         title: trackInfo.title,
-        thumbnail: trackInfo.thumbnail,
+        thumbnail: getThumbnailUrl(youtubeId),
         duration: trackInfo.duration,
         requestedBy: queueItem.requestedBy,
         queuePosition: this.queue.length || undefined,
@@ -1205,7 +1222,7 @@ export class Player {
         currentTrack: this.currentTrack ? {
           youtubeId: this.currentTrack.youtubeId,
           title: this.currentTrack.title,
-          thumbnail: this.currentTrack.thumbnail,
+          thumbnail: getThumbnailUrl(this.currentTrack.youtubeId),
           duration: this.currentTrack.duration,
           requestedBy: formatRequestedBy(this.currentTrack.requestedBy),
           requestedAt: this.currentTrack.requestedAt,
@@ -1214,7 +1231,7 @@ export class Player {
         queue: allQueueTracks.map(track => ({
           youtubeId: track.youtubeId,
           title: track.title,
-          thumbnail: track.thumbnail,
+          thumbnail: getThumbnailUrl(track.youtubeId),
           duration: track.duration,
           requestedBy: formatRequestedBy(track.requestedBy),
           requestedAt: track.requestedAt,
@@ -1281,49 +1298,92 @@ export class Player {
   }
 
   // Add new method to refresh YouTube recommendations
-  private async refreshYoutubeRecommendationsPool(): Promise<void> {
-    // Only refresh if pool is running low
-    if (this.youtubeRecommendationsPool.length >= 5) {
-      console.log('[DEBUG] refreshYoutubeRecommendationsPool: Pool size sufficient, skipping refresh');
-      return;
-    }
-
+  public async refreshYoutubeRecommendationsPool(): Promise<void> {
     try {
       console.log('[DEBUG] refreshYoutubeRecommendationsPool: Starting refresh');
       
-      // Get popular tracks to use as seeds
-      const popularTracks = await prisma.request.groupBy({
-        by: ['youtubeId'],
-        _count: {
-          youtubeId: true
-        },
-        orderBy: {
-          _count: {
-            youtubeId: 'desc'
+      // Clean up old entries from the usedSeedTracks map
+      const now = Date.now();
+      for (const [trackId, timestamp] of this.usedSeedTracks.entries()) {
+        if (now - timestamp > this.SEED_TRACK_COOLDOWN) {
+          this.usedSeedTracks.delete(trackId);
+        }
+      }
+      
+      // Get tracks with high global scores to use as seeds
+      const popularTracks = await prisma.track.findMany({
+        where: {
+          globalScore: {
+            gt: 0  // Only consider tracks with positive global scores
           }
         },
-        take: 10 // Get more tracks to try as seeds
+        select: {
+          youtubeId: true,
+          globalScore: true,
+          playCount: true,
+          skipCount: true
+        },
+        orderBy: {
+          globalScore: 'desc'  // Order by global score instead of request count
+        },
+        take: this.YT_REC_POOL_SIZE
       });
 
       if (popularTracks.length === 0) {
-        console.log('[DEBUG] refreshYoutubeRecommendationsPool: No popular tracks found');
+        console.log('[DEBUG] refreshYoutubeRecommendationsPool: No tracks with positive global scores found');
         return;
       }
 
-      console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Found ${popularTracks.length} popular tracks to use as seeds`);
+      // Filter out tracks that have been used as seeds recently
+      const eligibleTracks = popularTracks.filter(track => 
+        !this.usedSeedTracks.has(track.youtubeId)
+      );
+      
+      if (eligibleTracks.length === 0) {
+        console.log('[DEBUG] refreshYoutubeRecommendationsPool: No eligible seed tracks found (all on cooldown)');
+        // If all tracks are on cooldown, use the track with highest global score as fallback
+        let bestTrack = popularTracks[0]; // Already sorted by global score
+        
+        console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Using highest scored track ${bestTrack.youtubeId} (score: ${bestTrack.globalScore}) as fallback`);
+        eligibleTracks.push(bestTrack);
+      }
 
-      // Try multiple seed tracks if needed
+      console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Found ${eligibleTracks.length} eligible tracks from ${popularTracks.length} tracks with positive scores`);
+      
+      // Sort eligible tracks by a weighted score that considers both global score and skip ratio
+      const weightedTracks = eligibleTracks.map(track => {
+        const skipRatio = track.playCount > 0 ? track.skipCount / track.playCount : 0;
+        const weightedScore = track.globalScore * (1 - skipRatio * 0.5); // Penalize tracks with high skip ratios
+        return { ...track, weightedScore };
+      }).sort((a, b) => b.weightedScore - a.weightedScore);
+
+      // Try up to 3 seed tracks if needed
       let newRecommendations: Array<{ youtubeId: string }> = [];
       let attempts = 0;
+      const maxAttempts = Math.min(3, weightedTracks.length);
       
-      while (newRecommendations.length === 0 && attempts < 3 && attempts < popularTracks.length) {
-        // Pick a random popular track as seed
-        const seedTrack = popularTracks[attempts];
+      while (newRecommendations.length === 0 && attempts < maxAttempts) {
+        // Select the next track from our weighted list
+        const seedTrack = weightedTracks[attempts];
         
         try {
-          console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Trying seed track ${seedTrack.youtubeId} (attempt ${attempts + 1})`);
-          // Get recommendations from YouTube
-          const recommendations = await getYoutubeRecommendations(seedTrack.youtubeId);
+          // Get the track details to see if it has a resolved ID (for YouTube Music tracks)
+          const trackDetails = await prisma.track.findUnique({
+            where: { youtubeId: seedTrack.youtubeId },
+            select: { resolvedYtId: true, isMusicUrl: true }
+          });
+          
+          // Use the resolved ID if it's a YouTube Music track and has a resolved ID
+          const effectiveYoutubeId = (trackDetails?.isMusicUrl && trackDetails?.resolvedYtId) 
+            ? trackDetails.resolvedYtId 
+            : seedTrack.youtubeId;
+          
+          console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Trying seed track ${seedTrack.youtubeId}${
+            trackDetails?.isMusicUrl ? ` (resolved to: ${effectiveYoutubeId})` : ''
+          } (attempt ${attempts + 1})`);
+          
+          // Get recommendations from YouTube using the effective ID
+          const recommendations = await getYoutubeRecommendations(effectiveYoutubeId);
           
           if (recommendations.length > 0) {
             // Filter out the current track and any tracks in the queue
@@ -1360,6 +1420,11 @@ export class Player {
             if (filteredRecommendations.length > 0) {
               newRecommendations = filteredRecommendations;
               console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Using ${filteredRecommendations.length} recommendations from seed ${seedTrack.youtubeId}`);
+              
+              // Mark this seed track as used with the current timestamp
+              this.usedSeedTracks.set(seedTrack.youtubeId, Date.now());
+              console.log(`[DEBUG] refreshYoutubeRecommendationsPool: Marked ${seedTrack.youtubeId} as used seed track`);
+              
               break;
             }
           }
@@ -1892,6 +1957,9 @@ export class Player {
         console.log('Created bot user in database');
       }
       
+      // Update cooldown cache for all recently played tracks
+      await this.refreshCooldownCache();
+      
       // First try to get tracks from the active playlist if available
       let tracksToAdd: { youtubeId: string }[] = [];
       
@@ -1960,16 +2028,59 @@ export class Player {
       if (tracksToAdd.length < (this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length)) {
         console.log(`[DEBUG] prefetchAutoplayTracks: Need more tracks, falling back to YouTube recommendations`);
         
-        // Refresh YouTube recommendations pool if needed
-        if (this.youtubeRecommendationsPool.length < this.AUTOPLAY_PREFETCH_THRESHOLD) {
-          await this.refreshYoutubeRecommendationsPool();
-        }
+        // Always refresh YouTube recommendations pool to grow the database
+        await this.refreshYoutubeRecommendationsPool();
 
-        // Get recommendations from the pool
-        const ytRecommendations = this.youtubeRecommendationsPool.splice(0, 
-          this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length - tracksToAdd.length);
+        // Try to prioritize Japanese songs first
+        let japaneseRecommendations: Array<{ youtubeId: string }> = [];
         
-        tracksToAdd = [...tracksToAdd, ...ytRecommendations];
+        try {
+          // Query database for unplayed Japanese recommendations
+          japaneseRecommendations = await prisma.$queryRaw`
+            SELECT "youtubeId", "seedTrackId", "relevanceScore", "isJapanese", "wasPlayed" 
+            FROM "YoutubeRecommendation" 
+            WHERE "isJapanese" = true AND "wasPlayed" = false
+            LIMIT ${this.YT_REC_FETCH_COUNT}
+          `;
+          
+          if (japaneseRecommendations.length > 0) {
+            console.log(`[DEBUG] prefetchAutoplayTracks: Found ${japaneseRecommendations.length} Japanese recommendations from database`);
+            
+            // Mark these recommendations as played
+            await prisma.$executeRaw`
+              UPDATE "YoutubeRecommendation" 
+              SET "wasPlayed" = true
+              WHERE "youtubeId" IN (${Prisma.join(japaneseRecommendations.map(rec => rec.youtubeId))})
+            `;
+            
+            // Add to tracks
+            tracksToAdd = [...tracksToAdd, ...japaneseRecommendations];
+          }
+        } catch (error) {
+          console.error('[DEBUG] prefetchAutoplayTracks: Error fetching Japanese recommendations:', error);
+        }
+        
+        // If we still need more tracks, use the regular pool
+        if (tracksToAdd.length < (this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length)) {
+          // Get recommendations from the pool
+          const ytRecommendations = this.youtubeRecommendationsPool.splice(0, 
+            this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length - tracksToAdd.length);
+          
+          // Mark these recommendations as played in the database
+          if (ytRecommendations.length > 0) {
+            try {
+              await prisma.$executeRaw`
+                UPDATE "YoutubeRecommendation" 
+                SET "wasPlayed" = true
+                WHERE "youtubeId" IN (${Prisma.join(ytRecommendations.map(rec => rec.youtubeId))})
+              `;
+            } catch (error) {
+              console.error('[ERROR] Failed to mark YouTube recommendations as played:', error);
+            }
+          }
+          
+          tracksToAdd = [...tracksToAdd, ...ytRecommendations];
+        }
       }
       
       if (tracksToAdd.length === 0) {
@@ -1992,7 +2103,7 @@ export class Player {
           const queueItem: QueueItem = {
             youtubeId: rec.youtubeId,
             title: info.title,
-            thumbnail: info.thumbnail,
+            thumbnail: getThumbnailUrl(rec.youtubeId),
             duration: info.duration,
             requestedBy: {
               userId: botUserId, // Use the verified bot user ID
@@ -2000,7 +2111,8 @@ export class Player {
               avatar: this.client.user?.avatar || undefined
             },
             requestedAt: new Date(),
-            isAutoplay: true
+            isAutoplay: true,
+            autoplaySource: rec.source as QueueItem['autoplaySource'] // Add source information
           };
           
           // Add to autoplay queue
@@ -2036,7 +2148,47 @@ export class Player {
     if (!playedTime) return false;
     
     const now = Date.now();
-    return (now - playedTime) < this.PLAYED_TRACKS_EXPIRY;
+    // Get cooldown from cache or use default
+    const cooldownPeriod = this.trackCooldownCache.get(youtubeId) || this.AUTOPLAY_TRACKS_EXPIRY;
+    return (now - playedTime) < cooldownPeriod;
+  }
+  
+  private async updateTrackCooldownCache(youtubeId: string): Promise<void> {
+    try {
+      // Get track from database to check its stats
+      const track = await prisma.track.findUnique({
+        where: { youtubeId },
+        select: { 
+          globalScore: true,
+          playCount: true,
+          skipCount: true
+        }
+      });
+      
+      if (!track) {
+        this.trackCooldownCache.set(youtubeId, this.AUTOPLAY_TRACKS_EXPIRY);
+        return;
+      }
+      
+      // Calculate skip ratio
+      const skipRatio = track.playCount > 0 ? track.skipCount / track.playCount : 0;
+      
+      // Determine tier based on global score and skip ratio
+      let cooldownPeriod: number;
+      if (track.globalScore > 8 && skipRatio < 0.2) {
+        cooldownPeriod = this.TOP_TIER_EXPIRY; // 6 hours for popular, rarely skipped songs
+      } else if (track.globalScore > 5 && skipRatio < 0.3) {
+        cooldownPeriod = this.MID_TIER_EXPIRY; // 8 hours for moderately popular songs
+      } else {
+        cooldownPeriod = this.LOW_TIER_EXPIRY; // 10 hours for less popular or frequently skipped songs
+      }
+      
+      // Update cache
+      this.trackCooldownCache.set(youtubeId, cooldownPeriod);
+    } catch (error) {
+      console.error('Error updating track cooldown period:', error);
+      this.trackCooldownCache.set(youtubeId, this.AUTOPLAY_TRACKS_EXPIRY); // Default to 5 hours on error
+    }
   }
 
   private async handleAutoplay(): Promise<void> {
@@ -2061,7 +2213,151 @@ export class Player {
   public isAutoplayEnabled(): boolean {
     return this.autoplayEnabled;
   }
-}
+
+  /**
+   * Periodically grows the YouTube recommendation database regardless of player activity
+   * This ensures we continuously expand our recommendation dataset
+   */
+  private startRecommendationGrowthService(): void {
+    // Initial delay before starting the service (5 minutes)
+    const initialDelay = 5 * 60 * 1000;
+    
+    // Run the service every 30 minutes
+    const interval: number = 30 * 60 * 1000;
+    
+    // Schedule the initial run after startup
+    setTimeout(() => {
+      console.log('[INFO] Starting recommendation growth service');
+      
+      // Refresh recommendations immediately
+      this.refreshYoutubeRecommendationsPool().catch(error => {
+        console.error('[ERROR] Failed to refresh YouTube recommendations:', error);
+      });
+      
+      // Then set up the interval for regular refreshes
+      setInterval(() => {
+        console.log('[INFO] Running scheduled recommendation refresh');
+        this.refreshYoutubeRecommendationsPool().catch(error => {
+          console.error('[ERROR] Failed to refresh YouTube recommendations:', error);
+        });
+      }, interval);
+    }, initialDelay);
+    
+    console.log(`[INFO] Recommendation growth service will start in ${initialDelay/1000} seconds`);
+  }
+
+  private async refreshCooldownCache(): Promise<void> {
+    try {
+      // Get all tracks that have been played recently
+      const recentTrackIds = Array.from(this.playedTracks.keys());
+      
+      if (recentTrackIds.length === 0) return;
+      
+      // Get track info from database for all recent tracks
+      const tracks = await prisma.track.findMany({
+        where: {
+          youtubeId: {
+            in: recentTrackIds
+          }
+        },
+        select: {
+          youtubeId: true,
+          globalScore: true,
+          playCount: true,
+          skipCount: true
+        }
+      });
+      
+      // Update cooldown cache for each track
+      for (const track of tracks) {
+        const skipRatio = track.playCount > 0 ? track.skipCount / track.playCount : 0;
+        
+        let cooldownPeriod: number;
+        // User tracks that are favorites get shorter cooldowns
+        if (track.globalScore > 8 && skipRatio < 0.2) {
+          cooldownPeriod = this.TOP_TIER_EXPIRY; // 6 hours for popular, rarely skipped songs
+        } else if (track.globalScore > 5 && skipRatio < 0.3) {
+          cooldownPeriod = this.MID_TIER_EXPIRY; // 8 hours for moderately popular songs
+        } else {
+          cooldownPeriod = this.LOW_TIER_EXPIRY; // 10 hours for less popular or frequently skipped songs
+        }
+        
+        // Update cache
+        this.trackCooldownCache.set(track.youtubeId, cooldownPeriod);
+      }
+      
+      console.log(`[INFO] Updated cooldown cache for ${tracks.length} tracks`);
+    } catch (error) {
+      console.error('[ERROR] Failed to refresh cooldown cache:', error);
+    }
+  }
+
+  // Add this method to check if a track meets duration criteria
+  private isValidTrackDuration(duration: number): boolean {
+    if (!duration) return false;
+    return duration >= this.MIN_DURATION && duration <= this.MAX_DURATION;
+  }
+
+  // Modify the method where you filter track durations
+  private async processYoutubeInfo(youtubeId: string, userId: string, isAutoplay: boolean = false): Promise<QueueItem | null> {
+    try {
+      // Get YouTube video information
+      const youtubeInfo = await getYoutubeInfo(youtubeId);
+      if (!youtubeInfo) {
+        console.error(`Failed to get YouTube info for ${youtubeId}`);
+        return null;
+      }
+      
+      // Check duration using our helper method
+      if (!this.isValidTrackDuration(youtubeInfo.duration)) {
+        console.log(`YouTube video has invalid duration: ${youtubeInfo.duration} seconds (min: ${this.MIN_DURATION}, max: ${this.MAX_DURATION})`);
+        return null;
+      }
+
+      // Auto-ban tracks with "Instrumental" in title
+      if (youtubeInfo.title.toLowerCase().includes('instrumental')) {
+        console.log(`Auto-banning instrumental track: ${youtubeInfo.title}`);
+        // Apply ban penalty
+        await prisma.$transaction([
+          // Update global track stats with a heavy penalty
+          prisma.$executeRaw`
+            UPDATE "Track"
+            SET "globalScore" = "Track"."globalScore" - 10,
+                "status" = 'BLOCKED'
+            WHERE "youtubeId" = ${youtubeId}
+          `,
+          // Also update all user stats for this track with a penalty
+          prisma.$executeRaw`
+            UPDATE "UserTrackStats"
+            SET "personalScore" = "UserTrackStats"."personalScore" - 5
+            WHERE "youtubeId" = ${youtubeId}
+          `
+        ]);
+        return null;
+      }
+      
+      // Create a queue item with the fetched information
+      const queueItem: QueueItem = {
+        youtubeId,
+        title: youtubeInfo.title,
+        thumbnail: youtubeInfo.thumbnail,
+        duration: youtubeInfo.duration,
+        requestedBy: {
+          userId,
+          username: 'User', // This should be updated with actual user info
+          avatar: undefined
+        },
+        requestedAt: new Date(),
+        isAutoplay
+      };
+      
+      return queueItem;
+    } catch (error) {
+      console.error(`Error processing YouTube info for ${youtubeId}:`, error);
+      return null;
+    }
+  }
+} // <-- Add this closing brace for the Player class
 
 // Helper function to extract YouTube ID from URL
 function extractYoutubeId(url: string): string | null {

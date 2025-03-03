@@ -129,9 +129,7 @@ export default function HistoryPage() {
             >
               <div className="relative h-16 w-16 flex-shrink-0">
                 <img
-                  src={track.thumbnail.startsWith('http') && !track.thumbnail.includes('/api/albumart/') 
-                    ? track.thumbnail 
-                    : getThumbnailUrl(track.youtubeId)}
+                  src={getThumbnailUrl(track.youtubeId)}
                   alt={track.title}
                   className="h-16 w-16 rounded-md object-cover filter-thumbnail"
                 />

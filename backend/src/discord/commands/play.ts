@@ -1,6 +1,7 @@
 import { ChatInputCommandInteraction, GuildMember } from 'discord.js';
 import { getYoutubeId } from '../../utils/youtube';
 import { AudioPlayerStatus } from '@discordjs/voice';
+import { getThumbnailUrl } from '../../utils/youtubeMusic.js';
 
 export async function play(interaction: ChatInputCommandInteraction) {
   try {
@@ -44,9 +45,7 @@ export async function play(interaction: ChatInputCommandInteraction) {
       );
 
       // Convert cached thumbnail path to YouTube URL if needed
-      const thumbnailUrl = track.thumbnail?.includes('/api/albumart/')
-        ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
-        : track.thumbnail || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+      const thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
       const queuePosition = track.queuePosition ? ` (#${track.queuePosition} in queue)` : '';
       const playingNext = track.willPlayNext ? ' - Playing next!' : '';

@@ -3,6 +3,7 @@ import { prisma } from '../db.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { RequestStatus } from '../types/enums.js';
 import type { PrismaClient } from '@prisma/client';
+import { getThumbnailUrl } from '../utils/youtubeMusic.js';
 
 const router = Router();
 
@@ -103,7 +104,13 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
         },
         include: {
           user: true,
-          track: true,
+          track: {
+            select: {
+              youtubeId: true,
+              title: true,
+              duration: true
+            }
+          }
         },
         take: limit,
         skip: offset,
@@ -116,7 +123,6 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       track: {
         youtubeId: string;
         title: string;
-        thumbnail: string;
         duration: number;
       };
       user: {
@@ -132,7 +138,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const formattedTracks = tracks.map((request: RequestWithDetails) => ({
       youtubeId: request.track.youtubeId,
       title: request.track.title,
-      thumbnail: request.track.thumbnail,
+      thumbnail: getThumbnailUrl(request.track.youtubeId),
       duration: request.track.duration,
       requestedBy: {
         id: request.user.id,

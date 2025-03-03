@@ -9,6 +9,7 @@ import {
 } from 'discord.js';
 import { searchYoutube } from '../../utils/youtube.js';
 import type { SearchResult } from '../../utils/types.js';
+import { getThumbnailUrl } from '../../utils/youtubeMusic.js';
 
 export async function search(interaction: ChatInputCommandInteraction) {
   try {
@@ -93,7 +94,7 @@ export async function search(interaction: ChatInputCommandInteraction) {
         content: `Added to queue: ${track.title}`,
         embeds: [{
           title: track.title,
-          thumbnail: { url: track.thumbnail },
+          thumbnail: { url: `https://i.ytimg.com/vi/${track.youtubeId}/hqdefault.jpg` },
           footer: { 
             text: `Requested by ${member.displayName}`,
             icon_url: member.user.displayAvatarURL()

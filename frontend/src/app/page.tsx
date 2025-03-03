@@ -242,7 +242,11 @@ export default function Home() {
 
         const data = await response.json();
         // Ensure we're getting the tracks array from the response
-        setHistory(Array.isArray(data) ? data : (data.tracks || []));
+        const historyData = Array.isArray(data) ? data : (data.tracks || []);
+        
+        // Filter out autoplay tracks from history
+        const filteredHistory = historyData.filter((track: { isAutoplay?: boolean }) => !track.isAutoplay);
+        setHistory(filteredHistory);
       } catch (error) {
         // Failed to fetch history
       }

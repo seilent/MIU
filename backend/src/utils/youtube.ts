@@ -1,14 +1,12 @@
-import { google } from 'googleapis';
-import { youtube_v3 } from 'googleapis';
+import { google, youtube_v3 } from 'googleapis';
 import path from 'path';
 import fs from 'fs';
 import { mkdir, access } from 'fs/promises';
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
 import ffmpeg from 'ffmpeg-static';
 import ffprobe from 'ffprobe-static';
 import ytDlp from 'yt-dlp-exec';
 import ytdl from 'ytdl-core';
-import { exec } from 'child_process';
 import { promisify } from 'util';
 import fetch from 'node-fetch';
 import { prisma } from '../db.js';
@@ -18,6 +16,12 @@ import { exec as execa } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import { Readable, Writable } from 'stream';
 import { getRootDir } from './env.js';
+import { Prisma } from '@prisma/client';
+import { downloadAndCacheThumbnail, getThumbnailUrl } from './youtubeMusic.js';
+import { MAX_DURATION, MIN_DURATION } from '../config.js';
+import { decodeHTML } from 'entities';
+import axios from 'axios';
+import { getKeyManager } from './YouTubeKeyManager.js';
 
 // Configure FFmpeg path
 if (ffmpeg && ffprobe) {
@@ -58,6 +62,7 @@ class YouTubeKeyManager {
     dailyCount: number;
     dailyResetTime: number;
     quotaExceeded: boolean;
+    quotaExceededOperations: Set<string>; // Track which operations have exceeded quota
     lastUsed: number;
   }>;
   private readonly RATE_LIMIT = 50; // Requests per minute per key
@@ -108,19 +113,30 @@ class YouTubeKeyManager {
     let validCount = 0;
     let invalidCount = 0;
     let quotaExceededCount = 0;
+    let partiallyAvailableCount = 0;
     
     // Use Promise.all to validate all keys in parallel
-    const validationPromises = this.keys.map(async (key) => {
-      // Skip validation if we already know the key is quota exceeded
+    const validationPromises = this.keys.map(async (key, index) => {
+      // Check if this key is already marked for any operations
       const usage = this.keyUsage.get(key);
+      const hasAnyQuotaExceeded = usage?.quotaExceededOperations.size ?? 0 > 0;
+      const keyPrefix = `[${index + 1}/${this.keys.length}] API key *****${key.slice(-5)}`;
+      
+      // If globally quota exceeded, log and skip validation
       if (usage?.quotaExceeded) {
-        console.log(`✗ API key *****${key.slice(-5)} is already marked as quota exceeded, skipping validation`);
+        console.log(`${keyPrefix} is globally quota exceeded, skipping validation`);
         quotaExceededCount++;
         return false;
       }
       
+      // If some operations are quota exceeded but not globally, still test it
+      if (hasAnyQuotaExceeded) {
+        console.log(`${keyPrefix} has quota exceeded for ${usage!.quotaExceededOperations.size} operations, testing search capability`);
+        partiallyAvailableCount++;
+      }
+      
       try {
-        // Try a simple API call to check if the key works and isn't rate limited
+        // Try a simple API call to check if the key works for search
         await youtube.search.list({
           key,
           part: ['id'],
@@ -128,24 +144,25 @@ class YouTubeKeyManager {
           maxResults: 1,
           type: ['video']
         });
-        console.log(`✓ API key *****${key.slice(-5)} is valid`);
+        
+        if (hasAnyQuotaExceeded) {
+          console.log(`✓ ${keyPrefix} is valid for search.list and partially available (some operations limited)`);
+        } else {
+          console.log(`✓ ${keyPrefix} is fully valid`);
+        }
+        
         validCount++;
         return true;
       } catch (error: any) {
         const reason = error?.errors?.[0]?.reason;
-        if (reason === 'quotaExceeded') {
-          console.log(`✗ API key *****${key.slice(-5)} is quota exceeded`);
-          this.markKeyAsQuotaExceeded(key);
-          quotaExceededCount++;
-          return false;
-        } else if (reason === 'dailyLimitExceeded') {
-          console.log(`✗ API key *****${key.slice(-5)} has reached daily limit`);
-          this.markKeyAsQuotaExceeded(key);
+        if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+          console.log(`✗ ${keyPrefix} quota exceeded for search.list (may still work for other operations)`);
+          this.markKeyAsQuotaExceeded(key, 'search.list');
           quotaExceededCount++;
           return false;
         } else {
-          console.log(`✗ API key *****${key.slice(-5)} is invalid:`, reason || 'Unknown error');
-          this.markKeyAsQuotaExceeded(key);
+          console.log(`✗ ${keyPrefix} is invalid: ${reason || 'Unknown error'}`);
+          this.markKeyAsQuotaExceeded(key, 'search.list');
           invalidCount++;
           return false;
         }
@@ -153,10 +170,22 @@ class YouTubeKeyManager {
     });
 
     await Promise.all(validationPromises);
-    console.log(`YouTube API key validation complete: ${validCount}/${this.keys.length} keys are valid (${quotaExceededCount} quota exceeded, ${invalidCount} invalid)`);
+    console.log(`YouTube API key validation complete: ${validCount}/${this.keys.length} keys are valid for search operations`);
+    
+    if (quotaExceededCount > 0) {
+      console.log(`- ${quotaExceededCount} keys exceeded quota for search.list but may still work for other operations`);
+    }
+    
+    if (partiallyAvailableCount > 0) {
+      console.log(`- ${partiallyAvailableCount} keys are partially available (some operations limited)`);
+    }
+    
+    if (invalidCount > 0) {
+      console.log(`- ${invalidCount} keys appear to be invalid`);
+    }
 
     if (validCount === 0) {
-      console.error('WARNING: All YouTube API keys are invalid or quota exceeded!');
+      console.warn('WARNING: No YouTube API keys are available for search operations!');
     }
   }
 
@@ -169,6 +198,7 @@ class YouTubeKeyManager {
         dailyCount: 0,
         dailyResetTime: now + this.DAILY_RESET,
         quotaExceeded: false,
+        quotaExceededOperations: new Set<string>(),
         lastUsed: 0
       });
     });
@@ -185,6 +215,7 @@ class YouTubeKeyManager {
         usage.dailyCount = 0;
         usage.dailyResetTime = now + this.DAILY_RESET;
         usage.quotaExceeded = false;
+        usage.quotaExceededOperations.clear();
       }
     });
   }
@@ -199,8 +230,8 @@ class YouTubeKeyManager {
       const key = this.keys[currentIndex];
       const usage = this.keyUsage.get(key)!;
 
-      // Skip if key is quota exceeded
-      if (usage.quotaExceeded) continue;
+      // Skip if key is quota exceeded for this specific operation
+      if (usage.quotaExceededOperations.has(operation) || usage.quotaExceeded) continue;
 
       // Reset counters if time has passed
       if (now >= usage.minuteResetTime) {
@@ -211,6 +242,7 @@ class YouTubeKeyManager {
         usage.dailyCount = 0;
         usage.dailyResetTime = now + this.DAILY_RESET;
         usage.quotaExceeded = false;
+        usage.quotaExceededOperations.clear();
       }
 
       // Check if key is usable
@@ -262,11 +294,20 @@ class YouTubeKeyManager {
     return this.keys[this.currentKeyIndex];
   }
 
-  public markKeyAsQuotaExceeded(key: string) {
+  public markKeyAsQuotaExceeded(key: string, operation: string = '') {
     const usage = this.keyUsage.get(key);
     if (usage) {
-      usage.quotaExceeded = true;
-      console.log(`YouTube API key *****${key.slice(-5)} quota exceeded, switching to next key`);
+      if (operation) {
+        usage.quotaExceededOperations.add(operation);
+        const operationCount = usage.quotaExceededOperations.size;
+        const totalOperations = Object.keys(this.QUOTA_COSTS).length;
+        
+        console.log(`YouTube API key *****${key.slice(-5)} quota exceeded specifically for '${operation}' operation`);
+        console.log(`This key is now limited for ${operationCount}/${totalOperations} operations but may still work for others`);
+      } else {
+        usage.quotaExceeded = true;
+        console.log(`YouTube API key *****${key.slice(-5)} completely quota exceeded for all operations`);
+      }
       this.currentKeyIndex = (this.currentKeyIndex + 1) % this.keys.length;
     }
   }
@@ -288,6 +329,26 @@ class YouTubeKeyManager {
       available,
       total: this.keys.length * this.RATE_LIMIT
     };
+  }
+
+  public async getAllKeys(): Promise<string[]> {
+    return this.keys;
+  }
+
+  public async getNextKey(operation: string): Promise<string | null> {
+    const bestKey = await this.findBestKey(operation);
+    if (bestKey) {
+      const usage = this.keyUsage.get(bestKey)!;
+      const quotaCost = this.QUOTA_COSTS[operation as keyof typeof this.QUOTA_COSTS] || 1;
+      usage.lastUsed = Date.now();
+      usage.minuteCount++;
+      usage.dailyCount += quotaCost;
+      return bestKey;
+    }
+
+    // If we've tried all keys and none are available, return null
+    console.log(`No available keys for operation ${operation} after trying all ${this.keys.length} keys`);
+    return null;
   }
 }
 
@@ -363,11 +424,24 @@ interface TrackInfo {
   duration: number;
 }
 
+/**
+ * Execute a YouTube API call with automatic retry on quota exceeded errors
+ * @param operationType The operation type (e.g., 'search.list', 'videos.list')
+ * @param apiCall Function that takes an API key and returns a Promise with the API call
+ * @returns Result of the API call
+ */
+export async function executeYoutubeApi<T>(operationType: string, apiCall: (key: string) => Promise<T>): Promise<T> {
+  try {
+    // Use the key manager's executeWithRetry method
+    return await getKeyManager().executeWithRetry(operationType, apiCall);
+  } catch (error: any) {
+    console.error(`YouTube API error for ${operationType}:`, error?.message || 'Unknown error');
+    throw error;
+  }
+}
+
 export async function searchYoutube(query: string): Promise<SearchResult[]> {
   try {
-    // First try YouTube API search
-    const apiKey = await getKeyManager().getCurrentKey('search.list');
-    
     // Construct search query
     let searchQuery = query;
     if (!/[一-龯ぁ-んァ-ン]/.test(query)) {
@@ -375,28 +449,33 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
       searchQuery = `${query} jpop japanese song`;
     }
 
-    const response = await youtube.search.list({
-      key: apiKey,
-      part: ['id', 'snippet'],
-      q: searchQuery,
-      type: ['video'],
-      maxResults: 10,
-      videoCategoryId: '10', // Music category
-      regionCode: 'JP', // Prioritize Japanese content
-      relevanceLanguage: 'ja', // Prefer Japanese results
-      fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
-    });
-
-    if (!response.data.items || response.data.items.length === 0) {
-      // Try again without region/language restrictions
-      const fallbackResponse = await youtube.search.list({
+    // Use the executeYoutubeApi helper for automatic retry
+    const response = await executeYoutubeApi('search.list', async (apiKey) => {
+      return youtube.search.list({
         key: apiKey,
         part: ['id', 'snippet'],
         q: searchQuery,
         type: ['video'],
         maxResults: 10,
-        videoCategoryId: '10',
+        videoCategoryId: '10', // Music category
+        regionCode: 'JP', // Prioritize Japanese content
+        relevanceLanguage: 'ja', // Prefer Japanese results
         fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
+      });
+    });
+
+    if (!response.data.items || response.data.items.length === 0) {
+      // Try again without region/language restrictions
+      const fallbackResponse = await executeYoutubeApi('search.list', async (apiKey) => {
+        return youtube.search.list({
+          key: apiKey,
+          part: ['id', 'snippet'],
+          q: searchQuery,
+          type: ['video'],
+          maxResults: 10,
+          videoCategoryId: '10',
+          fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
+        });
       });
       
       if (!fallbackResponse.data.items || fallbackResponse.data.items.length === 0) {
@@ -411,10 +490,12 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
       .map(item => item.id?.videoId)
       .filter((id): id is string => !!id);
 
-    const videoDetails = await youtube.videos.list({
-      key: apiKey,
-      part: ['contentDetails'],
-      id: videoIds
+    const videoDetails = await executeYoutubeApi('videos.list', async (apiKey) => {
+      return youtube.videos.list({
+        key: apiKey,
+        part: ['contentDetails'],
+        id: videoIds
+      });
     });
 
     const durationMap = new Map(
@@ -569,7 +650,7 @@ export async function getYoutubeId(query: string): Promise<{ videoId: string | u
           
           if (reason === 'quotaExceeded' && key) {
             console.log(`YouTube API quota exceeded for key *****${key.slice(-5)}`);
-            getKeyManager().markKeyAsQuotaExceeded(key);
+            getKeyManager().markKeyAsQuotaExceeded(key, 'search.list');
             retries--;
             if (retries > 0) continue;
           }
@@ -585,8 +666,8 @@ export async function getYoutubeId(query: string): Promise<{ videoId: string | u
   }
 }
 
-// Function to detect and remove black borders
-async function processImage(inputBuffer: Buffer): Promise<Buffer> {
+// Export the function for use in other modules
+export async function processImage(inputBuffer: Buffer): Promise<Buffer> {
   try {
     let image = sharp(inputBuffer);
     const { width, height } = await image.metadata();
@@ -642,83 +723,6 @@ async function processImage(inputBuffer: Buffer): Promise<Buffer> {
     } catch (fallbackError) {
       throw error;
     }
-  }
-}
-
-async function downloadAndCacheThumbnail(videoId: string, thumbnailUrl: string): Promise<void> {
-  try {
-    // Ensure cache directory exists
-    await mkdir(THUMBNAIL_CACHE_DIR, { recursive: true });
-    
-    // Define paths
-    const tempDownloadPath = path.join(THUMBNAIL_CACHE_DIR, `${videoId}.download.jpg`);
-    const tempProcessPath = path.join(THUMBNAIL_CACHE_DIR, `${videoId}.processing.jpg`);
-    const finalPath = path.join(THUMBNAIL_CACHE_DIR, `${videoId}.jpg`);
-    
-    // Download the image to temporary file
-    const response = await fetch(thumbnailUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download thumbnail. Status: ${response.status}`);
-    }
-    
-    const buffer = await response.arrayBuffer();
-    const imageBuffer = Buffer.from(buffer);
-
-    // Write the original image to temp download path
-    await fs.promises.writeFile(tempDownloadPath, imageBuffer);
-
-    // Process image
-    const processedImage = await processImage(imageBuffer);
-    
-    // Write processed image to temp processing path
-    await fs.promises.writeFile(tempProcessPath, processedImage);
-
-    // Get final image metadata
-    const metadata = await sharp(processedImage).metadata();
-
-    // Move the processed image to final location
-    try {
-      await fs.promises.unlink(finalPath);
-    } catch (error) {
-      // Ignore if file doesn't exist
-    }
-    await fs.promises.rename(tempProcessPath, finalPath);
-    
-    // Update database entry using upsert
-    await prisma.thumbnailCache.upsert({
-      where: { youtubeId: videoId },
-      update: {
-        filePath: finalPath,
-        width: metadata.width || 0,
-        height: metadata.height || 0
-      },
-      create: {
-        youtubeId: videoId,
-        filePath: finalPath,
-        width: metadata.width || 0,
-        height: metadata.height || 0
-      }
-    });
-
-    // Clean up temp download file
-    try {
-      await fs.promises.unlink(tempDownloadPath);
-    } catch (error) {
-      // Ignore cleanup errors
-    }
-  } catch (error) {
-    // Clean up any temp files on error
-    const tempDownloadPath = path.join(THUMBNAIL_CACHE_DIR, `${videoId}.download.jpg`);
-    const tempProcessPath = path.join(THUMBNAIL_CACHE_DIR, `${videoId}.processing.jpg`);
-    try {
-      await fs.promises.unlink(tempDownloadPath);
-    } catch (e) {}
-    try {
-      await fs.promises.unlink(tempProcessPath);
-    } catch (e) {}
-    
-    console.error('Error downloading thumbnail:', error);
-    throw error;
   }
 }
 
@@ -795,7 +799,7 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
 
       return {
         title: track.title,
-        thumbnail: track.thumbnail,
+        thumbnail: getThumbnailUrl(videoId),
         duration: track.duration
       };
     }
@@ -825,19 +829,24 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
                         video.snippet?.thumbnails?.default?.url ||
                         '';
 
-        // Cache the track info
+        // Download and cache the thumbnail
+        try {
+          await downloadAndCacheThumbnail(videoId, thumbnail);
+        } catch (error) {
+          console.error(`Failed to download thumbnail for ${videoId}:`, error);
+        }
+
+        // Cache the track info - remove thumbnail field
         await prisma.track.upsert({
           where: { youtubeId: videoId },
           update: {
             title,
-            thumbnail,
             duration,
             isMusicUrl
           },
           create: {
             youtubeId: videoId,
             title,
-            thumbnail,
             duration,
             isMusicUrl
           }
@@ -851,7 +860,7 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
           
           if (reason === 'quotaExceeded' && key) {
             console.log(`YouTube API quota exceeded for key *****${key.slice(-5)}`);
-            getKeyManager().markKeyAsQuotaExceeded(key);
+            getKeyManager().markKeyAsQuotaExceeded(key, 'videos.list');
             retries--;
             if (retries > 0) continue;
           }
@@ -1233,11 +1242,12 @@ export async function getAudioFileDuration(filePath: string): Promise<number> {
 export async function getYoutubeRecommendations(seedTrackId: string): Promise<Array<{ youtubeId: string }>> {
   try {
     // First verify if the seed track exists and is available
+    let seedTrackDetails: youtube_v3.Schema$Video | null = null;
     try {
       const apiKey = await getKeyManager().getCurrentKey('videos.list');
       const checkResponse = await youtube.videos.list({
         key: apiKey,
-        part: ['id'],
+        part: ['id', 'snippet', 'topicDetails'],
         id: [seedTrackId]
       });
 
@@ -1245,112 +1255,743 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
         console.error(`Seed track ${seedTrackId} is unavailable`);
         return [];
       }
+      
+      seedTrackDetails = checkResponse.data.items[0];
     } catch (error: any) {
       console.error(`Failed to verify seed track ${seedTrackId}:`, error?.errors?.[0]?.reason || 'Unknown error');
       return [];
     }
 
-    // Get API key for search
-    const apiKey = await getKeyManager().getCurrentKey('search.list');
+    // Check if we already have recommendations for this seed track in the database
+    const existingRecs: Array<{ youtubeId: string }> = await prisma.$queryRaw`
+      SELECT "youtubeId" FROM "YoutubeRecommendation"
+      WHERE "seedTrackId" = ${seedTrackId}
+    `;
+
+    // If we have enough recommendations in the database, use those
+    if (existingRecs.length >= 5) {
+      console.log(`Using ${existingRecs.length} existing recommendations for ${seedTrackId} from database`);
+      return existingRecs;
+    }
+
+    // Extract useful information from the seed track for better search
+    const videoTitle = seedTrackDetails!.snippet?.title || '';
+    const channelId = seedTrackDetails!.snippet?.channelId || '';
+    const channelTitle = seedTrackDetails!.snippet?.channelTitle || '';
+    const tags = seedTrackDetails!.snippet?.tags || [];
+    const topicCategories = seedTrackDetails!.topicDetails?.topicCategories || [];
     
-    // Use the YouTube API to get related videos
-    const response = await youtube.search.list({
-      key: apiKey,
-      part: ['id', 'snippet'],
-      q: `related:${seedTrackId}`,
-      type: ['video'],
-      maxResults: 25,
-      regionCode: 'JP',
-      relevanceLanguage: 'ja'
-    });
+    console.log(`Finding recommendations for: ${videoTitle} by ${channelTitle}`);
+    console.log(`Tags: ${tags.join(', ')}`);
+    console.log(`Topics: ${topicCategories.join(', ')}`);
     
-    if (!response.data?.items || response.data.items.length === 0) {
-      // Try again without region/language restrictions
-      const fallbackResponse = await youtube.search.list({
-        key: apiKey,
-        part: ['id', 'snippet'],
-        q: `related:${seedTrackId}`,
-        type: ['video'],
-        maxResults: 25
-      });
+    // Recommendations strategies in order of preference:
+    // 1. Same artist's other videos (from Topic channel or official channel)
+    // 2. Related artists from tags (searching for their Topic channels)
+    // 3. General search with genre tags + "official" or "Topic" filter
+    
+    let recommendations: Array<{ youtubeId: string }> = [];
+    const keyManager = getKeyManager();
+    
+    // Strategy 1: Get videos from the same artist
+    if (channelId && recommendations.length < 5) {
+      const sameArtistRecs = await getRecommendationsFromSameArtist(
+        seedTrackId,
+        channelId,
+        channelTitle
+      );
       
-      if (!fallbackResponse.data?.items || fallbackResponse.data.items.length === 0) {
-        return [];
+      if (sameArtistRecs.length > 0) {
+        recommendations = recommendations.concat(sameArtistRecs);
+        console.log(`Found ${sameArtistRecs.length} recommendations from same artist: ${channelTitle}`);
       }
-      
-      response.data.items = fallbackResponse.data.items;
     }
     
-    // Filter out videos with blocked keywords
-    const blockedKeywords = [
-      'cover', 'カバー',
-      '歌ってみた', 'うたってみた',
-      'vocaloid', 'ボーカロイド', 'ボカロ',
-      'hatsune', 'miku', '初音ミク',
-      'live', 'ライブ', 'concert', 'コンサート',
-      'remix', 'リミックス',
-      'acoustic', 'アコースティック',
-      'instrumental', 'インストゥルメンタル',
-      'karaoke', 'カラオケ',
-      'nightcore',
-      'kagamine', 'rin', 'len', '鏡音リン', '鏡音レン',
-      'luka', 'megurine', '巡音ルカ',
-      'kaito', 'kaiko', 'meiko', 'gumi', 'gackpo', 'ia',
-      'utau', 'utauloid', 'utaite',
-      'nico', 'niconico', 'ニコニコ'
-    ];
-    
-    const filteredItems = response.data.items?.filter(item => {
-      const title = (item.snippet?.title || '').toLowerCase();
-      return !blockedKeywords.some(keyword => title.includes(keyword.toLowerCase()));
-    }) || [];
-    
-    // Get video details for duration filtering and availability check
-    const videoIds = filteredItems
-      .map(item => item.id?.videoId)
-      .filter((id): id is string => !!id);
+    // Strategy 2: Get videos from related artists found in tags
+    if (tags.length > 0 && recommendations.length < 5) {
+      // Extract artist names from tags (usually these are Japanese names)
+      const artistTags = tags.filter(tag => 
+        // Filter for likely artist names (usually not English genre names)
+        !/^[a-zA-Z\s\-]+$/.test(tag) && 
+        // Exclude common genre keywords
+        !['jpop', 'j-pop', 'jrock', 'j-rock', 'vocaloid', 'anime'].includes(tag.toLowerCase())
+      );
       
-    if (videoIds.length === 0) {
+      if (artistTags.length > 0) {
+        console.log(`Searching for related artists from tags: ${artistTags.join(', ')}`);
+        
+        for (const artistTag of artistTags) {
+          if (recommendations.length >= 5) break;
+          
+          const relatedArtistRecs = await getRecommendationsFromRelatedArtist(
+            seedTrackId,
+            artistTag,
+            keyManager
+          );
+          
+          if (relatedArtistRecs.length > 0) {
+            recommendations = recommendations.concat(relatedArtistRecs.slice(0, 5 - recommendations.length));
+            console.log(`Found ${relatedArtistRecs.length} recommendations from related artist: ${artistTag}`);
+          }
+        }
+      }
+    }
+    
+    // Strategy 3: Get videos using genre tags with official/Topic filter
+    if (recommendations.length < 5) {
+      // Extract genre tags - these are usually English words like "J-Rock", "Pop", etc.
+      const genreTags = tags.filter(tag => 
+        /^[a-zA-Z\s\-]+$/.test(tag) || 
+        ['jpop', 'j-pop', 'jrock', 'j-rock', 'vocaloid', 'anime'].includes(tag.toLowerCase())
+      );
+      
+      if (genreTags.length > 0) {
+        console.log(`Searching for similar genre with tags: ${genreTags.join(', ')}`);
+        
+        const genreBasedRecs = await getRecommendationsFromGenre(
+          seedTrackId,
+          genreTags,
+          keyManager
+        );
+        
+        if (genreBasedRecs.length > 0) {
+          recommendations = recommendations.concat(genreBasedRecs.slice(0, 5 - recommendations.length));
+          console.log(`Found ${genreBasedRecs.length} recommendations from genre search`);
+        }
+      }
+    }
+    
+    // Store recommendations in the database
+    if (recommendations.length > 0) {
+      try {
+        // Filter recommendations by duration before storing
+        const validatedRecommendations = await validateRecommendationDurations(recommendations);
+        
+        if (validatedRecommendations.length === 0) {
+          console.log(`No recommendations with valid durations found for ${seedTrackId}`);
+          return existingRecs;
+        }
+        
+        const recommendationsToStore = validatedRecommendations.map(rec => ({
+          youtubeId: rec.youtubeId,
+          seedTrackId: seedTrackId,
+          relevanceScore: 0.9, // High relevance for official content
+          isJapanese: true, // Assuming Japanese content based on seed track
+          wasPlayed: false,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }));
+        
+        await prisma.$executeRaw`
+          INSERT INTO "YoutubeRecommendation" ("youtubeId", "seedTrackId", "relevanceScore", "isJapanese", "wasPlayed", "createdAt", "updatedAt")
+          VALUES ${Prisma.join(
+            recommendationsToStore.map(rec => 
+              Prisma.sql`(${rec.youtubeId}, ${rec.seedTrackId}, ${rec.relevanceScore || 0}, ${rec.isJapanese || false}, false, now(), now())`
+            )
+          )}
+          ON CONFLICT ("youtubeId") DO NOTHING
+        `;
+        
+        console.log(`Stored ${recommendationsToStore.length} new recommendations with valid durations for ${seedTrackId}`);
+        
+        return validatedRecommendations;
+      } catch (storeError) {
+        console.error('Error storing recommendations:', storeError);
+      }
+    }
+    
+    return recommendations.length > 0 ? recommendations : existingRecs;
+    
+  } catch (error) {
+    console.error('Error in getYoutubeRecommendations:', error);
+    return [];
+  }
+}
+
+/**
+ * Validate YouTube recommendations by checking their durations
+ * @param recommendations Array of recommendation objects with youtubeIds
+ * @returns Array of recommendations that have valid durations
+ */
+async function validateRecommendationDurations(
+  recommendations: Array<{ youtubeId: string }>
+): Promise<Array<{ youtubeId: string }>> {
+  const validatedRecommendations: Array<{ youtubeId: string }> = [];
+  
+  // Get all the YouTube IDs
+  const youtubeIds = recommendations.map(rec => rec.youtubeId);
+  if (youtubeIds.length === 0) return [];
+  
+  try {
+    // Check for durations of these videos in our database first
+    const existingTracks = await prisma.track.findMany({
+      where: {
+        youtubeId: { in: youtubeIds }
+      },
+      select: {
+        youtubeId: true,
+        duration: true
+      }
+    });
+    
+    // Create a map of existing tracks for quick lookup
+    const existingTracksMap = new Map(
+      existingTracks.map(track => [track.youtubeId, track.duration])
+    );
+    
+    // Filter out the IDs we already have duration information for
+    const validExistingIds = existingTracks
+      .filter(track => isValidDuration(track.duration))
+      .map(track => track.youtubeId);
+    
+    // Add valid existing tracks to our result
+    validExistingIds.forEach(id => {
+      validatedRecommendations.push({ youtubeId: id });
+    });
+    
+    // Find IDs we need to fetch from YouTube API
+    const idsToFetch = youtubeIds.filter(id => !existingTracksMap.has(id));
+    
+    if (idsToFetch.length > 0) {
+      const keyManager = getKeyManager();
+      const apiKey = await keyManager.getCurrentKey('videos.list');
+      
+      // Fetch videos in chunks to avoid exceeding API limits
+      const chunkSize = 50; // YouTube API allows up to 50 IDs per request
+      for (let i = 0; i < idsToFetch.length; i += chunkSize) {
+        const chunk = idsToFetch.slice(i, i + chunkSize);
+        
+        try {
+          const response = await youtube.videos.list({
+            key: apiKey,
+            part: ['contentDetails', 'snippet'],
+            id: chunk
+          });
+          
+          if (response.data.items && response.data.items.length > 0) {
+            // Process each video's duration
+            for (const video of response.data.items) {
+              const videoId = video.id as string;
+              const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
+              const title = video.snippet?.title || 'Unknown';
+              
+              // Store in database for future reference
+              await prisma.track.upsert({
+                where: { youtubeId: videoId },
+                update: {
+                  title,
+                  duration
+                },
+                create: {
+                  youtubeId: videoId,
+                  title,
+                  duration,
+                  isMusicUrl: false
+                }
+              });
+              
+              if (isValidDuration(duration)) {
+                console.log(`Video ${videoId} (${title}) has valid duration: ${duration} seconds`);
+                validatedRecommendations.push({ youtubeId: videoId });
+              } else {
+                console.log(`Video ${videoId} (${title}) has invalid duration: ${duration} seconds (min: ${MIN_DURATION}, max: ${MAX_DURATION})`);
+              }
+            }
+          }
+        } catch (error: any) {
+          console.error(`Error fetching video details: ${error?.message || error}`);
+          
+          if (error?.errors?.[0]?.reason === 'quotaExceeded') {
+            keyManager.markKeyAsQuotaExceeded(apiKey, 'videos.list');
+            // Try with a different key in the next chunk
+          }
+        }
+      }
+    }
+    
+    return validatedRecommendations;
+    
+  } catch (error) {
+    console.error('Error validating recommendation durations:', error);
+    return [];
+  }
+}
+
+/**
+ * Check if a duration is valid according to MIN_DURATION and MAX_DURATION
+ */
+function isValidDuration(duration: number): boolean {
+  if (!duration) return false;
+  return duration >= MIN_DURATION && duration <= MAX_DURATION;
+}
+
+/**
+ * Get recommendations from the same artist's channel
+ */
+async function getRecommendationsFromSameArtist(
+  seedTrackId: string,
+  channelId: string,
+  channelTitle: string
+): Promise<Array<{ youtubeId: string }>> {
+  try {
+    console.log(`Getting recommendations from channel ${channelTitle} (${channelId})`);
+    
+    // Search for videos from the same channel using the executeYoutubeApi helper
+    const searchResponse = await executeYoutubeApi('search.list', async (apiKey) => {
+      return youtube.search.list({
+        key: apiKey,
+        part: ['id', 'snippet'],
+        channelId: channelId,
+        type: ['video'],
+        videoCategoryId: '10', // Music category
+        maxResults: 20
+      });
+    });
+    
+    if (!searchResponse?.data?.items || searchResponse.data.items.length === 0) {
+      console.log(`No videos found from channel ${channelTitle}`);
       return [];
     }
     
-    // Verify videos are available and check duration
-    const videoDetails = await youtube.videos.list({
-      key: apiKey,
-      part: ['contentDetails', 'status'],
-      id: videoIds
-    });
+    console.log(`Found ${searchResponse.data.items.length} videos from channel ${channelTitle}`);
     
-    // Filter by duration and availability
-    const MAX_DURATION = 420; // 7 minutes
+    // Filter out the current video
+    const filteredItems = searchResponse.data.items.filter(item => 
+      item.id?.videoId !== seedTrackId
+    );
     
-    const validVideos = videoDetails.data?.items?.filter(video => {
-      // Check if video is available
-      if (!video.status?.uploadStatus || video.status.uploadStatus !== 'processed' || 
-          !video.status?.privacyStatus || video.status.privacyStatus !== 'public') {
-        return false;
-      }
-
-      // Check duration
-      const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
-      return duration > 0 && duration <= MAX_DURATION;
-    }) || [];
+    // Filter out videos with blocked keywords
+    const contentFiltered = filterBlockedContent(filteredItems);
     
-    const validIds = new Set(validVideos.map(video => video.id));
-    
-    // Map to the required format, ensuring no duplicates
-    const uniqueIds = [...new Set(filteredItems
-      .filter(item => item.id?.videoId && validIds.has(item.id.videoId))
-      .map(item => item.id!.videoId!))];
-
-    const recommendations = uniqueIds.map(id => ({ youtubeId: id }));
-    
-    if (recommendations.length > 0) {
-      console.log(`Found ${recommendations.length} valid recommendations for ${seedTrackId}`);
+    if (contentFiltered.length === 0) {
+      console.log(`No valid results found from channel ${channelTitle} after filtering`);
+      return [];
     }
-    return recommendations;
+    
+    // Map to the required format and return
+    return contentFiltered.map(item => ({ 
+      youtubeId: item.id?.videoId || '' 
+    })).filter(rec => rec.youtubeId !== '');
+    
   } catch (error: any) {
-    console.error('Failed to get recommendations:', error?.errors?.[0]?.reason || 'Unknown error');
+    console.error(`Error getting recommendations from channel ${channelTitle}:`, error?.message || 'Unknown error');
     return [];
+  }
+}
+
+/**
+ * Get recommendations from a related artist found in tags
+ */
+async function getRecommendationsFromRelatedArtist(
+  seedTrackId: string,
+  artistName: string,
+  keyManager: YouTubeKeyManager
+): Promise<Array<{ youtubeId: string }>> {
+  try {
+    // Try all available API keys for search until we find one that works
+    const allApiKeys = await keyManager.getAllKeys();
+    
+    let attemptsCount = 0;
+    const maxAttempts = allApiKeys.length;
+    
+    while (attemptsCount < maxAttempts) {
+      let currentApiKey: string | null = null;
+      
+      try {
+        // Get next API key for search
+        currentApiKey = await keyManager.getNextKey('search.list');
+        if (!currentApiKey) {
+          console.error('No available API keys for YouTube search');
+          break;
+        }
+        
+        console.log(`Searching for artist "${artistName}" with API key ${currentApiKey.slice(-5)} (attempt ${attemptsCount + 1}/${maxAttempts})`);
+        
+        // First try to find the artist's Topic channel
+        const artistSearchTerm = `${artistName} "Topic"`;
+        const artistSearchResponse = await youtube.search.list({
+          key: currentApiKey,
+          part: ['id', 'snippet'],
+          q: artistSearchTerm,
+          type: ['channel'],
+          maxResults: 3
+        });
+        
+        // Look for Topic channels first
+        const topicChannels = artistSearchResponse.data.items?.filter(item => 
+          item.snippet?.channelTitle?.includes('Topic') || 
+          item.snippet?.title?.includes('Topic')
+        ) || [];
+        
+        // If no Topic channel found, look for official channels
+        const officialChannels = topicChannels.length > 0 ? [] : (
+          artistSearchResponse.data.items?.filter(item =>
+            item.snippet?.channelTitle?.includes('Official') ||
+            item.snippet?.channelTitle?.includes('official') ||
+            item.snippet?.title?.includes('Official') ||
+            item.snippet?.title?.includes('official')
+          ) || []
+        );
+        
+        const artistChannels = topicChannels.length > 0 ? topicChannels : officialChannels;
+        
+        if (artistChannels.length > 0) {
+          const artistChannelId = artistChannels[0].id?.channelId;
+          const artistChannelTitle = artistChannels[0].snippet?.title || '';
+          
+          console.log(`Found artist channel: ${artistChannelTitle} (${artistChannelId})`);
+          
+          // Now search for videos from this artist's channel
+          const videosResponse = await youtube.search.list({
+            key: currentApiKey,
+            part: ['id', 'snippet'],
+            channelId: artistChannelId,
+            type: ['video'],
+            videoCategoryId: '10', // Music category
+            maxResults: 10
+          });
+          
+          if (videosResponse.data.items && videosResponse.data.items.length > 0) {
+            console.log(`Found ${videosResponse.data.items.length} videos from artist ${artistName}`);
+            
+            // Filter out videos with blocked keywords
+            const contentFiltered = filterBlockedContent(videosResponse.data.items);
+            
+            if (contentFiltered.length > 0) {
+              // Map to the required format and return
+              return contentFiltered.map(item => ({ 
+                youtubeId: item.id?.videoId || '' 
+              })).filter(rec => rec.youtubeId !== '');
+            }
+          }
+        } else {
+          // If we couldn't find a proper channel, try direct search for the artist's videos
+          console.log(`No artist channel found for ${artistName}, trying direct video search`);
+          
+          const videoSearchTerm = `${artistName} "official" OR "Topic" OR "MV"`;
+          const directSearchResponse = await youtube.search.list({
+            key: currentApiKey,
+            part: ['id', 'snippet'],
+            q: videoSearchTerm,
+            type: ['video'],
+            videoCategoryId: '10', // Music category
+            regionCode: 'JP',
+            relevanceLanguage: 'ja',
+            maxResults: 10
+          });
+          
+          if (directSearchResponse.data.items && directSearchResponse.data.items.length > 0) {
+            console.log(`Found ${directSearchResponse.data.items.length} videos directly for artist ${artistName}`);
+            
+            // Filter out videos with blocked keywords
+            const contentFiltered = filterBlockedContent(directSearchResponse.data.items);
+            
+            if (contentFiltered.length > 0) {
+              // Map to the required format and return
+              return contentFiltered.map(item => ({ 
+                youtubeId: item.id?.videoId || '' 
+              })).filter(rec => rec.youtubeId !== '');
+            }
+          }
+        }
+        
+        // If we couldn't get results, try next key
+        console.log(`No valid results found for artist ${artistName}, trying next key`);
+        attemptsCount++;
+        
+      } catch (error: any) {
+        const reason = error?.errors?.[0]?.reason;
+        if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+          console.log(`API key ${currentApiKey?.slice(-5)} exceeded quota for 'search.list' operation (${reason}), marking as limited and trying next key`);
+          if (currentApiKey) {
+            keyManager.markKeyAsQuotaExceeded(currentApiKey, 'search.list');
+          }
+        } else {
+          // Other error, not quota related
+          console.error(`YouTube API error for key ${currentApiKey?.slice(-5)}: ${reason || 'Unknown error'}`);
+        }
+        // Increment attempt count to avoid getting stuck
+        attemptsCount++;
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('Error in getRecommendationsFromRelatedArtist:', error);
+    return [];
+  }
+}
+
+/**
+ * Get recommendations based on genre tags
+ */
+async function getRecommendationsFromGenre(
+  seedTrackId: string,
+  genreTags: string[],
+  keyManager: YouTubeKeyManager
+): Promise<Array<{ youtubeId: string }>> {
+  try {
+    // Try all available API keys for search until we find one that works
+    const allApiKeys = await keyManager.getAllKeys();
+    
+    let attemptsCount = 0;
+    const maxAttempts = allApiKeys.length;
+    
+    while (attemptsCount < maxAttempts) {
+      let currentApiKey: string | null = null;
+      
+      try {
+        // Get next API key for search
+        currentApiKey = await keyManager.getNextKey('search.list');
+        if (!currentApiKey) {
+          console.error('No available API keys for YouTube search');
+          break;
+        }
+        
+        // Construct a search query using genre tags + official/Topic
+        const searchQuery = `(${genreTags.join(' OR ')}) ("Official" OR "official" OR "Topic")`;
+        
+        console.log(`Searching for genre with query: ${searchQuery} (attempt ${attemptsCount + 1}/${maxAttempts})`);
+        
+        const searchResponse = await youtube.search.list({
+          key: currentApiKey,
+          part: ['id', 'snippet'],
+          q: searchQuery,
+          type: ['video'],
+          videoCategoryId: '10', // Music category
+          regionCode: 'JP',
+          relevanceLanguage: 'ja',
+          maxResults: 15
+        });
+        
+        if (searchResponse.data.items && searchResponse.data.items.length > 0) {
+          console.log(`Found ${searchResponse.data.items.length} videos from genre search`);
+          
+          // Filter out the current video
+          const filteredItems = searchResponse.data.items.filter(item => 
+            item.id?.videoId !== seedTrackId
+          );
+          
+          // Further filter results to official content only
+          const officialItems = filteredItems.filter(item => {
+            const channelTitle = item.snippet?.channelTitle || '';
+            const videoTitle = item.snippet?.title || '';
+            
+            return (
+              // Topic channels are automatically generated by YouTube Music
+              channelTitle.includes('Topic') ||
+              // Official channels often include "official" in the name
+              channelTitle.includes('Official') ||
+              channelTitle.includes('official') ||
+              // Videos with "Official" in the title are likely official releases
+              videoTitle.includes('Official') ||
+              videoTitle.includes('official') ||
+              // Videos marked as MV (Music Video) are often official
+              videoTitle.includes('MV') ||
+              videoTitle.includes('M/V') ||
+              // Japanese official videos often include (Official Video) in title
+              videoTitle.includes('(Official Video)') ||
+              videoTitle.includes('【Official】')
+            );
+          });
+          
+          // Filter out videos with blocked keywords
+          const contentFiltered = filterBlockedContent(officialItems);
+          
+          if (contentFiltered.length > 0) {
+            // Map to the required format and return
+            return contentFiltered.map(item => ({ 
+              youtubeId: item.id?.videoId || '' 
+            })).filter(rec => rec.youtubeId !== '');
+          }
+        }
+        
+        // If we couldn't get results, try next key
+        console.log(`No valid results found for genre search, trying next key`);
+        attemptsCount++;
+        
+      } catch (error: any) {
+        const reason = error?.errors?.[0]?.reason;
+        if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+          console.log(`API key ${currentApiKey?.slice(-5)} exceeded quota for 'search.list' operation (${reason}), marking as limited and trying next key`);
+          if (currentApiKey) {
+            keyManager.markKeyAsQuotaExceeded(currentApiKey, 'search.list');
+          }
+        }
+        // Increment attempt count to avoid getting stuck
+        attemptsCount++;
+      }
+    }
+    
+    return [];
+  } catch (error) {
+    console.error('Error in getRecommendationsFromGenre:', error);
+    return [];
+  }
+}
+
+/**
+ * Filter out videos with blocked keywords
+ */
+function filterBlockedContent(items: youtube_v3.Schema$SearchResult[]): youtube_v3.Schema$SearchResult[] {
+  const blockedKeywords = [
+    'cover', 'カバー',
+    '歌ってみた', 'うたってみた',
+    'vocaloid', 'ボーカロイド', 'ボカロ',
+    'hatsune', 'miku', '初音ミク',
+    'live', 'ライブ', 'concert', 'コンサート',
+    'remix', 'リミックス',
+    'acoustic', 'アコースティック',
+    'instrumental', 'インストゥルメンタル',
+    'karaoke', 'カラオケ',
+    'nightcore',
+    'kagamine', 'rin', 'len', '鏡音リン', '鏡音レン',
+    'luka', 'megurine', '巡音ルカ',
+    'kaito', 'kaiko', 'meiko', 'gumi', 'gackpo', 'ia',
+    'utau', 'utauloid', 'utaite',
+    'nico', 'niconico', 'ニコニコ',
+    'short', 'shorts', 'ショート', 'tiktok', 'tik tok', 'reels',
+    'mv reaction', 'reaction', 'リアクション',
+    'tutorial', 'lesson', 'how to', 'music theory',
+    'guitar', 'drum', 'piano', 'tabs', 'off vocal',
+    'ギター', 'ドラム', 'ピアノ', 'オフボーカル'
+  ];
+  
+  return items.filter(item => {
+    const title = (item.snippet?.title || '').toLowerCase();
+    const channelTitle = (item.snippet?.channelTitle || '').toLowerCase();
+    
+    // Check for blocked keywords in both title and channel name
+    return !blockedKeywords.some(keyword => 
+      title.includes(keyword.toLowerCase()) || 
+      channelTitle.includes(keyword.toLowerCase())
+    );
+  });
+}
+
+/**
+ * Refresh the YouTube recommendations pool in the database
+ * This is a background job that runs periodically to ensure we have recommendations
+ */
+export async function refreshYoutubeRecommendationsPool(): Promise<void> {
+  try {
+    // Get seed tracks that have fewer than MIN_RECOMMENDATIONS recommendations
+    const MIN_RECOMMENDATIONS = 5;
+    
+    // Find tracks with insufficient recommendations
+    const tracksNeedingRecommendations = await prisma.$queryRaw<Array<{ youtubeId: string, recommendationCount: number }>>`
+      SELECT t."youtubeId", COUNT(r."youtubeId") as "recommendationCount"
+      FROM "Track" t
+      LEFT JOIN "YoutubeRecommendation" r ON t."youtubeId" = r."seedTrackId"
+      GROUP BY t."youtubeId"
+      HAVING COUNT(r."youtubeId") < ${MIN_RECOMMENDATIONS}
+      ORDER BY "recommendationCount" ASC
+      LIMIT 10
+    `;
+    
+    if (tracksNeedingRecommendations.length === 0) {
+      console.log('No tracks need recommendations at this time');
+      return;
+    }
+    
+    console.log(`Found ${tracksNeedingRecommendations.length} tracks needing recommendations`);
+    
+    // Process each track with a delay between requests to avoid rate limiting
+    for (const trackInfo of tracksNeedingRecommendations) {
+      try {
+        console.log(`Fetching recommendations for ${trackInfo.youtubeId} (current count: ${trackInfo.recommendationCount})`);
+        
+        const recommendations = await getYoutubeRecommendations(trackInfo.youtubeId);
+        console.log(`Got ${recommendations.length} recommendations for ${trackInfo.youtubeId}`);
+        
+        // Introduce delay between API calls to reduce quota usage
+        if (trackInfo !== tracksNeedingRecommendations[tracksNeedingRecommendations.length - 1]) {
+          const delayTime = 2000 + Math.random() * 3000; // 2-5 second random delay
+          await new Promise(resolve => setTimeout(resolve, delayTime));
+        }
+      } catch (error) {
+        console.error(`Error getting recommendations for ${trackInfo.youtubeId}:`, error);
+        // Continue with next track despite error
+      }
+    }
+    
+    console.log('Finished refreshing YouTube recommendations pool');
+  } catch (error) {
+    console.error('Error in refreshYoutubeRecommendationsPool:', error);
+  }
+}
+
+export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
+  try {
+    if (!videoId) {
+      console.error('No video ID provided');
+      return null;
+    }
+
+    // Check cache first
+    let trackInfo = await prisma.track.findUnique({
+      where: { youtubeId: videoId }
+    });
+
+    if (trackInfo && trackInfo.title) {
+      // Update last accessed time
+      await prisma.track.update({
+        where: { youtubeId: videoId },
+        data: { updatedAt: new Date() }
+      });
+
+      return {
+        videoId: trackInfo.youtubeId,
+        title: trackInfo.title,
+        duration: trackInfo.duration,
+        thumbnail: trackInfo.thumbnail
+      };
+    }
+
+    // Use YouTube API to get video details
+    const videoDetails = await executeYoutubeApi('videos.list', async (apiKey) => {
+      return youtube.videos.list({
+        key: apiKey,
+        part: ['snippet', 'contentDetails'],
+        id: [videoId]
+      });
+    });
+
+    if (!videoDetails.data.items || videoDetails.data.items.length === 0) {
+      console.error(`No video details found for ID: ${videoId}`);
+      return null;
+    }
+
+    const video = videoDetails.data.items[0];
+    const title = video.snippet?.title || '';
+    const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
+    const thumbnailUrl = getBestThumbnail(videoId, video.snippet?.thumbnails);
+
+    // Save to database for future cache hits
+    await prisma.track.upsert({
+      where: { youtubeId: videoId },
+      update: {
+        title,
+        duration,
+        thumbnail: thumbnailUrl,
+        updatedAt: new Date()
+      },
+      create: {
+        youtubeId: videoId,
+        title,
+        duration,
+        thumbnail: thumbnailUrl
+      }
+    });
+
+    return {
+      videoId,
+      title,
+      duration,
+      thumbnail: thumbnailUrl
+    };
+  } catch (error) {
+    console.error(`Error getting video info for ${videoId}:`, error);
+    return null;
   }
 } 

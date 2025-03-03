@@ -17,7 +17,7 @@ export interface User {
 export interface Track {
   youtubeId: string;
   title: string;
-  thumbnail: string;
+  thumbnail?: string;
   duration: number;
 }
 
@@ -36,7 +36,7 @@ export interface Request {
 export interface QueueItem {
   youtubeId: string;
   title: string;
-  thumbnail: string;
+  thumbnail?: string;
   duration: number;
   requestedBy: {
     id: string;
@@ -45,6 +45,7 @@ export interface QueueItem {
   };
   requestedAt: string;
   isAutoplay?: boolean;
+  autoplaySource?: 'Pool: Playlist' | 'Pool: History' | 'Pool: Popular' | 'Pool: YouTube Mix' | 'Pool: Random';
 }
 
 export interface PlayerState {

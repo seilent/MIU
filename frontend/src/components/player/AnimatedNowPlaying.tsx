@@ -6,7 +6,17 @@ import { PlayerControls } from '@/components/player/PlayerControls';
 import env from '@/utils/env';
 
 interface AnimatedNowPlayingProps {
-  track: any;
+  track: {
+    youtubeId: string;
+    title: string;
+    thumbnail?: string;
+    duration: number;
+    requestedBy?: {
+      id: string;
+      username: string;
+      avatar?: string;
+    };
+  };
   isPlaying: boolean;
   onPlayPause: () => void;
 }
@@ -35,11 +45,9 @@ export function AnimatedNowPlaying({
         whileTap={{ scale: 0.98 }}
       >
         <Image
-          src={track.thumbnail.startsWith('http') 
-            ? track.thumbnail 
-            : env.apiUrl 
-              ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
-              : `/api/albumart/${track.youtubeId}`}
+          src={env.apiUrl 
+            ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
+            : `/api/albumart/${track.youtubeId}`}
           alt={track.title}
           fill
           className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
@@ -89,8 +97,8 @@ export function AnimatedNowPlaying({
         <h2 className="text-xl md:text-2xl font-bold text-white/90 mb-2">{track.title}</h2>
         <div className="flex items-center space-x-2 text-sm">
           <span className="text-white/40">Requested by</span>
-          <span className="text-white/60">{track.requestedBy.username}</span>
-          {track.requestedBy.avatar && (
+          <span className="text-white/60">{track.requestedBy?.username}</span>
+          {track.requestedBy?.avatar && (
             <img
               key={`${track.requestedBy.id}-${track.requestedBy.avatar}`}
               src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}

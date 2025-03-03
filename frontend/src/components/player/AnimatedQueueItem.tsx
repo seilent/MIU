@@ -8,13 +8,14 @@ interface AnimatedQueueItemProps {
   track: {
     youtubeId: string;
     title: string;
-    thumbnail: string;
+    thumbnail?: string;
     requestedBy: {
       username: string;
       id: string;
       avatar?: string;
     };
     isAutoplay?: boolean;
+    autoplaySource?: 'Pool: Playlist' | 'Pool: History' | 'Pool: Popular' | 'Pool: YouTube Mix' | 'Pool: Random';
   };
   position: number;
   showPosition?: boolean;
@@ -83,19 +84,22 @@ export function AnimatedQueueItem({
       {/* Track thumbnail */}
       <div className="relative h-16 w-16 flex-shrink-0">
         <Image
-          src={track.thumbnail.startsWith('http') 
-            ? track.thumbnail 
-            : env.apiUrl 
-              ? `${env.apiUrl}/api/albumart/${track.youtubeId}?square=1`
-              : `/api/albumart/${track.youtubeId}?square=1`}
+          src={env.apiUrl 
+            ? `${env.apiUrl}/api/albumart/${track.youtubeId}?square=1`
+            : `/api/albumart/${track.youtubeId}?square=1`}
           alt={track.title}
           fill
           className="object-cover rounded-md filter-thumbnail"
-          unoptimized={track.thumbnail.startsWith('http')}
+          unoptimized={false}
         />
         {track.isAutoplay && (
-          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90">
-            Auto
+          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90 flex items-center space-x-1">
+            <span>Auto</span>
+            {track.autoplaySource && (
+              <span className="text-white/70 text-[10px]">
+                • {track.autoplaySource.replace('Pool: ', '')}
+              </span>
+            )}
           </div>
         )}
       </div>

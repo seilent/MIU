@@ -5,6 +5,7 @@ import { HTTPError } from '../middleware/error';
 import { prisma } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { Cache } from '../utils/cache';
+import { getPlayer } from '../discord/player.js';
 
 const router = Router();
 
@@ -366,6 +367,99 @@ router.get('/stats', async (req: Request, res: Response, next: NextFunction) => 
     };
 
     res.json(response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/recommendations/refresh:
+ *   post:
+ *     summary: Force refresh of YouTube recommendations pool
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Recommendations pool refreshed successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.post('/recommendations/refresh', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const player = getPlayer();
+    
+    // Check if player has the method (it should be public now)
+    if (typeof player.refreshYoutubeRecommendationsPool !== 'function') {
+      throw new HTTPError(500, 'Refresh method not available on player instance');
+    }
+    
+    // Call the method
+    await player.refreshYoutubeRecommendationsPool();
+    
+    return res.json({ 
+      success: true, 
+      message: 'YouTube recommendations pool refresh triggered successfully' 
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/recommendations/test:
+ *   post:
+ *     summary: Test YouTube recommendations with a specific video ID
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               videoId:
+ *                 type: string
+ *                 description: YouTube video ID to test recommendations for
+ *             required:
+ *               - videoId
+ *     responses:
+ *       200:
+ *         description: Recommendations retrieved successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.post('/recommendations/test', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Extract videoId from request body
+    const { videoId } = req.body;
+    
+    if (!videoId || typeof videoId !== 'string') {
+      throw new HTTPError(400, 'Valid videoId is required');
+    }
+    
+    console.log(`Testing YouTube recommendations for video ID: ${videoId}`);
+    
+    // Import the YouTube utilities
+    const { getYoutubeRecommendations } = await import('../utils/youtube');
+    
+    // Get recommendations
+    const recommendations = await getYoutubeRecommendations(videoId);
+    
+    return res.json({
+      success: true,
+      videoId,
+      count: recommendations.length,
+      recommendations
+    });
   } catch (error) {
     next(error);
   }

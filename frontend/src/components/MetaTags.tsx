@@ -51,13 +51,14 @@ export function MetaTags() {
 
     // Add timestamp to thumbnail URL to bypass Discord's cache
     const timestamp = Date.now();
-    let thumbnailUrl = currentTrack.thumbnail;
-    
-    // Use the OG image API for thumbnail to ensure proper formating
+    let thumbnailUrl = '';
+
+    // Use the OG image API for thumbnail to ensure proper formatting
     if (APP_URL) {
       thumbnailUrl = `${APP_URL}/api/og?t=${timestamp}`;
-    } else {
-      thumbnailUrl = `${thumbnailUrl}?t=${timestamp}`;
+    } else if (currentTrack.youtubeId) {
+      // Fallback to direct albumart API
+      thumbnailUrl = `${API_BASE_URL}/api/albumart/${currentTrack.youtubeId}?t=${timestamp}`;
     }
 
     document.title = `Now Playing: ${currentTrack.title}`;

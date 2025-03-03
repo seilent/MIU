@@ -54,7 +54,6 @@ model Track {
   isMusicUrl    Boolean   @default(false)
   resolvedYtId  String?
   title         String
-  thumbnail     String
   duration      Int
   globalScore   Float     @default(0)
   playCount     Int       @default(0)
@@ -166,4 +165,17 @@ model WebPresence {
   userId      String   @id // Discord user ID
   lastSeen    DateTime @default(now())
   user        User     @relation(fields: [userId], references: [id])
+}
+
+model YoutubeRecommendation {
+  youtubeId    String    @id
+  seedTrackId  String
+  relevanceScore Float    @default(0)
+  isJapanese   Boolean   @default(false)
+  wasPlayed    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([seedTrackId])
+  @@index([isJapanese])
 }

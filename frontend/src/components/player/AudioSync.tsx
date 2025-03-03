@@ -830,11 +830,9 @@ export default function AudioSync() {
       };
       
       // Load the image to trigger onload - use the same originalYoutubeId for consistency
-      img.src = currentTrack.thumbnail.startsWith('http') 
-        ? currentTrack.thumbnail 
-        : env.apiUrl 
-          ? `${env.apiUrl}/api/albumart/${originalYoutubeId}?square=1`
-          : `/api/albumart/${originalYoutubeId}?square=1`;
+      img.src = env.apiUrl 
+        ? `${env.apiUrl}/api/albumart/${originalYoutubeId}?square=1`
+        : `/api/albumart/${originalYoutubeId}?square=1`;
     }
     
     // Clear any position sync locks before setting up the stream

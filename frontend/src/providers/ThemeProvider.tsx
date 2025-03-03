@@ -49,7 +49,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const currentTrack = usePlayerStore((state) => state.currentTrack);
   const [colors, setColors] = useState<ThemeColors>(defaultColors);
   const [previousThumbnail, setPreviousThumbnail] = useState<string | null>(null);
-  const [publicTrack, setPublicTrack] = useState<{ thumbnail: string } | null>(null);
+  const [publicTrack, setPublicTrack] = useState<{ youtubeId: string; thumbnail?: string } | null>(null);
 
   // Fetch public track state when not authenticated
   useEffect(() => {
@@ -76,12 +76,24 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   useEffect(() => {
     // Keep track of the previous thumbnail to prevent UI flicker during transitions
     const track = token ? currentTrack : publicTrack;
-    if (track?.thumbnail) {
-      setPreviousThumbnail(track.thumbnail);
+    
+    if (track?.youtubeId) {
+      const thumbnailUrl = env.apiUrl 
+        ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
+        : `/api/albumart/${track.youtubeId}`;
+      setPreviousThumbnail(thumbnailUrl);
     }
     
-    // Use current thumbnail or previous thumbnail during transitions
-    const thumbnailUrl = track?.thumbnail || previousThumbnail || '/images/DEFAULT.jpg';
+    // Use current track's youtubeId for thumbnail or previous thumbnail during transitions
+    let thumbnailUrl = '/images/DEFAULT.jpg';
+    
+    if (track?.youtubeId) {
+      thumbnailUrl = env.apiUrl 
+        ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
+        : `/api/albumart/${track.youtubeId}`;
+    } else if (previousThumbnail) {
+      thumbnailUrl = previousThumbnail;
+    }
     
     // Transform old sv-miu URLs to new format and ensure YouTube thumbnails are properly formatted
     let transformedUrl = thumbnailUrl;
@@ -420,7 +432,7 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       img.onerror = null;
       img.src = '';
     };
-  }, [token, currentTrack?.thumbnail, previousThumbnail, publicTrack?.thumbnail]);
+  }, [token, currentTrack?.youtubeId, previousThumbnail, publicTrack?.youtubeId, env.apiUrl]);
 
 
   return (

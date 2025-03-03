@@ -18,6 +18,7 @@ import { RequestStatus } from '../types/enums.js';
 import { spawn } from 'child_process';
 import getEnv from '../utils/env.js';
 import crypto from 'crypto';
+import { getThumbnailUrl } from '../utils/youtubeMusic.js';
 
 const env = getEnv();
 
@@ -97,7 +98,7 @@ function formatTrack(request: RequestWithTrack): TrackResponse {
   return {
     youtubeId,
     title: request.track.title,
-    thumbnail: request.track.thumbnail,
+    thumbnail: getThumbnailUrl(youtubeId),
     duration: request.track.duration,
     requestedBy: {
       id: request.user.id,
@@ -333,7 +334,7 @@ router.get('/state', async (req: Request, res: Response) => {
           create: {
             youtubeId: track.youtubeId,
             title: track.title || 'Unknown Title',
-            thumbnail: track.thumbnail || '',
+            thumbnail: getThumbnailUrl(track.youtubeId),
             duration: track.duration || 0,
             isMusicUrl: false,
             isActive: true,
@@ -1179,7 +1180,7 @@ router.get('/history', async (req: Request, res: Response) => {
     const formattedTracks = tracks.map(request => ({
       youtubeId: request.track.youtubeId,
       title: request.track.title,
-      thumbnail: request.track.thumbnail,
+      thumbnail: getThumbnailUrl(request.track.youtubeId),
       duration: request.track.duration,
       requestedBy: {
         id: request.user.id,
@@ -1221,7 +1222,7 @@ function queueItemToRequestWithTrack(item: QueueItem): RequestWithTrack {
     track: {
       youtubeId: item.youtubeId,
       title: item.title,
-      thumbnail: item.thumbnail,
+      thumbnail: getThumbnailUrl(item.youtubeId),
       duration: item.duration,
       resolvedYtId: null,
       isMusicUrl: false
@@ -1543,7 +1544,7 @@ router.get('/current', async (_req: Request, res: Response) => {
     const formattedTrack = {
       youtubeId: currentTrack.track.youtubeId,
       title: currentTrack.track.title,
-      thumbnail: currentTrack.track.thumbnail,
+      thumbnail: getThumbnailUrl(currentTrack.track.youtubeId),
       duration: currentTrack.track.duration,
       requestedBy: {
         id: currentTrack.user.id,
