@@ -9,6 +9,9 @@ dist/
 build/
 out/
 *.tsbuildinfo
+.vercel/
+.serverless/
+.webpack/
 
 # Environment variables
 .env
@@ -22,6 +25,15 @@ out/
 *.swo
 .DS_Store
 Thumbs.db
+.history/
+*.sublime-workspace
+*.sublime-project
+.settings/
+.project
+.classpath
+*.iml
+*.iws
+.idea_modules/
 
 # Logs
 logs/
@@ -34,6 +46,8 @@ pnpm-debug.log*
 # Testing
 coverage/
 .nyc_output/
+.jest/
+jest-*.json
 
 # Cache directories
 .cache/
@@ -86,6 +100,8 @@ prisma/migrations/dev/
 
 # Docker
 docker-compose.override.yml
+*.env
+.docker/
 
 # Python
 .venv/
@@ -105,3 +121,49 @@ eggs/
 pip-log.txt
 pip-delete-this-directory.txt
 .python-version
+
+# TypeScript
+tsconfig.tsbuildinfo
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+*.sql
+
+# Deployment
+.netlify/
+.firebase/
+.now/
+.deployment/
+
+# Package managers
+.pnpm-store/
+.yarn/
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+
+# Mobile development
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# System Files
+.directory
+desktop.ini
+
+# Test coverage
+lib-cov/
+*.lcov
+
+# Storybook
+storybook-static/
