@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/providers/AuthProvider";
@@ -20,13 +20,19 @@ const PWAInstaller = dynamic(() => import("@/components/PWAInstaller"), { ssr: f
 
 const inter = Inter({ subsets: ["latin"] });
 
+// Viewport configuration
+export const viewport: Viewport = {
+  themeColor: "#4f46e5",
+  width: "device-width",
+  initialScale: 1,
+};
+
 // Default metadata
 export const metadata: Metadata = {
   metadataBase: new URL(APP_URL),
   title: "MIU",
   description: "Collaborative music player for Discord communities",
   manifest: "/manifest.json",
-  themeColor: "#4f46e5",
   appleWebApp: {
     capable: true,
     title: "MIU Music Player",

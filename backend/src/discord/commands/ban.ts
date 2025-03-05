@@ -110,7 +110,8 @@ async function applyBanPenalty(youtubeId: string, trackingService: TrackingServi
       // Update global track stats with a heavy penalty
       prisma.$executeRaw`
         UPDATE "Track"
-        SET "globalScore" = "Track"."globalScore" - 10
+        SET "globalScore" = "Track"."globalScore" - 10,
+            "status" = 'BLOCKED'
         WHERE "youtubeId" = ${youtubeId}
       `,
       // Also update all user stats for this track with a penalty

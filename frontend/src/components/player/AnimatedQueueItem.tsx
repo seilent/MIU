@@ -93,13 +93,10 @@ export function AnimatedQueueItem({
           unoptimized={false}
         />
         {track.isAutoplay && (
-          <div className="absolute bottom-0 right-0 bg-theme-accent/80 text-xs px-1.5 py-0.5 rounded text-white/90 flex items-center space-x-1">
-            <span>Auto</span>
-            {track.autoplaySource && (
-              <span className="text-white/70 text-[10px]">
-                • {track.autoplaySource.replace('Pool: ', '')}
-              </span>
-            )}
+          <div className="absolute top-0 right-0 bg-black/40 backdrop-blur-sm text-[9px] w-4 h-4
+                          flex items-center justify-center rounded-bl-md rounded-tr-md
+                          text-theme-accent font-semibold">
+            A
           </div>
         )}
       </div>
@@ -109,19 +106,33 @@ export function AnimatedQueueItem({
         <h3 className="text-white font-medium truncate">
           {track.title}
         </h3>
-        <div className="flex items-center space-x-2 text-sm mt-1">
-          <span className="text-white/30">by</span>
-          <span className="text-white/50">
-            {track.requestedBy.username}
-          </span>
-          {track.requestedBy.avatar && (
-            <img
-              key={`${track.requestedBy.id}-${track.requestedBy.avatar}`}
-              src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
-              alt={track.requestedBy.username}
-              className="h-4 w-4 rounded-full opacity-50"
-            />
-          )}
+        <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-sm mt-1">
+          <div className="flex items-center gap-x-2">
+            <span className="text-white/30">by</span>
+            <div className="flex items-center">
+              <span className="text-white/50">
+                {track.requestedBy.username}
+              </span>
+              {track.requestedBy.avatar && (
+                <img
+                  key={`${track.requestedBy.id}-${track.requestedBy.avatar}`}
+                  src={`https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`}
+                  alt={track.requestedBy.username}
+                  className="h-4 w-4 rounded-full opacity-50 ml-2"
+                />
+              )}
+              
+              {/* Display autoplay source right after avatar */}
+              {track.isAutoplay && track.autoplaySource && (
+                <>
+                  <span className="text-white/30 mx-2">-</span>
+                  <span className="text-white/50 text-xs">
+                    {track.autoplaySource.replace('Pool: ', '')}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 

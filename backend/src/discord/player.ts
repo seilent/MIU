@@ -187,12 +187,14 @@ export class Player {
   private autoplayEnabled: boolean = true;
   private playedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for ALL tracks
   private usedSeedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for seed tracks
-  private readonly SEED_TRACK_COOLDOWN = parseInt(process.env.SEED_TRACK_COOLDOWN || '43200000'); // 12 hours in milliseconds
-  private readonly PLAYED_TRACKS_EXPIRY = parseInt(process.env.PLAYED_TRACKS_EXPIRY || '3600000'); // 1 hour in milliseconds
-  private readonly AUTOPLAY_TRACKS_EXPIRY = parseInt(process.env.AUTOPLAY_TRACKS_EXPIRY || '18000000'); // 5 hours minimum autoplay cooldown
-  private readonly TOP_TIER_EXPIRY = parseInt(process.env.TOP_TIER_EXPIRY || '21600000'); // 6 hours for top favorites
-  private readonly MID_TIER_EXPIRY = parseInt(process.env.MID_TIER_EXPIRY || '28800000'); // 8 hours for mid-tier songs
-  private readonly LOW_TIER_EXPIRY = parseInt(process.env.LOW_TIER_EXPIRY || '36000000'); // 10 hours for low-played songs
+  // Convert hours to milliseconds (1 hour = 3600000 ms)
+  private readonly HOURS_TO_MS = 3600000;
+  private readonly SEED_TRACK_COOLDOWN = parseInt(process.env.SEED_TRACK_COOLDOWN || '24') * this.HOURS_TO_MS; 
+  private readonly PLAYED_TRACKS_EXPIRY = parseInt(process.env.PLAYED_TRACKS_EXPIRY || '1') * this.HOURS_TO_MS; 
+  private readonly AUTOPLAY_TRACKS_EXPIRY = parseInt(process.env.AUTOPLAY_TRACKS_EXPIRY || '5') * this.HOURS_TO_MS; 
+  private readonly TOP_TIER_EXPIRY = parseInt(process.env.TOP_TIER_EXPIRY || '6') * this.HOURS_TO_MS; 
+  private readonly MID_TIER_EXPIRY = parseInt(process.env.MID_TIER_EXPIRY || '8') * this.HOURS_TO_MS; 
+  private readonly LOW_TIER_EXPIRY = parseInt(process.env.LOW_TIER_EXPIRY || '10') * this.HOURS_TO_MS; 
   private readonly MAX_DURATION = parseInt(process.env.MAX_DURATION || '420'); // 7 minutes in seconds
   private readonly MIN_DURATION = parseInt(process.env.MIN_DURATION || '30'); // 30 seconds minimum
   private retryCount: number = 0;
@@ -211,6 +213,16 @@ export class Player {
     count: number;
     resetTime: number;
   };
+  
+  // Define types for autoplay track sources
+  private readonly AutoplaySources = {
+    PLAYLIST: 'Pool: Playlist',
+    HISTORY: 'Pool: History',
+    POPULAR: 'Pool: Popular',
+    YOUTUBE: 'Pool: YouTube Mix',
+    RANDOM: 'Pool: Random'
+  } as const;
+  
   private trackingService: TrackingService;
   private recommendationEngine: RecommendationEngine;
   private currentPlaylistPosition = 0;
@@ -228,12 +240,23 @@ export class Player {
   private activeAudioStreams: Set<NodeJS.WritableStream> = new Set();
 
   private readonly WEIGHTS = {
-    PLAYLIST: 0.30,    // 25% for playlist tracks
-    FAVORITES: 0.15,   // 25% for user favorites
-    POPULAR: 0.15,     // 20% for popular tracks
-    YOUTUBE: 0.20,     // 20% for YouTube recommendations
-    RANDOM: 0.20       // 10% for random tracks
-  } as const;
+    PLAYLIST: parseFloat(process.env.AUTOPLAY_WEIGHT_PLAYLIST || '0.30'),    // Playlist tracks
+    HISTORY: parseFloat(process.env.AUTOPLAY_WEIGHT_HISTORY || '0.10'),      // User listening history
+    POPULAR: parseFloat(process.env.AUTOPLAY_WEIGHT_POPULAR || '0.10'),      // Popular tracks
+    YOUTUBE: parseFloat(process.env.AUTOPLAY_WEIGHT_YOUTUBE || '0.20'),      // YouTube recommendations
+    RANDOM: parseFloat(process.env.AUTOPLAY_WEIGHT_RANDOM || '0.30')         // Random tracks
+  };
+
+  // Validate that weights sum to approximately 1.0
+  private validateWeights() {
+    const sum = Object.values(this.WEIGHTS).reduce((acc, val) => acc + val, 0);
+    const tolerance = 0.01; // Allow for small floating-point errors
+    
+    if (Math.abs(sum - 1.0) > tolerance) {
+      console.warn(`WARNING: Autoplay weights sum to ${sum.toFixed(2)}, not 1.0. This may cause unexpected behavior.`);
+      console.warn('Current weights:', JSON.stringify(this.WEIGHTS, null, 2));
+    }
+  }
 
   // Track cooldown cache to avoid database lookups on every check
   private trackCooldownCache: Map<string, number> = new Map();
@@ -251,6 +274,9 @@ export class Player {
         noSubscriber: NoSubscriberBehavior.Play
       }
     });
+
+    // Validate autoplay weights
+    this.validateWeights();
 
     // Ensure bot user exists in database
     this.ensureBotUser().catch(error => {
@@ -700,84 +726,54 @@ export class Player {
       let trackInfo;
       let useCachedData = false;
 
-      // Check if we have a cached track with valid files
-      console.log('=== Checking cache using original youtubeId ===');
+      // Check cache for track info
       const cachedTrack = await prisma.track.findUnique({
-        where: { youtubeId }
-      });
-      console.log('Cache lookup result:', cachedTrack ? 'Found in database' : 'Not in database');
-
-      const audioCache = await prisma.audioCache.findUnique({
-        where: { youtubeId }
-      });
-      console.log('Audio cache lookup result:', audioCache ? 'Found' : 'Not found');
-
-      // If we have cache and files exist, verify them
-      if (cachedTrack && audioCache && fs.existsSync(audioCache.filePath)) {
-        console.log('=== Found valid cache entries, checking thumbnail ===');
-        const thumbnailCache = await prisma.thumbnailCache.findUnique({
-          where: { youtubeId }  // Always use original youtubeId
-        });
-        console.log('Thumbnail cache lookup result:', thumbnailCache ? 'Found' : 'Not found');
-
-        // First verify audio duration
-        console.log('=== Verifying audio duration ===');
-        const duration = await getAudioFileDuration(audioCache.filePath);
-        console.log(`Duration check - Cached: ${cachedTrack.duration}, Actual: ${duration}`);
-        
-        if (Math.abs(duration - cachedTrack.duration) < 1) { // Allow 1 second difference
-          // If thumbnail exists and file exists, we can use cache
-          if (thumbnailCache && fs.existsSync(thumbnailCache.filePath)) {
-            console.log(`🎵 [CACHE] All cache components valid, using cached track: ${cachedTrack.title}`);
-            console.log(`Original resolvedYtId from cache: ${cachedTrack.resolvedYtId || 'none'}`);
-            trackInfo = {
-              title: cachedTrack.title,
-              thumbnail: getThumbnailUrl(youtubeId),
-              duration: cachedTrack.duration
-            };
-            // Use resolvedId from cache if available for music URLs
-            resolvedId = cachedTrack.resolvedYtId || youtubeId;
-            console.log(`Using resolvedId: ${resolvedId} (from cache)`);
-            isMusicUrl = false; // Skip music URL resolution since we have cache
-            console.log('Set isMusicUrl to false since using cache');
-            useCachedData = true;
-          } else {
-            console.log('❌ Thumbnail missing or invalid, attempting to recreate...');
-            // If thumbnail is missing but we have other cache, try to recreate it
-            try {
-              // Use cached resolvedId if available for recreation
-              const infoId = cachedTrack.resolvedYtId || youtubeId;
-              console.log(`Fetching info for thumbnail using ID: ${infoId}`);
-              const info = await getYoutubeInfo(infoId);
-              await prisma.thumbnailCache.upsert({
-                where: { youtubeId },
-                create: {
-                  youtubeId,
-                  filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
-                },
-                update: {
-                  filePath: path.join(process.env.CACHE_DIR || 'cache', 'thumbnails', `${youtubeId}.jpg`)
-                }
-              });
-              console.log('✓ Thumbnail cache recreated');
-              // Now we can use the cache
-              trackInfo = {
-                title: cachedTrack.title,
-                thumbnail: getThumbnailUrl(youtubeId),
-                duration: cachedTrack.duration
-              };
-              resolvedId = cachedTrack.resolvedYtId || youtubeId;
-              isMusicUrl = false;
-              useCachedData = true;
-            } catch (error) {
-              console.error('Failed to recreate thumbnail cache:', error);
-            }
-          }
-        } else {
-          console.log('❌ Duration mismatch, cannot use cache');
+        where: { youtubeId },
+        include: {
+          audioCache: true
         }
-      } else {
-        console.log('❌ Cache validation failed - Missing database entry or audio file');
+      });
+
+      if (cachedTrack && cachedTrack.audioCache) {
+        console.log('=== Found valid cache entries ===');
+        
+        // If audio exists and file exists, we can use cache
+        if (fs.existsSync(cachedTrack.audioCache.filePath)) {
+          console.log('✓ Audio cache valid');
+          
+          // Use cached track info instead of returning early
+          trackInfo = {
+            title: cachedTrack.title,
+            duration: cachedTrack.duration,
+            resolvedYtId: cachedTrack.resolvedYtId || null,
+            isMusicUrl: cachedTrack.isMusicUrl
+          };
+          
+          // Set resolvedId for playback
+          resolvedId = cachedTrack.resolvedYtId || youtubeId;
+          
+          // Continue with playback instead of returning early
+          useCachedData = true;
+        } else {
+          // If audio is missing but we have other cache, try to recreate it
+          console.log('❌ Audio missing or invalid, attempting to recreate...');
+          const infoId = cachedTrack.resolvedYtId || youtubeId;
+          console.log(`Fetching info using ID: ${infoId}`);
+          
+          // Use cached track info but will need to re-download audio
+          trackInfo = {
+            title: cachedTrack.title,
+            duration: cachedTrack.duration,
+            resolvedYtId: cachedTrack.resolvedYtId || null,
+            isMusicUrl: cachedTrack.isMusicUrl
+          };
+          
+          // Set resolvedId for playback
+          resolvedId = cachedTrack.resolvedYtId || youtubeId;
+          
+          // Continue with playback instead of returning early
+          useCachedData = true;
+        }
       }
 
       // Get track info if not using cache
@@ -793,9 +789,9 @@ export class Player {
           }
           resolvedId = resolved;
           console.log(`Successfully resolved to: ${resolvedId}`);
-      }
+        }
 
-      // Get track info using the resolved ID
+        // Get track info using the resolved ID
         console.log(`Fetching track info for ID: ${resolvedId}`);
         trackInfo = await getYoutubeInfo(resolvedId);
         console.log(`Retrieved track info: ${trackInfo.title}`);
@@ -913,6 +909,7 @@ export class Player {
       await this.updatePlayerState();
 
       // Start downloading audio for this track in the background
+      // Use the resolvedId for prefetching, which is the actual YouTube ID to download
       this.prefetchAudioForTrack(resolvedId, trackInfo.title);
 
       // Update database in background
@@ -1226,7 +1223,8 @@ export class Player {
           duration: this.currentTrack.duration,
           requestedBy: formatRequestedBy(this.currentTrack.requestedBy),
           requestedAt: this.currentTrack.requestedAt,
-          isAutoplay: this.currentTrack.isAutoplay
+          isAutoplay: this.currentTrack.isAutoplay,
+          autoplaySource: this.currentTrack.autoplaySource
         } : null,
         queue: allQueueTracks.map(track => ({
           youtubeId: track.youtubeId,
@@ -1235,7 +1233,8 @@ export class Player {
           duration: track.duration,
           requestedBy: formatRequestedBy(track.requestedBy),
           requestedAt: track.requestedAt,
-          isAutoplay: track.isAutoplay
+          isAutoplay: track.isAutoplay,
+          autoplaySource: track.autoplaySource
         })),
         position: this.getPosition()
       };
@@ -1321,7 +1320,8 @@ export class Player {
           youtubeId: true,
           globalScore: true,
           playCount: true,
-          skipCount: true
+          skipCount: true,
+          title: true // Add title for language detection
         },
         orderBy: {
           globalScore: 'desc'  // Order by global score instead of request count
@@ -1370,7 +1370,7 @@ export class Player {
           // Get the track details to see if it has a resolved ID (for YouTube Music tracks)
           const trackDetails = await prisma.track.findUnique({
             where: { youtubeId: seedTrack.youtubeId },
-            select: { resolvedYtId: true, isMusicUrl: true }
+            select: { resolvedYtId: true, isMusicUrl: true, title: true }
           });
           
           // Use the resolved ID if it's a YouTube Music track and has a resolved ID
@@ -1384,6 +1384,14 @@ export class Player {
           
           // Get recommendations from YouTube using the effective ID
           const recommendations = await getYoutubeRecommendations(effectiveYoutubeId);
+          
+          if (recommendations.length === 0) {
+            console.log(`[DEBUG] refreshYoutubeRecommendationsPool: No recommendations returned for ${seedTrack.youtubeId} - likely not Japanese content`);
+            // Mark this seed track as used with the current timestamp to avoid trying it again soon
+            this.usedSeedTracks.set(seedTrack.youtubeId, Date.now());
+            attempts++;
+            continue;
+          }
           
           if (recommendations.length > 0) {
             // Filter out the current track and any tracks in the queue
@@ -1575,9 +1583,18 @@ export class Player {
           return;
         }
         
+        // Get track info to check for resolved ID
+        const track = await prisma.track.findUnique({
+          where: { youtubeId }
+        });
+        
+        // Use resolvedYtId if available, otherwise use original youtubeId
+        const downloadId = track?.resolvedYtId || youtubeId;
+        
         // Download in background
         console.log(`Prefetching audio for track: ${title} (${youtubeId})`);
-        await this.downloadTrackAudio(youtubeId, youtubeId);
+        console.log(`Using download ID: ${downloadId}`);
+        await this.downloadTrackAudio(youtubeId, downloadId);
         console.log(`Prefetch complete for: ${title} (${youtubeId})`);
       } catch (error) {
         console.error(`Failed to prefetch audio for ${title} (${youtubeId}):`, error);
@@ -1960,9 +1977,17 @@ export class Player {
       // Update cooldown cache for all recently played tracks
       await this.refreshCooldownCache();
       
-      // First try to get tracks from the active playlist if available
-      let tracksToAdd: { youtubeId: string }[] = [];
+      // Number of tracks to add
+      const tracksToTake = this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length;
+      if (tracksToTake <= 0) return;
       
+      console.log(`[DEBUG] prefetchAutoplayTracks: Need to add ${tracksToTake} tracks to autoplay queue`);
+      
+      // Create a pool of tracks from different sources with weights
+      let trackPool: Array<{ youtubeId: string; weight: number; source: string }> = [];
+      
+      // 1. Get tracks from active playlist (25% weight)
+      let playlistTracks: Array<{ youtubeId: string }> = [];
       if (this.currentPlaylistId) {
         console.log(`[DEBUG] prefetchAutoplayTracks: Using active playlist ${this.currentPlaylistId}`);
         
@@ -1981,105 +2006,291 @@ export class Player {
         if (playlist && playlist.tracks.length > 0) {
           console.log(`[DEBUG] prefetchAutoplayTracks: Found playlist "${playlist.name}" with ${playlist.tracks.length} tracks`);
           
-          // Handle different playlist modes
-          if (playlist.mode === 'LINEAR') {
-            // In LINEAR mode, get the next tracks in sequence
-            const tracksToTake = this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length;
-            const sortedTracks = [...playlist.tracks].sort((a, b) => a.position - b.position);
+          // Filter out tracks that are in queue or recently played or blocked
+          const availableTracks = playlist.tracks.filter(t => 
+            !this.isTrackInQueue(t.track.youtubeId) && 
+            !this.isTrackRecentlyPlayed(t.track.youtubeId) &&
+            t.track.status !== TrackStatus.BLOCKED
+          );
+          
+          if (availableTracks.length > 0) {
+            // Add to pool with playlist weight
+            const playlistWeight = this.WEIGHTS.PLAYLIST / availableTracks.length;
+            playlistTracks = availableTracks.map(t => ({ youtubeId: t.track.youtubeId }));
             
-            // Find the next position after the current one
-            let nextPosition = 0;
-            if (this.currentTrack) {
-              const currentTrackInPlaylist = sortedTracks.find(t => t.track.youtubeId === this.currentTrack?.youtubeId);
-              if (currentTrackInPlaylist) {
-                nextPosition = currentTrackInPlaylist.position + 1;
-              }
-            }
+            trackPool = [
+              ...trackPool,
+              ...playlistTracks.map(track => ({
+                youtubeId: track.youtubeId,
+                weight: playlistWeight,
+                source: this.AutoplaySources.PLAYLIST
+              }))
+            ];
             
-            // Get tracks starting from nextPosition, wrapping around if needed
-            let selectedTracks: typeof sortedTracks = [];
-            for (let i = 0; i < tracksToTake; i++) {
-              const index = (nextPosition + i) % sortedTracks.length;
-              selectedTracks.push(sortedTracks[index]);
-            }
-            
-            tracksToAdd = selectedTracks.map(t => ({ youtubeId: t.track.youtubeId }));
-            console.log(`[DEBUG] prefetchAutoplayTracks: Selected ${tracksToAdd.length} tracks from LINEAR playlist starting at position ${nextPosition}`);
-          } else {
-            // In POOL mode, select random tracks
-            const tracksToTake = this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length;
-            const availableTracks = playlist.tracks.filter(t => 
-              !this.isTrackInQueue(t.track.youtubeId) && 
-              !this.isTrackRecentlyPlayed(t.track.youtubeId)
-            );
-            
-            if (availableTracks.length > 0) {
-              // Shuffle and take needed tracks
-              const shuffled = [...availableTracks].sort(() => Math.random() - 0.5);
-              const selected = shuffled.slice(0, tracksToTake);
-              tracksToAdd = selected.map(t => ({ youtubeId: t.track.youtubeId }));
-              console.log(`[DEBUG] prefetchAutoplayTracks: Selected ${tracksToAdd.length} random tracks from POOL playlist`);
-            }
+            console.log(`[DEBUG] prefetchAutoplayTracks: Added ${playlistTracks.length} playlist tracks to pool with weight ${playlistWeight.toFixed(4)} each`);
           }
         }
       }
       
-      // If we couldn't get enough tracks from the playlist, fall back to YouTube recommendations
-      if (tracksToAdd.length < (this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length)) {
-        console.log(`[DEBUG] prefetchAutoplayTracks: Need more tracks, falling back to YouTube recommendations`);
+      // 2. Get user favorites (25% weight)
+      try {
+        // Get user listening history sorted by personal score
+        const userFavorites = await prisma.userTrackStats.findMany({
+          where: {
+            personalScore: { gt: 0 }
+          },
+          select: {
+            youtubeId: true,
+            personalScore: true,
+            track: true
+          },
+          orderBy: {
+            personalScore: 'desc'
+          },
+          take: 50
+        });
         
-        // Always refresh YouTube recommendations pool to grow the database
-        await this.refreshYoutubeRecommendationsPool();
-
-        // Try to prioritize Japanese songs first
-        let japaneseRecommendations: Array<{ youtubeId: string }> = [];
-        
-        try {
-          // Query database for unplayed Japanese recommendations
-          japaneseRecommendations = await prisma.$queryRaw`
-            SELECT "youtubeId", "seedTrackId", "relevanceScore", "isJapanese", "wasPlayed" 
-            FROM "YoutubeRecommendation" 
-            WHERE "isJapanese" = true AND "wasPlayed" = false
-            LIMIT ${this.YT_REC_FETCH_COUNT}
-          `;
+        if (userFavorites.length > 0) {
+          // Filter out tracks that are in queue or recently played or blocked
+          const availableFavorites = userFavorites.filter(t => 
+            !this.isTrackInQueue(t.youtubeId) && 
+            !this.isTrackRecentlyPlayed(t.youtubeId) &&
+            t.track.status !== TrackStatus.BLOCKED
+          );
           
-          if (japaneseRecommendations.length > 0) {
-            console.log(`[DEBUG] prefetchAutoplayTracks: Found ${japaneseRecommendations.length} Japanese recommendations from database`);
+          if (availableFavorites.length > 0) {
+            // Add to pool with favorites weight and decay factor
+            availableFavorites.forEach((favorite, index) => {
+              const decayFactor = 1 - index * 0.05; // 5% decay per position
+              const favoriteWeight = (this.WEIGHTS.HISTORY / availableFavorites.length) * decayFactor;
+              
+              trackPool.push({
+                youtubeId: favorite.youtubeId,
+                weight: favoriteWeight,
+                source: this.AutoplaySources.HISTORY
+              });
+            });
             
-            // Mark these recommendations as played
-            await prisma.$executeRaw`
-              UPDATE "YoutubeRecommendation" 
-              SET "wasPlayed" = true
-              WHERE "youtubeId" IN (${Prisma.join(japaneseRecommendations.map(rec => rec.youtubeId))})
-            `;
-            
-            // Add to tracks
-            tracksToAdd = [...tracksToAdd, ...japaneseRecommendations];
+            console.log(`[DEBUG] prefetchAutoplayTracks: Added ${availableFavorites.length} user favorites to pool`);
           }
-        } catch (error) {
-          console.error('[DEBUG] prefetchAutoplayTracks: Error fetching Japanese recommendations:', error);
+        }
+      } catch (error) {
+        console.error('[DEBUG] prefetchAutoplayTracks: Error fetching user favorites:', error);
+      }
+      
+      // 3. Get popular tracks (20% weight)
+      try {
+        const popularTracks = await prisma.track.findMany({
+          where: {
+            globalScore: { gt: 0 },
+            playCount: { gt: 0 },
+            status: { not: TrackStatus.BLOCKED }
+          },
+          select: {
+            youtubeId: true,
+            globalScore: true,
+            playCount: true
+          },
+          orderBy: {
+            playCount: 'desc'
+          },
+          take: 30
+        });
+        
+        if (popularTracks.length > 0) {
+          // Filter out tracks that are in queue or recently played
+          const availablePopular = popularTracks.filter(t => 
+            !this.isTrackInQueue(t.youtubeId) && 
+            !this.isTrackRecentlyPlayed(t.youtubeId)
+          );
+          
+          if (availablePopular.length > 0) {
+            // Add to pool with popular weight and logarithmic boost
+            availablePopular.forEach(track => {
+              const logBoost = 1 + Math.log(track.playCount);
+              const popularWeight = (this.WEIGHTS.POPULAR / availablePopular.length) * logBoost;
+              
+              trackPool.push({
+                youtubeId: track.youtubeId,
+                weight: popularWeight,
+                source: this.AutoplaySources.POPULAR
+              });
+            });
+            
+            console.log(`[DEBUG] prefetchAutoplayTracks: Added ${availablePopular.length} popular tracks to pool`);
+          }
+        }
+      } catch (error) {
+        console.error('[DEBUG] prefetchAutoplayTracks: Error fetching popular tracks:', error);
+      }
+      
+      // 4. Get YouTube recommendations (20% weight)
+      // Always refresh YouTube recommendations pool to grow the database
+      await this.refreshYoutubeRecommendationsPool();
+      
+      // Get recommendations from the pool
+      if (this.youtubeRecommendationsPool.length > 0) {
+        const ytRecommendations = [...this.youtubeRecommendationsPool]; // Copy to avoid modifying original
+        
+        // Get all tracks to check for BLOCKED status
+        const trackStatuses = await prisma.track.findMany({
+          where: {
+            youtubeId: {
+              in: ytRecommendations.map(rec => rec.youtubeId)
+            }
+          },
+          select: {
+            youtubeId: true,
+            status: true
+          }
+        });
+        
+        // Create a map for quick lookup
+        const statusMap = new Map(
+          trackStatuses.map(track => [track.youtubeId, track.status])
+        );
+        
+        // Filter out tracks that are in queue, recently played, or blocked
+        const availableYtRecs = ytRecommendations.filter(rec => 
+          !this.isTrackInQueue(rec.youtubeId) && 
+          !this.isTrackRecentlyPlayed(rec.youtubeId) &&
+          statusMap.get(rec.youtubeId) !== TrackStatus.BLOCKED
+        );
+        
+        if (availableYtRecs.length > 0) {
+          // Add to pool with YouTube weight
+          const ytWeight = this.WEIGHTS.YOUTUBE / availableYtRecs.length;
+          
+          trackPool = [
+            ...trackPool,
+            ...availableYtRecs.map(rec => ({
+              youtubeId: rec.youtubeId,
+              weight: ytWeight,
+              source: this.AutoplaySources.YOUTUBE
+            }))
+          ];
+          
+          console.log(`[DEBUG] prefetchAutoplayTracks: Added ${availableYtRecs.length} YouTube recommendations to pool with weight ${ytWeight.toFixed(4)} each`);
+        }
+      }
+      
+      // 5. Get random tracks (10% weight)
+      try {
+        const randomTracks = await prisma.track.findMany({
+          where: {
+            globalScore: { gte: 0 }, // Non-negative scores
+            status: { not: TrackStatus.BLOCKED }
+          },
+          select: {
+            youtubeId: true
+          },
+          orderBy: {
+            // Use random ordering by createdAt instead of non-existent id
+            createdAt: 'asc'
+          },
+          take: 20
+        });
+        
+        // Apply a random sort
+        const shuffledRandomTracks = [...randomTracks].sort(() => Math.random() - 0.5);
+        
+        if (shuffledRandomTracks.length > 0) {
+          // Filter out tracks that are in queue or recently played
+          const availableRandom = shuffledRandomTracks.filter(t => 
+            !this.isTrackInQueue(t.youtubeId) && 
+            !this.isTrackRecentlyPlayed(t.youtubeId)
+          );
+          
+          if (availableRandom.length > 0) {
+            // Add to pool with random weight
+            const randomWeight = this.WEIGHTS.RANDOM / availableRandom.length;
+            
+            trackPool = [
+              ...trackPool,
+              ...availableRandom.map(track => ({
+                youtubeId: track.youtubeId,
+                weight: randomWeight,
+                source: this.AutoplaySources.RANDOM
+              }))
+            ];
+            
+            console.log(`[DEBUG] prefetchAutoplayTracks: Added ${availableRandom.length} random tracks to pool with weight ${randomWeight.toFixed(4)} each`);
+          }
+        }
+      } catch (error) {
+        console.error('[DEBUG] prefetchAutoplayTracks: Error fetching random tracks:', error);
+      }
+      
+      // If no tracks in pool, return
+      if (trackPool.length === 0) {
+        console.log('[DEBUG] prefetchAutoplayTracks: No tracks available for autoplay');
+        return;
+      }
+      
+      console.log(`[DEBUG] prefetchAutoplayTracks: Total pool size: ${trackPool.length} tracks`);
+      
+      // Select tracks based on weights
+      let tracksToAdd: Array<{ youtubeId: string; source: string }> = [];
+      
+      for (let i = 0; i < tracksToTake && trackPool.length > 0; i++) {
+        // Calculate total weight
+        const totalWeight = trackPool.reduce((sum, item) => sum + item.weight, 0);
+        
+        // Random number between 0 and total weight
+        let random = Math.random() * totalWeight;
+        let selectedTrack: { youtubeId: string; source: string } | null = null;
+        let selectedIndex = -1;
+        
+        // Select track based on weights
+        for (let j = 0; j < trackPool.length; j++) {
+          random -= trackPool[j].weight;
+          if (random <= 0) {
+            selectedTrack = { 
+              youtubeId: trackPool[j].youtubeId, 
+              source: trackPool[j].source 
+            };
+            selectedIndex = j;
+            break;
+          }
         }
         
-        // If we still need more tracks, use the regular pool
-        if (tracksToAdd.length < (this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length)) {
-          // Get recommendations from the pool
-          const ytRecommendations = this.youtubeRecommendationsPool.splice(0, 
-            this.AUTOPLAY_BUFFER_SIZE - this.autoplayQueue.length - tracksToAdd.length);
+        // If no track selected (shouldn't happen), pick the first one
+        if (!selectedTrack && trackPool.length > 0) {
+          selectedTrack = { 
+            youtubeId: trackPool[0].youtubeId, 
+            source: trackPool[0].source 
+          };
+          selectedIndex = 0;
+        }
+        
+        // Add selected track to result and remove from pool
+        if (selectedTrack) {
+          tracksToAdd.push(selectedTrack);
+          trackPool.splice(selectedIndex, 1); // Remove selected track from pool
           
-          // Mark these recommendations as played in the database
-          if (ytRecommendations.length > 0) {
-            try {
-              await prisma.$executeRaw`
-                UPDATE "YoutubeRecommendation" 
-                SET "wasPlayed" = true
-                WHERE "youtubeId" IN (${Prisma.join(ytRecommendations.map(rec => rec.youtubeId))})
-              `;
-            } catch (error) {
-              console.error('[ERROR] Failed to mark YouTube recommendations as played:', error);
-            }
-          }
+          console.log(`[DEBUG] prefetchAutoplayTracks: Selected track ${selectedTrack.youtubeId} from source ${selectedTrack.source}`);
+        }
+      }
+      
+      // Mark YouTube recommendations as played in the database
+      const ytRecsToMark = tracksToAdd
+        .filter(track => track.source === this.AutoplaySources.YOUTUBE)
+        .map(track => track.youtubeId);
+      
+      if (ytRecsToMark.length > 0) {
+        try {
+          await prisma.$executeRaw`
+            UPDATE "YoutubeRecommendation" 
+            SET "wasPlayed" = true
+            WHERE "youtubeId" IN (${Prisma.join(ytRecsToMark)})
+          `;
           
-          tracksToAdd = [...tracksToAdd, ...ytRecommendations];
+          // Remove these from the recommendations pool
+          this.youtubeRecommendationsPool = this.youtubeRecommendationsPool.filter(
+            rec => !ytRecsToMark.includes(rec.youtubeId)
+          );
+        } catch (error) {
+          console.error('[ERROR] Failed to mark YouTube recommendations as played:', error);
         }
       }
       
@@ -2112,7 +2323,7 @@ export class Player {
             },
             requestedAt: new Date(),
             isAutoplay: true,
-            autoplaySource: rec.source as QueueItem['autoplaySource'] // Add source information
+            autoplaySource: rec.source as 'Pool: Playlist' | 'Pool: History' | 'Pool: Popular' | 'Pool: YouTube Mix' | 'Pool: Random' // Type assertion for source
           };
           
           // Add to autoplay queue

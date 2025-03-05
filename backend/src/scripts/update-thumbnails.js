@@ -65,8 +65,7 @@ async function main() {
         },
         select: {
           youtubeId: true,
-          title: true,
-          thumbnail: true
+          title: true
         }
       });
       
@@ -76,15 +75,8 @@ async function main() {
       for (const track of tracksWithHardcodedUrls) {
         const newThumbnail = `${API_BASE_URL}/api/albumart/${track.youtubeId}`;
         
-        await prisma.track.update({
-          where: { youtubeId: track.youtubeId },
-          data: { thumbnail: newThumbnail }
-        });
-        
-        console.log(`Updated: ${track.title} (${track.youtubeId})`);
-        console.log(`  Old: ${track.thumbnail}`);
-        console.log(`  New: ${newThumbnail}`);
-        
+        // No need to update thumbnail field as it's been removed
+        console.log(`Would update ${track.youtubeId} (${track.title}) to use ${newThumbnail}`);
         updatedCount++;
         if (updatedCount % 10 === 0) {
           console.log(`Updated ${updatedCount}/${tracksWithHardcodedUrls.length} tracks...`);

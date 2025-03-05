@@ -244,9 +244,8 @@ export default function Home() {
         // Ensure we're getting the tracks array from the response
         const historyData = Array.isArray(data) ? data : (data.tracks || []);
         
-        // Filter out autoplay tracks from history
-        const filteredHistory = historyData.filter((track: { isAutoplay?: boolean }) => !track.isAutoplay);
-        setHistory(filteredHistory);
+        // Include all tracks in history, including autoplay tracks
+        setHistory(historyData);
       } catch (error) {
         // Failed to fetch history
       }

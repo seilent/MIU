@@ -1262,6 +1262,25 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
       return [];
     }
 
+    // Extract useful information from the seed track for better search
+    const videoTitle = seedTrackDetails!.snippet?.title || '';
+    const channelId = seedTrackDetails!.snippet?.channelId || '';
+    const channelTitle = seedTrackDetails!.snippet?.channelTitle || '';
+    const tags = seedTrackDetails!.snippet?.tags || [];
+    const topicCategories = seedTrackDetails!.topicDetails?.topicCategories || [];
+    
+    // Check if the seed track is likely Japanese before proceeding
+    const isJapaneseSeed = isLikelyJapaneseSong(videoTitle, channelTitle, tags);
+    
+    if (!isJapaneseSeed) {
+      console.log(`Seed track ${seedTrackId} "${videoTitle}" is not likely Japanese. Skipping recommendations.`);
+      return [];
+    }
+    
+    console.log(`Finding recommendations for Japanese song: ${videoTitle} by ${channelTitle}`);
+    console.log(`Tags: ${tags.join(', ')}`);
+    console.log(`Topics: ${topicCategories.join(', ')}`);
+
     // Check if we already have recommendations for this seed track in the database
     const existingRecs: Array<{ youtubeId: string }> = await prisma.$queryRaw`
       SELECT "youtubeId" FROM "YoutubeRecommendation"
@@ -1273,17 +1292,6 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
       console.log(`Using ${existingRecs.length} existing recommendations for ${seedTrackId} from database`);
       return existingRecs;
     }
-
-    // Extract useful information from the seed track for better search
-    const videoTitle = seedTrackDetails!.snippet?.title || '';
-    const channelId = seedTrackDetails!.snippet?.channelId || '';
-    const channelTitle = seedTrackDetails!.snippet?.channelTitle || '';
-    const tags = seedTrackDetails!.snippet?.tags || [];
-    const topicCategories = seedTrackDetails!.topicDetails?.topicCategories || [];
-    
-    console.log(`Finding recommendations for: ${videoTitle} by ${channelTitle}`);
-    console.log(`Tags: ${tags.join(', ')}`);
-    console.log(`Topics: ${topicCategories.join(', ')}`);
     
     // Recommendations strategies in order of preference:
     // 1. Same artist's other videos (from Topic channel or official channel)
@@ -1376,7 +1384,7 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
           youtubeId: rec.youtubeId,
           seedTrackId: seedTrackId,
           relevanceScore: 0.9, // High relevance for official content
-          isJapanese: true, // Assuming Japanese content based on seed track
+          isJapanese: true, // We've already verified the seed is Japanese
           wasPlayed: false,
           createdAt: new Date(),
           updatedAt: new Date()
@@ -1994,4 +2002,65 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
     console.error(`Error getting video info for ${videoId}:`, error);
     return null;
   }
+}
+
+/**
+ * Check if a song is likely Japanese based on title, channel, and tags
+ * @param title The video title
+ * @param channel The channel title
+ * @param tags The video tags
+ * @returns True if the song is likely Japanese
+ */
+function isLikelyJapaneseSong(title: string, channel: string, tags: string[]): boolean {
+  // Check for Japanese characters in title or channel
+  const japaneseRegex = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF65-\uFF9F]/;
+  if (japaneseRegex.test(title) || japaneseRegex.test(channel)) {
+    return true;
+  }
+  
+  // Check for Japanese keywords in title
+  const japaneseKeywords = [
+    'jpop', 'j-pop', 'jrock', 'j-rock', 
+    'anime', 'japanese', 'japan', 
+    'tokyo', 'osaka', 'kyoto',
+    'utada', 'hikaru', 'yonezu', 'kenshi', 
+    'radwimps', 'yorushika', 'yoasobi', 'lisa', 'ado',
+    'eve', 'reol', 'zutomayo', 'vaundy', 'tuyu', 'tsuyu',
+    'aimer', 'minami', 'mafumafu', 'kenshi', 'fujii', 'kana',
+    'daoko', 'aimyon', 'miku', 'hatsune', 'vocaloid',
+    'babymetal', 'kyary', 'pamyu', 'perfume', 'akb48',
+    'nogizaka', 'keyakizaka', 'sakurazaka', 'hinatazaka'
+  ];
+  
+  const lowerTitle = title.toLowerCase();
+  const lowerChannel = channel.toLowerCase();
+  
+  if (japaneseKeywords.some(keyword => lowerTitle.includes(keyword) || lowerChannel.includes(keyword))) {
+    return true;
+  }
+  
+  // Check for Japanese keywords in tags
+  if (tags && tags.length > 0) {
+    const japaneseTags = [
+      'jpop', 'j-pop', 'jrock', 'j-rock', 'japanese', 'japan', 
+      'anime', 'アニメ', '日本', '邦楽'
+    ];
+    
+    if (tags.some(tag => {
+      const lowerTag = tag.toLowerCase();
+      return japaneseRegex.test(tag) || japaneseTags.some(jTag => lowerTag.includes(jTag));
+    })) {
+      return true;
+    }
+  }
+  
+  // Check if channel is a Japanese artist's topic channel
+  if (channel.includes('Topic') && (
+    japaneseRegex.test(channel) || 
+    japaneseKeywords.some(keyword => lowerChannel.includes(keyword))
+  )) {
+    return true;
+  }
+  
+  return false;
 } 

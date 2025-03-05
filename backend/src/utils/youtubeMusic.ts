@@ -344,6 +344,20 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
     // Ensure API is initialized
     await ensureApiInitialized();
     
+    // First check if the seed track is Japanese
+    const trackDetails = await prisma.track.findUnique({
+      where: { youtubeId: seedTrackId },
+      select: { title: true }
+    });
+    
+    if (trackDetails) {
+      // Check if the track title contains Japanese characters or keywords
+      if (!isLikelyJapanese({ name: trackDetails.title })) {
+        console.log(`Seed track ${seedTrackId} "${trackDetails.title}" is not likely Japanese. Skipping YouTube Music recommendations.`);
+        return [];
+      }
+    }
+    
     // First try to get the watch playlist (radio)
     try {
       // YouTube Music uses "RDAMVM" prefix for radio/mix playlists based on a video

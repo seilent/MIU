@@ -673,7 +673,8 @@ async function applyBanPenalty(youtubeId: string) {
       // Update global track stats with a heavy penalty
       prisma.$executeRaw`
         UPDATE "Track"
-        SET "globalScore" = "Track"."globalScore" - 10
+        SET "globalScore" = "Track"."globalScore" - 10,
+            "status" = 'BLOCKED'
         WHERE "youtubeId" = ${youtubeId}
       `,
       // Also update all user stats for this track with a penalty
@@ -1158,7 +1159,6 @@ router.get('/history', async (req: Request, res: Response) => {
           select: {
             youtubeId: true,
             title: true,
-            thumbnail: true,
             duration: true,
             isMusicUrl: true
           }

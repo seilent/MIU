@@ -8,25 +8,15 @@ async function main() {
     
     // Check Track table
     const hardcodedTracks = await prisma.track.findMany({
-      where: {
-        OR: [
-          { thumbnail: { contains: 'localhost' } },
-          { thumbnail: { contains: 'sv-miu.gacha.boo' } },
-          { thumbnail: { contains: 'http://' } },
-          { thumbnail: { contains: 'https://' } }
-        ]
-      },
       select: {
         youtubeId: true,
-        title: true,
-        thumbnail: true
+        title: true
       }
     });
     
-    console.log(`\n=== Tracks with hardcoded URLs: ${hardcodedTracks.length} ===`);
-    hardcodedTracks.forEach(track => {
-      console.log(`- ${track.youtubeId} (${track.title}): ${track.thumbnail}`);
-    });
+    console.log(`\n=== Tracks in database: ${hardcodedTracks.length} ===`);
+    console.log('Note: The thumbnail field has been removed from the Track model.');
+    console.log('Thumbnails are now generated dynamically using the getThumbnailUrl function.');
     
     // Check DefaultPlaylist table
     const playlists = await prisma.defaultPlaylist.findMany({
@@ -47,41 +37,15 @@ async function main() {
         }
       });
       
-      const hardcodedPlaylistTracks = tracks.filter(pt => 
-        pt.track.thumbnail.includes('localhost') || 
-        pt.track.thumbnail.includes('sv-miu.gacha.boo') ||
-        (pt.track.thumbnail.includes('http://') && !pt.track.thumbnail.includes('/api/albumart/')) ||
-        (pt.track.thumbnail.includes('https://') && !pt.track.thumbnail.includes('/api/albumart/'))
-      );
+      console.log(`\nPlaylist "${playlist.name}" has ${tracks.length} tracks.`);
+      console.log('Note: The thumbnail field has been removed from the Track model.');
+      console.log('Thumbnails are now generated dynamically using the getThumbnailUrl function.');
       
-      if (hardcodedPlaylistTracks.length > 0) {
-        console.log(`\nPlaylist "${playlist.name}" has ${hardcodedPlaylistTracks.length} tracks with hardcoded URLs:`);
-        hardcodedPlaylistTracks.forEach(pt => {
-          console.log(`- ${pt.track.youtubeId} (${pt.track.title}): ${pt.track.thumbnail}`);
-        });
-      }
+      // No need to check for hardcoded URLs since thumbnails are now generated dynamically
     }
     
     // Check for any other tables that might have URL fields
     // This is a more generic approach to find potential hardcoded URLs
     
     console.log('\n=== Summary ===');
-    console.log(`Total tracks with hardcoded URLs: ${hardcodedTracks.length}`);
-    
-    if (hardcodedTracks.length === 0) {
-      console.log('No hardcoded URLs found in the database!');
-    } else {
-      console.log('To fix these issues, run the update-thumbnails.ts script with --purge-all flag');
-    }
-    
-  } catch (error) {
-    console.error('Error checking for hardcoded URLs:', error);
-  } finally {
-    await prisma.$disconnect();
-  }
-}
-
-main().catch(error => {
-  console.error('Unhandled error:', error);
-  process.exit(1);
-}); 
+    console.log(`

@@ -36,18 +36,15 @@ async function main() {
     const allTracks = await prisma.track.findMany({
       select: {
         youtubeId: true,
-        title: true,
-        thumbnail: true
+        title: true
       }
     });
     
-    // Filter tracks with hardcoded URLs
-    const tracksWithHardcodedUrls = allTracks.filter(track => isHardcodedUrl(track.thumbnail));
+    console.log(`Found ${allTracks.length} total tracks.`);
+    console.log('Note: The thumbnail field has been removed from the Track model.');
+    console.log('Thumbnails are now generated dynamically using the getThumbnailUrl function.');
     
-    console.log(`Found ${tracksWithHardcodedUrls.length} tracks with hardcoded URLs out of ${allTracks.length} total tracks:`);
-    tracksWithHardcodedUrls.forEach(track => {
-      console.log(`- ${track.title} (${track.youtubeId}): ${track.thumbnail}`);
-    });
+    // No need to check for hardcoded URLs since thumbnails are now generated dynamically
     
     // Check default playlists with hardcoded URLs
     const playlistsWithTracks = await prisma.defaultPlaylist.findMany({
@@ -82,10 +79,9 @@ async function main() {
     });
     
     console.log('\nSummary:');
-    console.log(`- ${tracksWithHardcodedUrls.length} tracks with hardcoded URLs`);
     console.log(`- ${playlistTracksWithHardcodedUrls.length} default playlist tracks with hardcoded URLs`);
     
-    if (tracksWithHardcodedUrls.length > 0 || playlistTracksWithHardcodedUrls.length > 0) {
+    if (playlistTracksWithHardcodedUrls.length > 0) {
       console.log('\nTo fix these issues, run the update-thumbnails.js script with the --purge-all flag.');
     } else {
       console.log('\nNo hardcoded URLs found in the database.');
