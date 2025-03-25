@@ -6,6 +6,7 @@ import { prisma } from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { Cache } from '../utils/cache';
 import { getPlayer } from '../discord/player.js';
+import { refreshYoutubeRecommendationsPool, cleanupExcessRecommendations } from '../utils/youtube.js';
 
 const router = Router();
 
@@ -390,15 +391,8 @@ router.get('/stats', async (req: Request, res: Response, next: NextFunction) => 
  */
 router.post('/recommendations/refresh', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const player = getPlayer();
-    
-    // Check if player has the method (it should be public now)
-    if (typeof player.refreshYoutubeRecommendationsPool !== 'function') {
-      throw new HTTPError(500, 'Refresh method not available on player instance');
-    }
-    
-    // Call the method
-    await player.refreshYoutubeRecommendationsPool();
+    // Call the enhanced recommendation refresh function
+    await refreshYoutubeRecommendationsPool();
     
     return res.json({ 
       success: true, 
@@ -459,6 +453,56 @@ router.post('/recommendations/test', async (req: Request, res: Response, next: N
       videoId,
       count: recommendations.length,
       recommendations
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/recommendations/cleanup:
+ *   post:
+ *     summary: Clean up excess YouTube recommendations
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               maxPerSeed:
+ *                 type: integer
+ *                 description: Maximum number of recommendations to keep per seed track
+ *                 default: 5
+ *     responses:
+ *       200:
+ *         description: Excess recommendations cleaned up successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.post('/recommendations/cleanup', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const maxPerSeed = req.body.maxPerSeed || 5;
+    
+    // Call the cleanup function
+    const removedCount = await cleanupExcessRecommendations(maxPerSeed);
+    
+    // Reset the player's recommendation pool
+    const player = getPlayer();
+    if (typeof player.resetRecommendationsPool === 'function') {
+      await player.resetRecommendationsPool();
+    }
+    
+    return res.json({ 
+      success: true, 
+      message: `YouTube recommendations cleanup complete. Removed ${removedCount} excess recommendations.`,
+      removedCount
     });
   } catch (error) {
     next(error);

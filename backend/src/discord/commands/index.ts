@@ -6,6 +6,7 @@ import { search } from './search';
 import { ban } from './ban';
 import { data as playlistData, execute as playlistExecute } from './playlist';
 import { data as adminData, execute as adminExecute } from './admin';
+import { data as youtubeData, execute as youtubeExecute } from './youtube';
 
 export const commands = new Collection();
 commands.set('play', play);
@@ -15,6 +16,7 @@ commands.set('search', search);
 commands.set('ban', ban);
 commands.set('playlist', playlistExecute);
 commands.set('admin', adminExecute);
+commands.set('youtube', youtubeExecute);
 
 // Create the command builders
 const playCommand = new SlashCommandBuilder()
@@ -48,11 +50,62 @@ const searchCommand = new SlashCommandBuilder()
 const banCommand = new SlashCommandBuilder()
   .setName('ban')
   .setDescription('Ban a song (admin only)')
-  .addIntegerOption(option =>
-    option
-      .setName('position')
-      .setDescription('Position in queue (starting from 1, leave empty to ban currently playing song)')
-      .setRequired(false)
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('track')
+      .setDescription('Ban a specific track')
+      .addIntegerOption(option =>
+        option
+          .setName('position')
+          .setDescription('Position in queue (starting from 1, leave empty to ban currently playing song)')
+          .setRequired(false)
+      )
+      .addBooleanOption(option =>
+        option
+          .setName('block_seed')
+          .setDescription('Also block all recommendations from this song')
+          .setRequired(false)
+      )
+      .addBooleanOption(option =>
+        option
+          .setName('block_channel')
+          .setDescription('Also block the channel that uploaded this song')
+          .setRequired(false)
+      )
+  )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('song')
+      .setDescription('Ban a specific song by YouTube ID')
+      .addStringOption(option =>
+        option
+          .setName('id')
+          .setDescription('YouTube video ID or URL')
+          .setRequired(true)
+      )
+      .addBooleanOption(option =>
+        option
+          .setName('block_channel')
+          .setDescription('Also block the channel that uploaded this song')
+          .setRequired(false)
+      )
+  )
+  .addSubcommand(subcommand =>
+    subcommand
+      .setName('channel')
+      .setDescription('Ban an entire YouTube channel')
+      .addStringOption(option =>
+        option
+          .setName('id')
+          .setDescription('YouTube channel ID')
+          .setRequired(true)
+      )
+      .addStringOption(option =>
+        option
+          .setName('reason')
+          .setDescription('Reason for banning')
+          .setRequired(false)
+      )
   );
 
 // Convert all commands to JSON for REST API
@@ -63,7 +116,8 @@ const commandData = [
   searchCommand.toJSON(),
   banCommand.toJSON(),
   playlistData.toJSON(),
-  adminData.toJSON()
+  adminData.toJSON(),
+  youtubeData.toJSON()
 ];
 
 export async function registerCommands(client: Client) {
@@ -86,6 +140,7 @@ export async function registerCommands(client: Client) {
     client.commands.set('ban', ban);
     client.commands.set('playlist', playlistExecute);
     client.commands.set('admin', adminExecute);
+    client.commands.set('youtube', youtubeExecute);
 
     console.log('Successfully reloaded application (/) commands.');
   } catch (error) {

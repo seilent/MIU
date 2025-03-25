@@ -103,7 +103,7 @@ function formatTrack(request: RequestWithTrack): TrackResponse {
     requestedBy: {
       id: request.user.id,
       username: request.user.username,
-      avatar: request.user.avatar || undefined
+      avatar: request.user.avatar // Pass through null values directly
     },
     requestedAt: request.requestedAt.toISOString(),
     isAutoplay: request.isAutoplay
@@ -130,6 +130,49 @@ export function broadcast(event: string, data: any) {
 }
 
 const router = Router();
+
+// In-memory history queue (max 5 items)
+const historyQueue: Array<{
+  youtubeId: string;
+  title: string;
+  duration: number;
+  requestedBy: {
+    id: string;
+    username: string;
+    avatar: string | null;
+  };
+  requestedAt: Date;
+  playedAt: Date;
+}> = [];
+
+// Function to add track to history
+export function addToHistory(track: any, user: any, isAutoplay: boolean = false) {
+  const client = getDiscordClient();
+  if (!client?.user) {
+    throw new Error('Discord client not available');
+  }
+
+  const historyItem = {
+    youtubeId: track.youtubeId,
+    title: track.title,
+    duration: track.duration,
+    requestedBy: {
+      id: isAutoplay ? client.user.id : track.requestedBy.userId,
+      username: isAutoplay ? client.user.username : track.requestedBy.username,
+      avatar: isAutoplay ? client.user.avatar : track.requestedBy.avatar
+    },
+    requestedAt: new Date(track.requestedAt || Date.now()),
+    playedAt: new Date()
+  };
+
+  // Add to front of queue
+  historyQueue.unshift(historyItem);
+  
+  // Keep only last 5 items
+  if (historyQueue.length > 5) {
+    historyQueue.pop();
+  }
+}
 
 // Search endpoint
 router.get('/search', async (req: Request, res: Response) => {
@@ -334,7 +377,6 @@ router.get('/state', async (req: Request, res: Response) => {
           create: {
             youtubeId: track.youtubeId,
             title: track.title || 'Unknown Title',
-            thumbnail: getThumbnailUrl(track.youtubeId),
             duration: track.duration || 0,
             isMusicUrl: false,
             isActive: true,
@@ -549,6 +591,8 @@ router.post('/skip', async (req: Request, res: Response) => {
  *               position:
  *                 type: number
  *                 description: Position in queue (starting from 1, omit to ban currently playing track)
+ *               block_channel:
+ *                 type: function
  *     responses:
  *       200:
  *         description: Track banned
@@ -580,7 +624,7 @@ router.post('/ban', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Discord client not available' });
     }
 
-    const { position: uiPosition } = req.body;
+    const { position: uiPosition, block_channel: blockChannel } = req.body;
     
     if (uiPosition !== undefined) {
       // Convert UI position (1-based) to array index (0-based)
@@ -597,8 +641,21 @@ router.post('/ban', async (req: Request, res: Response) => {
       
       const trackToBan = queue[position];
       
+      // Get track info to check channel
+      const trackInfo = await prisma.track.findUnique({
+        where: { youtubeId: trackToBan.youtubeId },
+        include: { channel: true }
+      });
+
       // Apply ban penalty to the track (-10 score)
       await applyBanPenalty(trackToBan.youtubeId);
+
+      // Block channel if requested and channel exists
+      let channelBlockMessage = '';
+      if (blockChannel && trackInfo?.channelId) {
+        const channelResult = await blockChannel(trackInfo.channelId, 'Banned along with track');
+        channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+      }
       
       // Remove from queue in both database and player
       await prisma.request.updateMany({
@@ -624,46 +681,139 @@ router.post('/ban', async (req: Request, res: Response) => {
       
       res.json({ 
         success: true, 
-        message: `Banned song at position ${uiPosition}: ${trackToBan.title}` 
+        message: `Banned song at position ${uiPosition}: ${trackToBan.title}${channelBlockMessage}` 
       });
-    } else {
-      // Ban the currently playing song
-      const currentTrack = client.player.getCurrentTrack();
-      
-      if (!currentTrack) {
-        return res.status(400).json({ error: 'No track is currently playing.' });
-      }
-      
-      // Apply ban penalty to the track (-10 score)
-      await applyBanPenalty(currentTrack.youtubeId);
-      
-      // Update the status in the database
-      await prisma.request.updateMany({
-        where: {
-          youtubeId: currentTrack.youtubeId,
-          status: RequestStatus.PLAYING
-        },
-        data: {
-          status: RequestStatus.SKIPPED
-        }
-      });
-      
-      // Skip the current track
-      await client.player.skip();
-      
-      // Add a small delay to ensure database changes are committed
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      res.json({ 
-        success: true, 
-        message: `Banned and skipped: ${currentTrack.title}` 
-      });
+      return;
     }
+
+    // Ban the currently playing song
+    const currentTrack = client.player.getCurrentTrack();
+    
+    if (!currentTrack) {
+      return res.status(400).json({ error: 'No track is currently playing.' });
+    }
+    
+    // Get track info to check channel
+    const trackInfo = await prisma.track.findUnique({
+      where: { youtubeId: currentTrack.youtubeId },
+      include: { channel: true }
+    });
+
+    // Apply ban penalty to the track (-10 score)
+    await applyBanPenalty(currentTrack.youtubeId);
+
+    // Block channel if requested and channel exists
+    let channelBlockMessage = '';
+    if (blockChannel && trackInfo?.channelId) {
+      const channelResult = await blockChannel(trackInfo.channelId, 'Banned along with track');
+      channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+    }
+    
+    // Update the status in the database
+    await prisma.request.updateMany({
+      where: {
+        youtubeId: currentTrack.youtubeId,
+        status: RequestStatus.PLAYING
+      },
+      data: {
+        status: RequestStatus.SKIPPED
+      }
+    });
+    
+    // Skip the current track
+    await client.player.skip();
+    
+    // Add a small delay to ensure database changes are committed
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    res.json({ 
+      success: true, 
+      message: `Banned and skipped: ${currentTrack.title}${channelBlockMessage}` 
+    });
   } catch (error) {
     console.error('Error banning track:', error);
     res.status(500).json({ error: 'Failed to ban track' });
   }
 });
+
+// Helper function to clean up blocked songs from playlists and recommendations
+export async function cleanupBlockedSong(youtubeId: string) {
+  try {
+    // 1. Remove from all default playlists
+    await prisma.defaultPlaylistTrack.deleteMany({
+      where: {
+        trackId: youtubeId
+      }
+    });
+
+    // 2. Remove from YouTube recommendations pool
+    await prisma.youtubeRecommendation.deleteMany({
+      where: {
+        OR: [
+          { youtubeId: youtubeId },  // Remove if it's a recommendation
+          { seedTrackId: youtubeId } // Remove recommendations that used this as seed
+        ]
+      }
+    });
+
+    // 3. Delete audio cache if exists
+    const audioCache = await prisma.audioCache.findUnique({
+      where: { youtubeId }
+    });
+    if (audioCache) {
+      try {
+        await fs.promises.unlink(audioCache.filePath);
+      } catch (error) {
+        console.error(`Failed to delete audio file for ${youtubeId}:`, error);
+      }
+      await prisma.audioCache.delete({
+        where: { youtubeId }
+      });
+    }
+
+    // 4. Delete thumbnail cache if exists
+    const thumbnailCache = await prisma.thumbnailCache.findUnique({
+      where: { youtubeId }
+    });
+    if (thumbnailCache) {
+      try {
+        await fs.promises.unlink(thumbnailCache.filePath);
+      } catch (error) {
+        console.error(`Failed to delete thumbnail file for ${youtubeId}:`, error);
+      }
+      await prisma.thumbnailCache.delete({
+        where: { youtubeId }
+      });
+    }
+
+    // 5. Update all requests for this track to SKIPPED status
+    await prisma.request.updateMany({
+      where: {
+        youtubeId: youtubeId,
+        status: {
+          in: [RequestStatus.PENDING, RequestStatus.QUEUED, RequestStatus.PLAYING]
+        }
+      },
+      data: {
+        status: RequestStatus.SKIPPED
+      }
+    });
+
+    // 6. Delete track state if exists - Check first to avoid errors
+    const trackState = await prisma.trackState.findUnique({
+      where: { youtubeId }
+    });
+    if (trackState) {
+      await prisma.trackState.delete({
+        where: { youtubeId }
+      });
+    }
+
+    // Removed individual song cleanup logging to reduce verbosity
+  } catch (error) {
+    console.error('Error cleaning up blocked song:', error);
+  }
+}
 
 // Helper function to apply a ban penalty to a track
 async function applyBanPenalty(youtubeId: string) {
@@ -684,6 +834,9 @@ async function applyBanPenalty(youtubeId: string) {
         WHERE "youtubeId" = ${youtubeId}
       `
     ]);
+
+    // Clean up the blocked song from playlists and recommendations
+    await cleanupBlockedSong(youtubeId);
   } catch (error) {
     console.error('Error applying ban penalty:', error);
     throw error;
@@ -886,7 +1039,7 @@ router.get('/secure-stream/:token', async (req, res) => {
         // Using a random filename to prevent download managers from recognizing the content
         'Content-Disposition': `attachment; filename="audio-${Math.random().toString(36).substring(2, 10)}.bin"`,
         // Prevent caching
-        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0',
         'Surrogate-Control': 'no-store',
@@ -922,7 +1075,7 @@ router.get('/secure-stream/:token', async (req, res) => {
         'Content-Disposition': `attachment; filename="audio-${Math.random().toString(36).substring(2, 10)}.bin"`,
         'Accept-Ranges': 'bytes',
         // Prevent caching
-        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0',
         'Surrogate-Control': 'no-store',
@@ -1143,53 +1296,27 @@ router.get('/position', async (req: Request, res: Response) => {
 });
 
 // History endpoint
-router.get('/history', async (req: Request, res: Response) => {
+router.get('/history', async (_req: Request, res: Response) => {
   try {
-    const tracks = await prisma.request.findMany({
-      where: {
-        status: RequestStatus.COMPLETED,
-        playedAt: { not: null }
-      },
-      orderBy: {
-        playedAt: 'desc'
-      },
-      take: 50,
-      include: {
-        track: {
-          select: {
-            youtubeId: true,
-            title: true,
-            duration: true,
-            isMusicUrl: true
-          }
-        },
-        user: {
-          select: {
-            id: true,
-            username: true,
-            avatar: true
-          }
-        }
-      }
-    });
-
-    if (!Array.isArray(tracks)) {
-      throw new Error('Invalid history data format');
+    const client = getDiscordClient();
+    if (!client?.user) {
+      return res.status(500).json({ error: 'Discord client not available' });
     }
 
-    const formattedTracks = tracks.map(request => ({
-      youtubeId: request.track.youtubeId,
-      title: request.track.title,
-      thumbnail: getThumbnailUrl(request.track.youtubeId),
-      duration: request.track.duration,
+    // Format tracks for response
+    const formattedTracks = historyQueue.map(track => ({
+      youtubeId: track.youtubeId,
+      title: track.title,
+      thumbnail: getThumbnailUrl(track.youtubeId),
+      duration: track.duration,
       requestedBy: {
-        id: request.user.id,
-        username: request.user.username,
-        avatar: request.user.avatar || undefined
+        id: track.requestedBy.id,
+        username: track.requestedBy.username,
+        avatar: track.requestedBy.avatar || undefined // Match queue format
       },
-      requestedAt: request.requestedAt.toISOString(),
-      playedAt: request.playedAt?.toISOString(),
-      isAutoplay: request.isAutoplay || false
+      requestedAt: track.requestedAt.toISOString(),
+      playedAt: track.playedAt.toISOString(),
+      isAutoplay: track.requestedBy.id === client.user?.id
     }));
 
     res.json(formattedTracks);
@@ -1239,6 +1366,21 @@ function queueItemToRequestWithTrack(item: QueueItem): RequestWithTrack {
 
 // SSE endpoint for live state updates
 router.get('/state/live', (req: Request, res: Response) => {
+  const cleanup = (keepAliveInterval?: NodeJS.Timeout) => {
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    if (client) sseClients.delete(client);
+    if (!res.writableEnded) {
+      try {
+        res.end();
+      } catch (error) {
+        console.error(`Error ending SSE connection:`, error);
+      }
+    }
+  };
+
+  let client: SSEClient | undefined;
+  let keepAliveInterval: NodeJS.Timeout | undefined;
+
   try {
     // Check authentication from query parameter or user session
     const token = req.query.token as string;
@@ -1260,7 +1402,7 @@ router.get('/state/live', (req: Request, res: Response) => {
     res.flushHeaders();
 
     const clientId = Math.random().toString(36).substring(7);
-    const client: SSEClient = {
+    client = {
       id: clientId,
       response: res,
       lastEventId: req.headers['last-event-id'] as string
@@ -1283,7 +1425,7 @@ router.get('/state/live', (req: Request, res: Response) => {
           userId: currentTrack.requestedBy.userId,
           username: currentTrack.requestedBy.username,
           discriminator: '0000',
-          avatar: currentTrack.requestedBy.avatar || null
+          avatar: currentTrack.requestedBy.avatar
         }
       })) : null,
       queue: queuedTracks.map(track => formatTrack(queueItemToRequestWithTrack({
@@ -1292,7 +1434,7 @@ router.get('/state/live', (req: Request, res: Response) => {
           userId: track.requestedBy.userId,
           username: track.requestedBy.username,
           discriminator: '0000',
-          avatar: track.requestedBy.avatar || null
+          avatar: track.requestedBy.avatar
         }
       }))),
       position: player.getPosition()
@@ -1304,45 +1446,31 @@ router.get('/state/live', (req: Request, res: Response) => {
     sseClients.add(client);
 
     // Set up keep-alive interval
-    const keepAliveInterval = setInterval(() => {
+    keepAliveInterval = setInterval(() => {
       if (!res.writableEnded) {
         res.write('event: heartbeat\ndata: {}\n\n');
       } else {
-        cleanup();
+        cleanup(keepAliveInterval);
       }
     }, 30000); // Send keepalive every 30 seconds to match Apache's keepalive settings
 
     // Handle client disconnect
     req.on('close', () => {
       console.log(`SSE client ${clientId} disconnected`);
-      cleanup();
+      cleanup(keepAliveInterval);
     });
 
     // Handle errors
     res.on('error', (error) => {
       console.error(`SSE connection error for client ${clientId}:`, error);
-      cleanup();
+      cleanup(keepAliveInterval);
     });
-
-    // Cleanup function
-    function cleanup() {
-      clearInterval(keepAliveInterval);
-      sseClients.delete(client);
-      if (!res.writableEnded) {
-        try {
-          res.end();
-        } catch (error) {
-          console.error(`Error ending SSE connection for client ${clientId}:`, error);
-        }
-      }
-    }
 
   } catch (error) {
     console.error('Error in SSE connection:', error);
+    cleanup(keepAliveInterval);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to establish SSE connection' });
-    } else if (!res.writableEnded) {
-      res.end();
     }
   }
 });
@@ -1549,7 +1677,7 @@ router.get('/current', async (_req: Request, res: Response) => {
       requestedBy: {
         id: currentTrack.user.id,
         username: currentTrack.user.username,
-        avatar: currentTrack.user.avatar || undefined
+        avatar: currentTrack.user.avatar
       },
       requestedAt: currentTrack.requestedAt.toISOString()
     };
@@ -1562,6 +1690,72 @@ router.get('/current', async (_req: Request, res: Response) => {
   } catch (error) {
     console.error('Error getting current track:', error);
     res.status(500).json({ error: 'Failed to get current track' });
+  }
+});
+
+// Block tracks based on seedTrackId in YoutubeRecommendation
+router.post('/block-by-seed', async (req: Request, res: Response) => {
+  try {
+    const { seedTrackId } = req.body;
+
+    if (!seedTrackId) {
+      return res.status(400).json({ error: 'seedTrackId is required' });
+    }
+
+    // Get all tracks from YoutubeRecommendation with this seedTrackId
+    const recommendations = await prisma.youtubeRecommendation.findMany({
+      where: {
+        seedTrackId: seedTrackId
+      },
+      select: {
+        youtubeId: true
+      }
+    });
+
+    if (recommendations.length === 0) {
+      return res.status(404).json({ error: 'No recommendations found for this seed track' });
+    }
+
+    // Get all youtubeIds from recommendations
+    const youtubeIds = recommendations.map(rec => rec.youtubeId);
+
+    // Update all tracks to BLOCKED status and apply ban penalty
+    await prisma.$transaction([
+      // Update tracks to BLOCKED status
+      prisma.track.updateMany({
+        where: {
+          youtubeId: {
+            in: youtubeIds
+          }
+        },
+        data: {
+          status: TrackStatus.BLOCKED,
+          globalScore: {
+            decrement: 10 // Apply the same penalty as regular bans
+          }
+        }
+      }),
+      // Apply penalty to user stats
+      prisma.$executeRaw`
+        UPDATE "UserTrackStats"
+        SET "personalScore" = "UserTrackStats"."personalScore" - 5
+        WHERE "youtubeId" = ANY(${youtubeIds})
+      `
+    ]);
+
+    // Clean up blocked songs from playlists and recommendations
+    for (const youtubeId of youtubeIds) {
+      await cleanupBlockedSong(youtubeId);
+    }
+
+    res.json({ 
+      success: true, 
+      message: `Blocked ${youtubeIds.length} tracks from seed track ${seedTrackId}`,
+      blockedTracks: youtubeIds
+    });
+  } catch (error) {
+    console.error('Error blocking tracks by seed:', error);
+    res.status(500).json({ error: 'Failed to block tracks' });
   }
 });
 

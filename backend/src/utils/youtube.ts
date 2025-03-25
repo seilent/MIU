@@ -2,7 +2,7 @@ import { google, youtube_v3 } from 'googleapis';
 import path from 'path';
 import fs from 'fs';
 import { mkdir, access } from 'fs/promises';
-import { spawn, exec } from 'child_process';
+import { spawn } from 'child_process';
 import ffmpeg from 'ffmpeg-static';
 import ffprobe from 'ffprobe-static';
 import ytDlp from 'yt-dlp-exec';
@@ -12,7 +12,7 @@ import fetch from 'node-fetch';
 import { prisma } from '../db.js';
 import sharp from 'sharp';
 import crypto from 'crypto';
-import { exec as execa } from 'child_process';
+import { execSync } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import { Readable, Writable } from 'stream';
 import { getRootDir } from './env.js';
@@ -21,7 +21,10 @@ import { downloadAndCacheThumbnail, getThumbnailUrl } from './youtubeMusic.js';
 import { MAX_DURATION, MIN_DURATION } from '../config.js';
 import { decodeHTML } from 'entities';
 import axios from 'axios';
-import { getKeyManager } from './YouTubeKeyManager.js';
+import { getKeyManager, youtubeKeyManager } from './YouTubeKeyManager.js';
+import { executeYoutubeApi } from './youtubeApi.js';
+import execa from 'execa';
+import { filterBlockedContent, isLikelyJapaneseSong } from './contentFilter.js';
 
 // Configure FFmpeg path
 if (ffmpeg && ffprobe) {
@@ -44,6 +47,7 @@ async function ensureCacheDirectories() {
     await mkdir(CACHE_DIR, { recursive: true });
     await mkdir(AUDIO_CACHE_DIR, { recursive: true });
     await mkdir(THUMBNAIL_CACHE_DIR, { recursive: true });
+    await mkdir(path.join(CACHE_DIR, 'temp'), { recursive: true });
   } catch (error) {
     console.error('Failed to create cache directories:', error);
   }
@@ -415,29 +419,15 @@ export const youtube = {
   keyManager: getKeyManager
 };
 
-const execAsync = promisify(exec);
+const execAsync = promisify(execSync);
 
 interface TrackInfo {
   title: string;
   artist?: string;
   thumbnail: string;
   duration: number;
-}
-
-/**
- * Execute a YouTube API call with automatic retry on quota exceeded errors
- * @param operationType The operation type (e.g., 'search.list', 'videos.list')
- * @param apiCall Function that takes an API key and returns a Promise with the API call
- * @returns Result of the API call
- */
-export async function executeYoutubeApi<T>(operationType: string, apiCall: (key: string) => Promise<T>): Promise<T> {
-  try {
-    // Use the key manager's executeWithRetry method
-    return await getKeyManager().executeWithRetry(operationType, apiCall);
-  } catch (error: any) {
-    console.error(`YouTube API error for ${operationType}:`, error?.message || 'Unknown error');
-    throw error;
-  }
+  channelId?: string;
+  channelTitle?: string;
 }
 
 export async function searchYoutube(query: string): Promise<SearchResult[]> {
@@ -485,8 +475,11 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
       response.data.items = fallbackResponse.data.items;
     }
 
+    // Filter blocked content
+    const filteredItems = filterBlockedContent(response.data.items);
+
     // Get video details for duration
-    const videoIds = response.data.items
+    const videoIds = filteredItems
       .map(item => item.id?.videoId)
       .filter((id): id is string => !!id);
 
@@ -506,7 +499,7 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
     );
 
     // Process results in parallel
-    const results = await Promise.all(response.data.items.map(async (item) => {
+    const results = await Promise.all(filteredItems.map(async (item) => {
       const videoId = item.id?.videoId;
       if (!videoId) return null;
 
@@ -530,14 +523,12 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
         update: {
           title,
           duration,
-          thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
           updatedAt: new Date()
         },
         create: {
           youtubeId: videoId,
           title,
-          duration,
-          thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`
+          duration
         }
       });
 
@@ -632,13 +623,14 @@ export async function getYoutubeId(query: string): Promise<{ videoId: string | u
     let retries = 3;
     while (retries > 0) {
       try {
-        const apiKey = await getKeyManager().getCurrentKey();
-        const response = await youtube.search.list({
-          key: apiKey,
-          part: ['id'],
-          q: query,
-          type: ['video'],
-          maxResults: 1
+        const response = await executeYoutubeApi('search.list', async (apiKey) => {
+          return youtube.search.list({
+            key: apiKey,
+            part: ['id'],
+            q: query,
+            type: ['video'],
+            maxResults: 1
+          });
         });
 
         const videoId = response.data.items?.[0]?.id?.videoId;
@@ -757,7 +749,10 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
   try {
     // First check if we have the track
     const track = await prisma.track.findUnique({
-      where: { youtubeId: videoId }
+      where: { youtubeId: videoId },
+      include: {
+        channel: true
+      }
     });
 
     // If we have the track and it has valid duration, check if thumbnail exists
@@ -797,10 +792,60 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
         }
       }
 
+      // Check if we need to fetch channel info even though we have track cache
+      let channelId = track.channelId;
+      let channelTitle = track.channel?.title;
+
+      // If we don't have channel info, fetch it from YouTube API
+      if (!channelId || !channelTitle) {
+        try {
+          console.log(`Track ${videoId} has cache but missing channel info, fetching from API...`);
+          const apiKey = await getKeyManager().getCurrentKey('videos.list');
+          const response = await youtube.videos.list({
+            key: apiKey,
+            part: ['snippet'],
+            id: [videoId]
+          });
+
+          const video = response.data.items?.[0];
+          if (video && video.snippet) {
+            channelId = video.snippet.channelId;
+            channelTitle = video.snippet.channelTitle;
+
+            // Update track with channel info
+            if (channelId) {
+              // First upsert the channel
+              await prisma.channel.upsert({
+                where: { id: channelId },
+                create: {
+                  id: channelId,
+                  title: channelTitle || 'Unknown Channel'
+                },
+                update: {
+                  title: channelTitle || 'Unknown Channel'
+                }
+              });
+
+              // Then update the track
+              await prisma.track.update({
+                where: { youtubeId: videoId },
+                data: {
+                  channelId
+                }
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to fetch channel info for ${videoId}:`, error);
+        }
+      }
+
       return {
         title: track.title,
         thumbnail: getThumbnailUrl(videoId),
-        duration: track.duration
+        duration: track.duration,
+        channelId,
+        channelTitle
       };
     }
 
@@ -823,6 +868,8 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
         // Parse duration from ISO 8601 format
         const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
         const title = video.snippet?.title || 'Unknown Title';
+        const channelId = video.snippet?.channelId;
+        const channelTitle = video.snippet?.channelTitle;
         const thumbnail = video.snippet?.thumbnails?.maxres?.url ||
                         video.snippet?.thumbnails?.high?.url ||
                         video.snippet?.thumbnails?.medium?.url ||
@@ -836,23 +883,45 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
           console.error(`Failed to download thumbnail for ${videoId}:`, error);
         }
 
-        // Cache the track info - remove thumbnail field
+        // If we have channel info, upsert the channel
+        if (channelId) {
+          await prisma.channel.upsert({
+            where: { id: channelId },
+            create: {
+              id: channelId,
+              title: channelTitle || 'Unknown Channel'
+            },
+            update: {
+              title: channelTitle || 'Unknown Channel'
+            }
+          });
+        }
+
+        // Cache the track info
         await prisma.track.upsert({
           where: { youtubeId: videoId },
           update: {
             title,
             duration,
-            isMusicUrl
+            isMusicUrl,
+            channelId
           },
           create: {
             youtubeId: videoId,
             title,
             duration,
-            isMusicUrl
+            isMusicUrl,
+            channelId
           }
         });
 
-        return { title, thumbnail, duration };
+        return { 
+          title, 
+          thumbnail, 
+          duration,
+          channelId,
+          channelTitle
+        };
       } catch (error: any) {
         if (error?.response?.status === 403) {
           const key = error.config?.params?.key;
@@ -879,143 +948,173 @@ export async function getYoutubeInfo(videoId: string, isMusicUrl: boolean = fals
 // Add download lock tracking
 const activeDownloads = new Map<string, Promise<string>>();
 
-export async function downloadYoutubeAudio(youtubeId: string): Promise<string> {
-  if (!youtubeId) {
-    throw new Error('YouTube ID is required');
-  }
-
-  // Check if download is already in progress
-  const existingDownload = activeDownloads.get(youtubeId);
-  if (existingDownload) {
-    console.log(`⏳ [${youtubeId}] Download already in progress, waiting...`);
-    return existingDownload;
-  }
-
-  const cacheDir = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
-  const audioDir = path.join(cacheDir, 'audio');
-
-  // Ensure directories exist
-  await fs.promises.mkdir(audioDir, { recursive: true });
-
-  const finalPath = path.join(audioDir, `${youtubeId}.m4a`);
-  const tempPath = path.join(audioDir, `${youtubeId}.temp.m4a`);
-  const uniqueTempPath = path.join(audioDir, `${youtubeId}.${Date.now()}.temp.m4a`);
-
-  // Create download promise
-  const downloadPromise = (async () => {
+export async function downloadYoutubeAudio(youtubeId: string, isMusicUrl: boolean = false): Promise<string> {
+  // Create a unique temp path to avoid conflicts with parallel downloads
+  let uniqueTempPath = '';
+  
+  try {
+    await ensureCacheDirectories();
+    
+    // Define paths
+    const cacheDir = path.join(process.cwd(), 'cache', 'audio');
+    const tempDir = path.join(process.cwd(), 'cache', 'temp');
+    const finalPath = path.join(cacheDir, `${youtubeId}.m4a`);
+    const tempPath = path.join(tempDir, `${youtubeId}.m4a`);
+    
+    // Check if file already exists in cache
     try {
-      // If file already exists and is not empty, return it
-      try {
-        const stats = await fs.promises.stat(finalPath);
-        if (stats.size > 0) {
-          return finalPath;
-        }
-      } catch (error) {
-        // File doesn't exist, continue with download
+      const stats = await fs.promises.stat(finalPath);
+      if (stats.size > 0) {
+        console.log(`✓ [${youtubeId}] Using cached audio`);
+        return finalPath;
       }
-
-      // Clean up any existing temp files
-      try {
-        await fs.promises.unlink(tempPath);
-      } catch (error) {
-        // Ignore errors if file doesn't exist
-      }
-      try {
-        await fs.promises.unlink(`${tempPath}.part`);
-      } catch (error) {
-        // Ignore errors if file doesn't exist
-      }
-
-      // Add retry logic for download
-      let retries = 3;
-      let lastError: Error | null = null;
-      let backoffDelay = 1000;
-
-      while (retries > 0) {
-        try {
-          // Construct YouTube URL
-          const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
-          console.log(`⬇️ [${youtubeId}] Starting download`);
-
-          // Download with yt-dlp using unique temp path
-          await ytDlp(youtubeUrl, {
-            output: uniqueTempPath,
-            extractAudio: true,
-            audioFormat: 'm4a',
-            format: 'bestaudio[ext=m4a]',
-            noCheckCertificate: true,
-            noWarnings: true,
-            quiet: true,
-            preferFreeFormats: true,
-            ffmpegLocation: ffmpeg || undefined
-          });
-
-          // Verify the downloaded file exists and is not empty
-          const stats = await fs.promises.stat(uniqueTempPath);
-          if (stats.size === 0) {
-            throw new Error('Downloaded file is empty');
-          }
-
-          // Move temp file to final location
-          await fs.promises.rename(uniqueTempPath, finalPath);
-          console.log(`✅ [${youtubeId}] Download complete`);
-          return finalPath;
-        } catch (error: any) {
-          lastError = error;
-          const errorMessage = error?.stderr || error?.message || 'Unknown error';
-          
-          // Extract just the yt-dlp error message if present
-          const ytdlpError = errorMessage.match(/ERROR: \[youtube\].*?: (.*?)(\n|$)/)?.[1];
-          
-          // Check if video is unavailable - no need to retry in this case
-          if (errorMessage.includes('Video unavailable') || 
-              errorMessage.includes('This video is not available') ||
-              errorMessage.includes('This video has been removed')) {
-            console.log(`❌ [${youtubeId}] Video unavailable`);
-            throw new Error(`Video unavailable: ${youtubeId}`);
-          }
-          
-          console.log(`⚠️ [${youtubeId}] Attempt ${4 - retries}/3 failed: ${ytdlpError || errorMessage}`);
-          retries--;
-
-          // Clean up failed attempt
-          try {
-            await fs.promises.unlink(uniqueTempPath);
-          } catch (e) {
-            // Ignore cleanup errors
-          }
-
-          if (retries > 0) {
-            // Exponential backoff
-            await new Promise(resolve => setTimeout(resolve, backoffDelay));
-            backoffDelay *= 2; // Double the delay for next retry
-          }
-        }
-      }
-
-      console.log(`❌ [${youtubeId}] Download failed after 3 attempts`);
-      throw lastError || new Error('Download failed after retries');
-    } finally {
-      // Always clean up temp files and remove from active downloads
-      try {
-        await fs.promises.unlink(uniqueTempPath);
-      } catch (error) {
-        // Ignore cleanup errors
-      }
-      activeDownloads.delete(youtubeId);
+    } catch (error) {
+      // File doesn't exist, continue with download
     }
-  })();
+    
+    // Set the unique temp path
+    uniqueTempPath = `${tempPath}.${Date.now()}`;
+    
+    // Clean up any existing temp files
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch (error) {
+      // Ignore errors if file doesn't exist
+    }
+    try {
+      await fs.promises.unlink(`${tempPath}.part`);
+    } catch (error) {
+      // Ignore errors if file doesn't exist
+    }
 
-  // Store the promise in active downloads
-  activeDownloads.set(youtubeId, downloadPromise);
+    // Add retry logic for download
+    let retries = 3;
+    let lastError: Error | null = null;
+    let backoffDelay = 1000;
 
-  return downloadPromise;
+    // Check if cookies file exists
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await fs.promises.access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log(`✓ [${youtubeId}] Using cookies for authentication`);
+    } catch (error) {
+      console.log(`⚠️ [${youtubeId}] No cookies file found, proceeding without authentication`);
+    }
+
+    while (retries > 0) {
+      try {
+        // Construct YouTube URL - use music.youtube.com directly if it's a music URL
+        const youtubeUrl = isMusicUrl 
+          ? `https://music.youtube.com/watch?v=${youtubeId}`
+          : `https://www.youtube.com/watch?v=${youtubeId}`;
+        
+        console.log(`⬇️ [${youtubeId}] Starting download from ${isMusicUrl ? 'YouTube Music' : 'YouTube'}`);
+
+        // Download with yt-dlp using unique temp path
+        const options: any = {
+          output: uniqueTempPath,
+          extractAudio: true,
+          audioFormat: 'wav', // Download as WAV first
+          format: 'bestaudio',
+          noCheckCertificate: true,
+          noWarnings: true,
+          quiet: true,
+          ffmpegLocation: ffmpeg || undefined,
+          formatSort: 'proto:m3u8,abr',
+          noPlaylist: true
+        };
+
+        // Add cookies if available
+        if (cookiesExist) {
+          options.cookies = cookiesPath;
+        }
+
+        await ytDlp(youtubeUrl, options);
+
+        // yt-dlp might add an extra .wav extension, so check both paths
+        let actualFilePath = uniqueTempPath;
+        try {
+          await fs.promises.access(uniqueTempPath, fs.constants.R_OK);
+        } catch (error) {
+          // Try with extra .wav extension
+          const altPath = `${uniqueTempPath}.wav`;
+          try {
+            await fs.promises.access(altPath, fs.constants.R_OK);
+            actualFilePath = altPath;
+            console.log(`✓ [${youtubeId}] Found file with extra extension: ${altPath}`);
+          } catch (e) {
+            throw new Error(`Downloaded file not found at ${uniqueTempPath} or ${altPath}`);
+          }
+        }
+
+        // Verify the downloaded file exists and is not empty
+        const stats = await fs.promises.stat(actualFilePath);
+        if (stats.size === 0) {
+          throw new Error('Downloaded file is empty');
+        }
+
+        // Apply our custom normalization logic
+        console.log(`🎵 [${youtubeId}] Applying volume normalization`);
+        await convertToAAC(actualFilePath, finalPath);
+        console.log(`✅ [${youtubeId}] Download and normalization complete`);
+        return finalPath;
+      } catch (error: any) {
+        lastError = error;
+        const errorMessage = error?.stderr || error?.message || 'Unknown error';
+        
+        // Extract just the yt-dlp error message if present
+        const ytdlpError = errorMessage.match(/ERROR: \[youtube\].*?: (.*?)(\n|$)/)?.[1];
+        
+        // Check if video is unavailable - no need to retry in this case
+        if (errorMessage.includes('Video unavailable') || 
+            errorMessage.includes('This video is not available') ||
+            errorMessage.includes('This video has been removed')) {
+          console.log(`❌ [${youtubeId}] Video unavailable`);
+          throw new Error(`Video unavailable: ${youtubeId}`);
+        }
+        
+        console.log(`⚠️ [${youtubeId}] Attempt ${4 - retries}/3 failed: ${ytdlpError || errorMessage}`);
+        retries--;
+
+        // Clean up failed attempt
+        try {
+          await fs.promises.unlink(uniqueTempPath);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+
+        if (retries > 0) {
+          // Exponential backoff
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          backoffDelay *= 2; // Double the delay for next retry
+        }
+      }
+    }
+
+    console.log(`❌ [${youtubeId}] Download failed after 3 attempts`);
+    throw lastError || new Error('Download failed after retries');
+  } finally {
+    // Always clean up temp files and remove from active downloads
+    try {
+      await fs.promises.unlink(uniqueTempPath);
+    } catch (error) {
+      // Ignore cleanup errors
+    }
+    try {
+      await fs.promises.unlink(`${uniqueTempPath}.m4a`);
+    } catch (error) {
+      // Ignore cleanup errors
+    }
+    activeDownloads.delete(youtubeId);
+  }
 }
 
 async function convertToAAC(inputPath: string, outputPath: string): Promise<void> {
   return new Promise(async (resolve, reject) => {
     try {
-      // First pass: run volumedetect filter to measure max_volume
+      // First pass: run volumedetect filter to measure volume characteristics
       let stderrData = '';
       const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
@@ -1047,49 +1146,58 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
         });
       } catch (error) {
         console.warn('Volume detection failed, proceeding with default volume:', error);
-        stderrData = 'max_volume: 0 dB'; // Default to no adjustment if detection fails
+        stderrData = 'mean_volume: -13.0 dB\nmax_volume: 0.0 dB'; // Default to safe values if detection fails
       }
 
       // Parse volume data
-      const match = stderrData.match(/max_volume:\s*(-?\d+(\.\d+)?) dB/);
-      const maxVolume = match ? parseFloat(match[1]) : 0;
-      const gain = -1 - maxVolume; // Target -1dB
+      const meanMatch = stderrData.match(/mean_volume:\s*(-?\d+(\.\d+)?) dB/);
+      const maxMatch = stderrData.match(/max_volume:\s*(-?\d+(\.\d+)?) dB/);
+      const meanVolume = meanMatch ? parseFloat(meanMatch[1]) : -13.0;
+      const maxVolume = maxMatch ? parseFloat(maxMatch[1]) : 0.0;
 
-      // Conversion pass
+      // Base FFmpeg arguments
+      const baseArgs = [
+        '-i', inputPath,
+        '-c:a', 'aac',
+        '-b:a', '256k',
+        '-ar', '48000',
+        '-ac', '2',
+        '-movflags', '+faststart',
+        outputPath
+      ];
+
+      // Determine audio processing based on mean volume
+      let audioFilters = [];
+      
+      if (meanVolume >= -14 && meanVolume <= -13) {
+        console.log(`📊 [${inputPath}] Mean volume ${meanVolume.toFixed(1)}dB is within target range (-14dB to -13dB), skipping normalization`);
+      } else if (meanVolume > -13) {
+        const gain = -13 - meanVolume;
+        console.log(`📊 [${inputPath}] Mean volume ${meanVolume.toFixed(1)}dB is too loud, reducing by ${gain.toFixed(1)}dB`);
+        audioFilters.push(`volume=${gain}dB`);
+      } else if (meanVolume < -14) {
+        const gain = -13 - meanVolume;
+        console.log(`📊 [${inputPath}] Mean volume ${meanVolume.toFixed(1)}dB is too quiet, boosting by ${gain.toFixed(1)}dB with compression`);
+        audioFilters.push(`volume=${gain}dB,acompressor=threshold=-1dB:ratio=2:attack=5:release=100`);
+      }
+
+      // Add audio filters if needed
+      if (audioFilters.length > 0) {
+        baseArgs.splice(2, 0, '-af', audioFilters.join(','));
+      }
+
+      // Run FFmpeg conversion
       await new Promise<void>((res, rej) => {
-        const process = spawn(ffmpeg!, [
-          '-hide_banner',
-          '-loglevel', 'error',
-          '-i', inputPath,
-          '-c:a', 'aac',
-          '-b:a', '256k',
-          '-ar', '48000',
-          '-ac', '2',
-          '-af', `volume=${gain}dB`,
-          '-movflags', '+faststart',
-          '-y',
-          outputPath
-        ]);
-
-        let conversionError = '';
-
-        process.stderr.on('data', (data: Buffer) => {
-          conversionError += data.toString();
-        });
+        const process = spawn(ffmpeg!, baseArgs);
 
         process.on('error', (error) => {
           console.error('FFmpeg conversion error:', error);
           rej(error);
         });
 
-        process.on('close', (code: number) => {
+        process.on('close', (code) => {
           if (code === 0) res();
-          else {
-            if (conversionError) {
-              console.error('FFmpeg error output:', conversionError);
-            }
-            rej(new Error(`FFmpeg conversion exited with code ${code}`));
-          }
+          else rej(new Error(`FFmpeg conversion exited with code ${code}`));
         });
       });
 
@@ -1241,6 +1349,154 @@ export async function getAudioFileDuration(filePath: string): Promise<number> {
  */
 export async function getYoutubeRecommendations(seedTrackId: string): Promise<Array<{ youtubeId: string }>> {
   try {
+    // First check if the seed track is blocked
+    const seedTrack = await prisma.track.findUnique({
+      where: { youtubeId: seedTrackId },
+      include: { channel: true }
+    });
+
+    if (!seedTrack) {
+      console.log(`Seed track ${seedTrackId} not found in database`);
+      return [];
+    }
+
+    // Don't use blocked tracks as seeds
+    if (seedTrack.status === 'BLOCKED') {
+      console.log(`Seed track ${seedTrackId} is blocked, skipping recommendations`);
+      return [];
+    }
+
+    // Don't use tracks from blocked channels as seeds
+    if (seedTrack.channel?.isBlocked) {
+      console.log(`Seed track ${seedTrackId} is from blocked channel ${seedTrack.channel.id}, skipping recommendations`);
+      return [];
+    }
+
+    // First check if cookies file exists for YouTube Music recommendations
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log('Using cookies for YouTube Music recommendations');
+    } catch (error) {
+      console.log('No cookies file found, using standard YouTube API for recommendations');
+    }
+    
+    // If cookies exist, try to get recommendations from YouTube Music first
+    if (cookiesExist) {
+      try {
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        
+        // Get the radio/mix playlist for this track
+        const radioUrl = `https://music.youtube.com/watch?v=${seedTrackId}&list=RDAMVM${seedTrackId}`;
+        
+        console.log(`Fetching YouTube Music recommendations for ${seedTrackId}`);
+        
+        const { stdout } = await execa(ytdlpPath, [
+          radioUrl,
+          '--cookies', cookiesPath,
+          '--flat-playlist',
+          '--dump-json',
+          '--no-download'
+        ]);
+        
+        if (!stdout || stdout.trim() === '') {
+          console.log('No output from yt-dlp command');
+          throw new Error('No output from yt-dlp command');
+        }
+        
+        const items = stdout.split('\n')
+          .filter(line => line.trim())
+          .map(line => JSON.parse(line));
+        
+        console.log(`Found ${items.length} tracks in the recommendation playlist`);
+        
+        // Filter out the seed track and blocked tracks/channels
+        const filteredItems = [];
+        for (const item of items) {
+          if (item.id === seedTrackId) continue;
+
+          // Check if track is blocked
+          const track = await prisma.track.findUnique({
+            where: { youtubeId: item.id },
+            include: { channel: true }
+          });
+
+          if (track?.status === 'BLOCKED') continue;
+          if (track?.channel?.isBlocked) continue;
+
+          // Check if channel is blocked even if track doesn't exist
+          if (item.channel_id) {
+            const channel = await prisma.channel.findUnique({
+              where: { id: item.channel_id }
+            });
+            if (channel?.isBlocked) continue;
+          }
+
+          filteredItems.push(item);
+        }
+        
+        // Filter for Japanese tracks and exclude Chinese content
+        const japaneseTracks = filteredItems.filter(item => {
+          return isLikelyJapaneseSong(
+            item.title || '', 
+            item.channel || '', 
+            []  // No tags available from yt-dlp output
+          );
+        });
+        
+        console.log(`${japaneseTracks.length} tracks identified as likely Japanese`);
+        
+        if (japaneseTracks.length > 0) {
+          // Limit to 5 recommendations per seed track
+          const limitedTracks = japaneseTracks.slice(0, 5);
+          
+          // Map to the required format
+          const recommendations = limitedTracks.map(track => ({ 
+            youtubeId: track.id 
+          }));
+          
+          // Store recommendations in the database
+          for (const rec of recommendations) {
+            try {
+              // Check if this video is already recommended
+              const existingRec = await prisma.youtubeRecommendation.findUnique({
+                where: {
+                  youtubeId: rec.youtubeId
+                }
+              });
+
+              if (!existingRec) {
+                // Only create if this video hasn't been recommended before
+                await prisma.youtubeRecommendation.create({
+                  data: {
+                    seedTrackId,
+                    youtubeId: rec.youtubeId,
+                    wasPlayed: false
+                  }
+                });
+              }
+              // Skip if already exists - we don't want duplicate recommendations
+            } catch (dbError) {
+              console.error(`Failed to store recommendation ${rec.youtubeId} for seed ${seedTrackId}:`, dbError);
+              // Continue with next recommendation despite error
+              continue;
+            }
+          }
+          
+          console.log(`Returning ${recommendations.length} YouTube Music recommendations (limited to 5)`);
+          return recommendations;
+        }
+        
+        console.log('No Japanese tracks found in YouTube Music recommendations, falling back to standard method');
+      } catch (ytdlpError) {
+        console.error('Failed to get recommendations using yt-dlp:', ytdlpError);
+        console.log('Falling back to standard YouTube API method');
+      }
+    }
+    
+    // If YouTube Music method failed or no cookies, use the standard YouTube API method
     // First verify if the seed track exists and is available
     let seedTrackDetails: youtube_v3.Schema$Video | null = null;
     try {
@@ -1345,73 +1601,40 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
       }
     }
     
-    // Strategy 3: Get videos using genre tags with official/Topic filter
-    if (recommendations.length < 5) {
-      // Extract genre tags - these are usually English words like "J-Rock", "Pop", etc.
-      const genreTags = tags.filter(tag => 
-        /^[a-zA-Z\s\-]+$/.test(tag) || 
-        ['jpop', 'j-pop', 'jrock', 'j-rock', 'vocaloid', 'anime'].includes(tag.toLowerCase())
-      );
-      
-      if (genreTags.length > 0) {
-        console.log(`Searching for similar genre with tags: ${genreTags.join(', ')}`);
-        
-        const genreBasedRecs = await getRecommendationsFromGenre(
-          seedTrackId,
-          genreTags,
-          keyManager
-        );
-        
-        if (genreBasedRecs.length > 0) {
-          recommendations = recommendations.concat(genreBasedRecs.slice(0, 5 - recommendations.length));
-          console.log(`Found ${genreBasedRecs.length} recommendations from genre search`);
-        }
-      }
-    }
-    
     // Store recommendations in the database
-    if (recommendations.length > 0) {
+    for (const rec of recommendations) {
       try {
-        // Filter recommendations by duration before storing
-        const validatedRecommendations = await validateRecommendationDurations(recommendations);
-        
-        if (validatedRecommendations.length === 0) {
-          console.log(`No recommendations with valid durations found for ${seedTrackId}`);
-          return existingRecs;
+        // Check if this video is already recommended
+        const existingRec = await prisma.youtubeRecommendation.findUnique({
+          where: {
+            youtubeId: rec.youtubeId
+          }
+        });
+
+        if (!existingRec) {
+          // Only create if this video hasn't been recommended before
+          await prisma.youtubeRecommendation.create({
+            data: {
+              seedTrackId,
+              youtubeId: rec.youtubeId,
+              wasPlayed: false
+            }
+          });
         }
-        
-        const recommendationsToStore = validatedRecommendations.map(rec => ({
-          youtubeId: rec.youtubeId,
-          seedTrackId: seedTrackId,
-          relevanceScore: 0.9, // High relevance for official content
-          isJapanese: true, // We've already verified the seed is Japanese
-          wasPlayed: false,
-          createdAt: new Date(),
-          updatedAt: new Date()
-        }));
-        
-        await prisma.$executeRaw`
-          INSERT INTO "YoutubeRecommendation" ("youtubeId", "seedTrackId", "relevanceScore", "isJapanese", "wasPlayed", "createdAt", "updatedAt")
-          VALUES ${Prisma.join(
-            recommendationsToStore.map(rec => 
-              Prisma.sql`(${rec.youtubeId}, ${rec.seedTrackId}, ${rec.relevanceScore || 0}, ${rec.isJapanese || false}, false, now(), now())`
-            )
-          )}
-          ON CONFLICT ("youtubeId") DO NOTHING
-        `;
-        
-        console.log(`Stored ${recommendationsToStore.length} new recommendations with valid durations for ${seedTrackId}`);
-        
-        return validatedRecommendations;
-      } catch (storeError) {
-        console.error('Error storing recommendations:', storeError);
+        // Skip if already exists - we don't want duplicate recommendations
+      } catch (dbError) {
+        console.error(`Failed to store recommendation ${rec.youtubeId} for seed ${seedTrackId}:`, dbError);
+        // Continue with next recommendation despite error
+        continue;
       }
     }
     
-    return recommendations.length > 0 ? recommendations : existingRecs;
+    // Validate recommendations to ensure they're available
+    const validatedRecommendations = await validateRecommendationDurations(recommendations);
     
+    return validatedRecommendations;
   } catch (error) {
-    console.error('Error in getYoutubeRecommendations:', error);
+    console.error(`Error getting recommendations for ${seedTrackId}:`, error);
     return [];
   }
 }
@@ -1424,13 +1647,14 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
 async function validateRecommendationDurations(
   recommendations: Array<{ youtubeId: string }>
 ): Promise<Array<{ youtubeId: string }>> {
-  const validatedRecommendations: Array<{ youtubeId: string }> = [];
-  
-  // Get all the YouTube IDs
-  const youtubeIds = recommendations.map(rec => rec.youtubeId);
-  if (youtubeIds.length === 0) return [];
-  
   try {
+    console.log(`Starting validation of ${recommendations.length} recommendations`);
+    const validatedRecommendations: Array<{ youtubeId: string }> = [];
+    
+    // Get all the YouTube IDs
+    const youtubeIds = recommendations.map(rec => rec.youtubeId);
+    if (youtubeIds.length === 0) return [];
+    
     // Check for durations of these videos in our database first
     const existingTracks = await prisma.track.findMany({
       where: {
@@ -1438,13 +1662,14 @@ async function validateRecommendationDurations(
       },
       select: {
         youtubeId: true,
-        duration: true
+        duration: true,
+        channelId: true
       }
     });
     
     // Create a map of existing tracks for quick lookup
     const existingTracksMap = new Map(
-      existingTracks.map(track => [track.youtubeId, track.duration])
+      existingTracks.map(track => [track.youtubeId, track])
     );
     
     // Filter out the IDs we already have duration information for
@@ -1461,40 +1686,57 @@ async function validateRecommendationDurations(
     const idsToFetch = youtubeIds.filter(id => !existingTracksMap.has(id));
     
     if (idsToFetch.length > 0) {
-      const keyManager = getKeyManager();
-      const apiKey = await keyManager.getCurrentKey('videos.list');
-      
       // Fetch videos in chunks to avoid exceeding API limits
       const chunkSize = 50; // YouTube API allows up to 50 IDs per request
       for (let i = 0; i < idsToFetch.length; i += chunkSize) {
         const chunk = idsToFetch.slice(i, i + chunkSize);
         
         try {
-          const response = await youtube.videos.list({
-            key: apiKey,
-            part: ['contentDetails', 'snippet'],
-            id: chunk
+          const response = await executeYoutubeApi('videos.list', async (apiKey) => {
+            return youtube.videos.list({
+              key: apiKey,
+              part: ['contentDetails', 'snippet'],
+              id: chunk
+            });
           });
           
           if (response.data.items && response.data.items.length > 0) {
-            // Process each video's duration
+            // Process each video's duration and channel info
             for (const video of response.data.items) {
               const videoId = video.id as string;
               const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
               const title = video.snippet?.title || 'Unknown';
+              const channelId = video.snippet?.channelId;
+              const channelTitle = video.snippet?.channelTitle;
+              
+              // If we have channel info, create/update the channel first
+              if (channelId && channelTitle) {
+                await prisma.channel.upsert({
+                  where: { id: channelId },
+                  create: {
+                    id: channelId,
+                    title: channelTitle
+                  },
+                  update: {
+                    title: channelTitle
+                  }
+                });
+              }
               
               // Store in database for future reference
               await prisma.track.upsert({
                 where: { youtubeId: videoId },
                 update: {
                   title,
-                  duration
+                  duration,
+                  channelId,
+                  updatedAt: new Date()
                 },
                 create: {
                   youtubeId: videoId,
                   title,
                   duration,
-                  isMusicUrl: false
+                  channelId
                 }
               });
               
@@ -1506,13 +1748,8 @@ async function validateRecommendationDurations(
               }
             }
           }
-        } catch (error: any) {
-          console.error(`Error fetching video details: ${error?.message || error}`);
-          
-          if (error?.errors?.[0]?.reason === 'quotaExceeded') {
-            keyManager.markKeyAsQuotaExceeded(apiKey, 'videos.list');
-            // Try with a different key in the next chunk
-          }
+        } catch (error) {
+          console.error('Error fetching video details:', error);
         }
       }
     }
@@ -1731,166 +1968,32 @@ async function getRecommendationsFromRelatedArtist(
 }
 
 /**
- * Get recommendations based on genre tags
- */
-async function getRecommendationsFromGenre(
-  seedTrackId: string,
-  genreTags: string[],
-  keyManager: YouTubeKeyManager
-): Promise<Array<{ youtubeId: string }>> {
-  try {
-    // Try all available API keys for search until we find one that works
-    const allApiKeys = await keyManager.getAllKeys();
-    
-    let attemptsCount = 0;
-    const maxAttempts = allApiKeys.length;
-    
-    while (attemptsCount < maxAttempts) {
-      let currentApiKey: string | null = null;
-      
-      try {
-        // Get next API key for search
-        currentApiKey = await keyManager.getNextKey('search.list');
-        if (!currentApiKey) {
-          console.error('No available API keys for YouTube search');
-          break;
-        }
-        
-        // Construct a search query using genre tags + official/Topic
-        const searchQuery = `(${genreTags.join(' OR ')}) ("Official" OR "official" OR "Topic")`;
-        
-        console.log(`Searching for genre with query: ${searchQuery} (attempt ${attemptsCount + 1}/${maxAttempts})`);
-        
-        const searchResponse = await youtube.search.list({
-          key: currentApiKey,
-          part: ['id', 'snippet'],
-          q: searchQuery,
-          type: ['video'],
-          videoCategoryId: '10', // Music category
-          regionCode: 'JP',
-          relevanceLanguage: 'ja',
-          maxResults: 15
-        });
-        
-        if (searchResponse.data.items && searchResponse.data.items.length > 0) {
-          console.log(`Found ${searchResponse.data.items.length} videos from genre search`);
-          
-          // Filter out the current video
-          const filteredItems = searchResponse.data.items.filter(item => 
-            item.id?.videoId !== seedTrackId
-          );
-          
-          // Further filter results to official content only
-          const officialItems = filteredItems.filter(item => {
-            const channelTitle = item.snippet?.channelTitle || '';
-            const videoTitle = item.snippet?.title || '';
-            
-            return (
-              // Topic channels are automatically generated by YouTube Music
-              channelTitle.includes('Topic') ||
-              // Official channels often include "official" in the name
-              channelTitle.includes('Official') ||
-              channelTitle.includes('official') ||
-              // Videos with "Official" in the title are likely official releases
-              videoTitle.includes('Official') ||
-              videoTitle.includes('official') ||
-              // Videos marked as MV (Music Video) are often official
-              videoTitle.includes('MV') ||
-              videoTitle.includes('M/V') ||
-              // Japanese official videos often include (Official Video) in title
-              videoTitle.includes('(Official Video)') ||
-              videoTitle.includes('【Official】')
-            );
-          });
-          
-          // Filter out videos with blocked keywords
-          const contentFiltered = filterBlockedContent(officialItems);
-          
-          if (contentFiltered.length > 0) {
-            // Map to the required format and return
-            return contentFiltered.map(item => ({ 
-              youtubeId: item.id?.videoId || '' 
-            })).filter(rec => rec.youtubeId !== '');
-          }
-        }
-        
-        // If we couldn't get results, try next key
-        console.log(`No valid results found for genre search, trying next key`);
-        attemptsCount++;
-        
-      } catch (error: any) {
-        const reason = error?.errors?.[0]?.reason;
-        if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
-          console.log(`API key ${currentApiKey?.slice(-5)} exceeded quota for 'search.list' operation (${reason}), marking as limited and trying next key`);
-          if (currentApiKey) {
-            keyManager.markKeyAsQuotaExceeded(currentApiKey, 'search.list');
-          }
-        }
-        // Increment attempt count to avoid getting stuck
-        attemptsCount++;
-      }
-    }
-    
-    return [];
-  } catch (error) {
-    console.error('Error in getRecommendationsFromGenre:', error);
-    return [];
-  }
-}
-
-/**
- * Filter out videos with blocked keywords
- */
-function filterBlockedContent(items: youtube_v3.Schema$SearchResult[]): youtube_v3.Schema$SearchResult[] {
-  const blockedKeywords = [
-    'cover', 'カバー',
-    '歌ってみた', 'うたってみた',
-    'vocaloid', 'ボーカロイド', 'ボカロ',
-    'hatsune', 'miku', '初音ミク',
-    'live', 'ライブ', 'concert', 'コンサート',
-    'remix', 'リミックス',
-    'acoustic', 'アコースティック',
-    'instrumental', 'インストゥルメンタル',
-    'karaoke', 'カラオケ',
-    'nightcore',
-    'kagamine', 'rin', 'len', '鏡音リン', '鏡音レン',
-    'luka', 'megurine', '巡音ルカ',
-    'kaito', 'kaiko', 'meiko', 'gumi', 'gackpo', 'ia',
-    'utau', 'utauloid', 'utaite',
-    'nico', 'niconico', 'ニコニコ',
-    'short', 'shorts', 'ショート', 'tiktok', 'tik tok', 'reels',
-    'mv reaction', 'reaction', 'リアクション',
-    'tutorial', 'lesson', 'how to', 'music theory',
-    'guitar', 'drum', 'piano', 'tabs', 'off vocal',
-    'ギター', 'ドラム', 'ピアノ', 'オフボーカル'
-  ];
-  
-  return items.filter(item => {
-    const title = (item.snippet?.title || '').toLowerCase();
-    const channelTitle = (item.snippet?.channelTitle || '').toLowerCase();
-    
-    // Check for blocked keywords in both title and channel name
-    return !blockedKeywords.some(keyword => 
-      title.includes(keyword.toLowerCase()) || 
-      channelTitle.includes(keyword.toLowerCase())
-    );
-  });
-}
-
-/**
  * Refresh the YouTube recommendations pool in the database
  * This is a background job that runs periodically to ensure we have recommendations
+ * and validates existing tracks
  */
 export async function refreshYoutubeRecommendationsPool(): Promise<void> {
   try {
+    console.log('=== Starting YouTube Recommendations Pool Refresh ===');
+    
+    // First validate some tracks to ensure our database is clean
+    console.log('\n--- Validating Existing Tracks ---');
+    const validatedCount = await validateTracksAvailability(20); // Limit to 20 tracks per run
+    console.log(`Validated ${validatedCount} tracks`);
+    
     // Get seed tracks that have fewer than MIN_RECOMMENDATIONS recommendations
     const MIN_RECOMMENDATIONS = 5;
     
-    // Find tracks with insufficient recommendations
+    console.log('\n--- Finding Tracks Needing Recommendations ---');
+    // Find tracks with insufficient recommendations, excluding blocked tracks and tracks from blocked channels
     const tracksNeedingRecommendations = await prisma.$queryRaw<Array<{ youtubeId: string, recommendationCount: number }>>`
       SELECT t."youtubeId", COUNT(r."youtubeId") as "recommendationCount"
       FROM "Track" t
       LEFT JOIN "YoutubeRecommendation" r ON t."youtubeId" = r."seedTrackId"
+      LEFT JOIN "Channel" c ON t."channelId" = c."id"
+      WHERE t."isActive" = true
+      AND t."status" != 'BLOCKED'
+      AND (c."id" IS NULL OR c."isBlocked" = false)
       GROUP BY t."youtubeId"
       HAVING COUNT(r."youtubeId") < ${MIN_RECOMMENDATIONS}
       ORDER BY "recommendationCount" ASC
@@ -1907,7 +2010,7 @@ export async function refreshYoutubeRecommendationsPool(): Promise<void> {
     // Process each track with a delay between requests to avoid rate limiting
     for (const trackInfo of tracksNeedingRecommendations) {
       try {
-        console.log(`Fetching recommendations for ${trackInfo.youtubeId} (current count: ${trackInfo.recommendationCount})`);
+        console.log(`\nFetching recommendations for ${trackInfo.youtubeId} (current count: ${trackInfo.recommendationCount})`);
         
         const recommendations = await getYoutubeRecommendations(trackInfo.youtubeId);
         console.log(`Got ${recommendations.length} recommendations for ${trackInfo.youtubeId}`);
@@ -1923,7 +2026,7 @@ export async function refreshYoutubeRecommendationsPool(): Promise<void> {
       }
     }
     
-    console.log('Finished refreshing YouTube recommendations pool');
+    console.log('\n=== Finished refreshing YouTube recommendations pool ===');
   } catch (error) {
     console.error('Error in refreshYoutubeRecommendationsPool:', error);
   }
@@ -2005,62 +2108,171 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
 }
 
 /**
- * Check if a song is likely Japanese based on title, channel, and tags
- * @param title The video title
- * @param channel The channel title
- * @param tags The video tags
- * @returns True if the song is likely Japanese
+ * Validate tracks in the database to ensure they are still available
+ * @param limit Maximum number of tracks to validate in one run
+ * @returns Number of tracks validated
  */
-function isLikelyJapaneseSong(title: string, channel: string, tags: string[]): boolean {
-  // Check for Japanese characters in title or channel
-  const japaneseRegex = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\uFF65-\uFF9F]/;
-  if (japaneseRegex.test(title) || japaneseRegex.test(channel)) {
-    return true;
-  }
-  
-  // Check for Japanese keywords in title
-  const japaneseKeywords = [
-    'jpop', 'j-pop', 'jrock', 'j-rock', 
-    'anime', 'japanese', 'japan', 
-    'tokyo', 'osaka', 'kyoto',
-    'utada', 'hikaru', 'yonezu', 'kenshi', 
-    'radwimps', 'yorushika', 'yoasobi', 'lisa', 'ado',
-    'eve', 'reol', 'zutomayo', 'vaundy', 'tuyu', 'tsuyu',
-    'aimer', 'minami', 'mafumafu', 'kenshi', 'fujii', 'kana',
-    'daoko', 'aimyon', 'miku', 'hatsune', 'vocaloid',
-    'babymetal', 'kyary', 'pamyu', 'perfume', 'akb48',
-    'nogizaka', 'keyakizaka', 'sakurazaka', 'hinatazaka'
-  ];
-  
-  const lowerTitle = title.toLowerCase();
-  const lowerChannel = channel.toLowerCase();
-  
-  if (japaneseKeywords.some(keyword => lowerTitle.includes(keyword) || lowerChannel.includes(keyword))) {
-    return true;
-  }
-  
-  // Check for Japanese keywords in tags
-  if (tags && tags.length > 0) {
-    const japaneseTags = [
-      'jpop', 'j-pop', 'jrock', 'j-rock', 'japanese', 'japan', 
-      'anime', 'アニメ', '日本', '邦楽'
-    ];
+export async function validateTracksAvailability(limit: number = 50): Promise<number> {
+  try {
+    console.log('Starting track validation...');
     
-    if (tags.some(tag => {
-      const lowerTag = tag.toLowerCase();
-      return japaneseRegex.test(tag) || japaneseTags.some(jTag => lowerTag.includes(jTag));
-    })) {
-      return true;
+    // Get tracks that haven't been validated recently
+    const tracks = await prisma.track.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { lastValidated: null },
+          { lastValidated: { lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } } // Older than 30 days
+        ]
+      },
+      take: limit
+    });
+    
+    if (tracks.length === 0) {
+      console.log('No tracks need validation');
+      return 0;
     }
+    
+    console.log(`Found ${tracks.length} tracks to validate`);
+    let validatedCount = 0;
+    
+    // Check if cookies file exists
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log('Using cookies for track validation');
+    } catch (error) {
+      console.log('No cookies file found, validation may be limited');
+    }
+    
+    // Validate each track
+    for (const track of tracks) {
+      try {
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        
+        // Construct the URL based on whether it's a music URL
+        const url = track.isMusicUrl
+          ? `https://music.youtube.com/watch?v=${track.youtubeId}`
+          : `https://www.youtube.com/watch?v=${track.youtubeId}`;
+        
+        // Prepare command arguments
+        const args = [
+          url,
+          '--no-download',
+          '--no-warnings',
+          '--quiet'
+        ];
+        
+        // Add cookies if available
+        if (cookiesExist) {
+          args.push('--cookies', cookiesPath);
+        }
+        
+        // Check if the track is available
+        await execa(ytdlpPath, args);
+        
+        // Update the track's validation timestamp
+        await prisma.track.update({
+          where: { youtubeId: track.youtubeId },
+          data: { 
+            lastValidated: new Date(),
+            isActive: true // Ensure it's marked as active
+          }
+        });
+        
+        console.log(`✓ Validated track: ${track.title} (${track.youtubeId})`);
+        validatedCount++;
+      } catch (error) {
+        console.log(`✗ Track is no longer available: ${track.title} (${track.youtubeId})`);
+        
+        // Mark the track as inactive
+        await prisma.track.update({
+          where: { youtubeId: track.youtubeId },
+          data: { 
+            isActive: false,
+            lastValidated: new Date()
+          }
+        });
+      }
+      
+      // Add a small delay between validations to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.log(`Validation complete. Validated ${validatedCount} tracks`);
+    return validatedCount;
+  } catch (error) {
+    console.error('Failed to validate tracks:', error);
+    return 0;
   }
-  
-  // Check if channel is a Japanese artist's topic channel
-  if (channel.includes('Topic') && (
-    japaneseRegex.test(channel) || 
-    japaneseKeywords.some(keyword => lowerChannel.includes(keyword))
-  )) {
-    return true;
+}
+
+/**
+ * Clean up excess recommendations in the database
+ * Keeps only the specified number of recommendations per seed track
+ * @param maxRecommendationsPerSeed Maximum number of recommendations to keep per seed track
+ * @returns Number of recommendations removed
+ */
+export async function cleanupExcessRecommendations(maxRecommendationsPerSeed: number = 5): Promise<number> {
+  try {
+    console.log(`Starting cleanup of excess recommendations (keeping max ${maxRecommendationsPerSeed} per seed track)...`);
+    
+    // Get all seed tracks that have recommendations
+    const seedTracks = await prisma.$queryRaw<Array<{ seedTrackId: string, count: number }>>`
+      SELECT "seedTrackId", COUNT(*) as count
+      FROM "YoutubeRecommendation"
+      GROUP BY "seedTrackId"
+      HAVING COUNT(*) > ${maxRecommendationsPerSeed}
+      ORDER BY COUNT(*) DESC
+    `;
+    
+    if (seedTracks.length === 0) {
+      console.log('No seed tracks have excess recommendations');
+      return 0;
+    }
+    
+    console.log(`Found ${seedTracks.length} seed tracks with excess recommendations`);
+    let totalRemoved = 0;
+    
+    // Process each seed track
+    for (const seedTrack of seedTracks) {
+      try {
+        // Get all recommendations for this seed track
+        const recommendations = await prisma.youtubeRecommendation.findMany({
+          where: { seedTrackId: seedTrack.seedTrackId },
+          orderBy: { createdAt: 'asc' } // Keep the oldest recommendations
+        });
+        
+        // Calculate how many to remove
+        const toRemove = recommendations.length - maxRecommendationsPerSeed;
+        if (toRemove <= 0) continue;
+        
+        // Get the IDs to remove (keep the first maxRecommendationsPerSeed)
+        const idsToRemove = recommendations
+          .slice(maxRecommendationsPerSeed)
+          .map(rec => rec.youtubeId);
+        
+        // Remove the excess recommendations
+        const result = await prisma.youtubeRecommendation.deleteMany({
+          where: {
+            youtubeId: { in: idsToRemove },
+            seedTrackId: seedTrack.seedTrackId
+          }
+        });
+        
+        console.log(`Removed ${result.count} excess recommendations for seed track ${seedTrack.seedTrackId}`);
+        totalRemoved += result.count;
+      } catch (error) {
+        console.error(`Error cleaning up recommendations for seed track ${seedTrack.seedTrackId}:`, error);
+      }
+    }
+    
+    console.log(`Cleanup complete. Removed ${totalRemoved} excess recommendations`);
+    return totalRemoved;
+  } catch (error) {
+    console.error('Failed to clean up excess recommendations:', error);
+    return 0;
   }
-  
-  return false;
-} 
+}

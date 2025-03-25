@@ -49,8 +49,21 @@ enum TrackStatus {
   BLOCKED     // Banned song by admin
 }
 
+model Channel {
+  id            String    @id  // YouTube channel ID
+  title         String
+  isBlocked     Boolean   @default(false)
+  blockedAt     DateTime?
+  blockedReason String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  tracks        Track[]
+}
+
 model Track {
   youtubeId     String    @id
+  channelId     String?
+  channel       Channel?  @relation(fields: [channelId], references: [id])
   isMusicUrl    Boolean   @default(false)
   resolvedYtId  String?
   title         String
@@ -61,6 +74,7 @@ model Track {
   isActive      Boolean   @default(true)
   status        TrackStatus @default(STANDBY)
   lastPlayed    DateTime?
+  lastValidated DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   requests      Request[]
@@ -171,11 +185,10 @@ model YoutubeRecommendation {
   youtubeId    String    @id
   seedTrackId  String
   relevanceScore Float    @default(0)
-  isJapanese   Boolean   @default(false)
   wasPlayed    Boolean   @default(false)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@index([seedTrackId])
-  @@index([isJapanese])
+  @@unique([seedTrackId, youtubeId])
 }

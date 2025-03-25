@@ -240,4 +240,7 @@ export function getKeyManager(): YouTubeKeyManager {
     keyManager = new YouTubeKeyManager();
   }
   return keyManager;
-} 
+}
+
+// Export a new instance for direct access to avoid circular dependencies
+export const youtubeKeyManager = new YouTubeKeyManager(); 

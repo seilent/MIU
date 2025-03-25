@@ -344,7 +344,6 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
               create: {
                 youtubeId: videoId,
                 title: videoId, // Temporary title, will be updated by queue
-                thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
                 duration: 0, // Will be updated by queue
                 isMusicUrl: isMusicUrl // Set flag for YouTube Music URLs
               },
