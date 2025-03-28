@@ -16,19 +16,10 @@ class EnvironmentManager {
   private loadEnv() {
     if (this.initialized) return;
 
-    // First load the base .env file
+    // Load environment variables from .env file
     const baseEnvPath = path.resolve(__dirname, '../../..', '.env');
-    console.log('Loading base environment variables from:', baseEnvPath);
+    console.log('Loading environment variables from:', baseEnvPath);
     dotenv.config({ path: baseEnvPath });
-
-    // Then load .env.local which overrides base values
-    const localEnvPath = path.resolve(__dirname, '../../..', '.env.local');
-    console.log('Loading local environment variables from:', localEnvPath);
-    const localResult = dotenv.config({ path: localEnvPath });
-    
-    if (localResult.error) {
-      console.log('No .env.local found, using base environment only');
-    }
 
     // Validate required variables
     const requiredVars = [
@@ -121,4 +112,4 @@ export function getRootDir(): string {
   }
   // Default to current directory
   return currentDir;
-} 
+}

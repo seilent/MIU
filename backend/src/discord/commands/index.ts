@@ -75,7 +75,7 @@ const banCommand = new SlashCommandBuilder()
   )
   .addSubcommand(subcommand =>
     subcommand
-      .setName('song')
+      .setName('id')
       .setDescription('Ban a specific song by YouTube ID')
       .addStringOption(option =>
         option
@@ -146,4 +146,4 @@ export async function registerCommands(client: Client) {
   } catch (error) {
     console.error('Error registering commands:', error);
   }
-} 
+}

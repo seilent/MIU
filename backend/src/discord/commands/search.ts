@@ -67,20 +67,10 @@ export async function search(interaction: ChatInputCommandInteraction) {
       const selectedId = selectInteraction.values[0];
       await selectInteraction.deferUpdate();
 
-      // Get the member's voice state
       const member = interaction.member as any;
-      if (!member.voice.channel) {
-        await selectInteraction.editReply({
-          content: 'You need to be in a voice channel to play music.',
-          embeds: [],
-          components: []
-        });
-        return;
-      }
-
       // Play the selected track
       const track = await interaction.client.player.play(
-        member.voice,
+        null, // No voice channel required
         selectedId,
         member.id,
         {
@@ -127,4 +117,4 @@ function formatDuration(seconds: number) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-} 
+}

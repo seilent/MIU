@@ -2,35 +2,19 @@
   "name": "miu",
   "version": "1.0.0",
   "private": true,
-  "workspaces": [
-    "frontend",
-    "backend"
-  ],
   "scripts": {
-    "dev": "npm-run-all -p dev:*",
-    "dev:frontend": "npm run dev --workspace=frontend",
-    "dev:backend": "npm run dev --workspace=backend",
-    "build": "npm-run-all -p build:*",
-    "build:frontend": "npm run build --workspace=frontend",
-    "build:backend": "npm run build --workspace=backend",
-    "start": "npm-run-all -p start:*",
-    "start:frontend": "npm run start --workspace=frontend",
-    "start:backend": "npm run start --workspace=backend",
-    "lint": "npm run lint:frontend && npm run lint:backend",
-    "lint:frontend": "npm run lint --workspace=frontend",
-    "lint:backend": "npm run lint --workspace=backend",
-    "prisma:studio": "cd backend && cross-env DATABASE_URL=\"postgresql://miu:miu@localhost:5432/miu\" npm run prisma:studio",
-    "update-env": "ts-node --project scripts/tsconfig.json scripts/update-env.ts",
-    "stop": "cd backend && npm run stop"
+    "dev": "concurrently \"cd frontend && npm run dev\" \"cd backend && npm run dev\"",
+    "build": "concurrently \"cd frontend && npm run build\" \"cd backend && npm run build\"",
+    "start": "concurrently \"cd frontend && npm run start\" \"cd backend && npm run start\"",
+    "lint": "concurrently \"cd frontend && npm run lint\" \"cd backend && npm run lint\""
   },
   "devDependencies": {
-    "concurrently": "^8.0.0"
-  },
-  "dependencies": {
-    "@types/uuid": "^10.0.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "concurrently": "^9.1.2",
     "dotenv": "^16.4.7",
-    "hls.js": "^1.5.20",
-    "ntp-time": "^2.0.6",
-    "uuid": "^11.1.0"
+    "eslint": "^9.21.0",
+    "typescript": "^5.0.0"
   }
 }

@@ -263,7 +263,6 @@ export async function ban(interaction: ChatInputCommandInteraction) {
       switch (subcommand) {
         case 'track': {
           const uiPosition = interaction.options.getInteger('position');
-          const blockSeed = interaction.options.getBoolean('block_seed') || false;
           const blockChannel = interaction.options.getBoolean('block_channel') || false;
           
           if (uiPosition !== null) {
@@ -300,15 +299,6 @@ export async function ban(interaction: ChatInputCommandInteraction) {
               channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
             }
 
-            // Block seed recommendations if requested
-            let seedBlockMessage = '';
-            if (blockSeed) {
-              const result = await blockSeedRecommendations(trackToBan.youtubeId);
-              if (result.count > 0) {
-                seedBlockMessage = `\nAlso blocked ${result.count} recommendations that were based on this track.`;
-              }
-            }
-            
             // Remove from queue
             await prisma.request.updateMany({
               where: {
@@ -326,7 +316,7 @@ export async function ban(interaction: ChatInputCommandInteraction) {
               player.resetAutoplayTracking();
             }
             
-            await interaction.editReply(`Banned song at position ${uiPosition}: ${trackToBan.title}${seedBlockMessage}${channelBlockMessage}`);
+            await interaction.editReply(`Banned song at position ${uiPosition}: ${trackToBan.title}${channelBlockMessage}`);
             return;
           }
 
@@ -358,23 +348,14 @@ export async function ban(interaction: ChatInputCommandInteraction) {
             channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
           }
 
-          // Block seed recommendations if requested
-          let seedBlockMessage = '';
-          if (blockSeed) {
-            const result = await blockSeedRecommendations(currentTrack.youtubeId);
-            if (result.count > 0) {
-              seedBlockMessage = `\nAlso blocked ${result.count} recommendations that were based on this track.`;
-            }
-          }
-          
           // Skip the current track
           await player.skip();
           
-          await interaction.editReply(`Banned and skipped: ${currentTrack.title}${seedBlockMessage}${channelBlockMessage}`);
+          await interaction.editReply(`Banned and skipped: ${currentTrack.title}${channelBlockMessage}`);
           break;
         }
         
-        case 'song': {
+        case 'id': {
           const id = interaction.options.getString('id', true);
           const blockChannel = interaction.options.getBoolean('block_channel') || false;
           
@@ -444,7 +425,7 @@ export async function ban(interaction: ChatInputCommandInteraction) {
         }
         
         default:
-          await interaction.editReply('Invalid subcommand. Use /ban track, /ban song, or /ban channel.');
+          await interaction.editReply('Invalid subcommand. Use /ban track, /ban id, or /ban channel.');
       }
     } catch (error) {
       console.error('Error in ban command:', error);
@@ -505,12 +486,6 @@ export default {
         )
         .addBooleanOption(option =>
           option
-            .setName('block_seed')
-            .setDescription('Also block all recommendations from this song')
-            .setRequired(false)
-        )
-        .addBooleanOption(option =>
-          option
             .setName('block_channel')
             .setDescription('Also block the channel that uploaded this song')
             .setRequired(false)
@@ -518,7 +493,7 @@ export default {
     )
     .addSubcommand(subcommand =>
       subcommand
-        .setName('song')
+        .setName('id')
         .setDescription('Ban a specific song by YouTube ID')
         .addStringOption(option =>
           option
@@ -563,8 +538,8 @@ export default {
     const reason = interaction.options.getString('reason') || 'No reason provided';
 
     try {
-      if (subcommand === 'song') {
-        // Existing song ban logic
+      if (subcommand === 'id') {
+        // Ban by YouTube ID logic
         const track = await prisma.track.findUnique({
           where: { youtubeId: id },
           include: { channel: true }

@@ -24,7 +24,7 @@ const api = new YoutubeMusicApi();
 let apiInitialized = false;
 
 // Add state control for recommendations
-let recommendationsEnabled = true;
+let recommendationsEnabled = false; // Default to disabled
 
 // Helper function to ensure API is initialized
 async function ensureApiInitialized() {

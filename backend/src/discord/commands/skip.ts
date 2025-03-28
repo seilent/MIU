@@ -7,12 +7,6 @@ export async function skip(interaction: ChatInputCommandInteraction) {
       return;
     }
 
-    const member = interaction.member as GuildMember;
-    if (!member.voice.channel) {
-      await interaction.reply('You need to be in a voice channel to use this command.');
-      return;
-    }
-
     const currentTrack = interaction.client.player.getCurrentTrack();
     if (!currentTrack) {
       await interaction.reply('No track is currently playing.');
@@ -37,4 +31,4 @@ export async function skip(interaction: ChatInputCommandInteraction) {
       await interaction.editReply('An error occurred while skipping the track.');
     }
   }
-} 
+}

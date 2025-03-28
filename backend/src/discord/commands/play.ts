@@ -11,11 +11,6 @@ export async function play(interaction: ChatInputCommandInteraction) {
     }
 
     const member = interaction.member as GuildMember;
-    if (!member.voice.channel) {
-      await interaction.reply('You need to be in a voice channel to use this command.');
-      return;
-    }
-
     const query = interaction.options.getString('query', true);
     const { videoId, isMusicUrl } = await getYoutubeId(query);
 
@@ -33,7 +28,7 @@ export async function play(interaction: ChatInputCommandInteraction) {
       });
 
       const track = await interaction.client.player.play(
-        member.voice,
+        null, // No voice channel required
         videoId,
         member.id,
         {
@@ -85,4 +80,4 @@ export async function play(interaction: ChatInputCommandInteraction) {
       await interaction.editReply('An error occurred while processing your request.');
     }
   }
-} 
+}
