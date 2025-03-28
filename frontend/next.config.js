@@ -51,9 +51,9 @@ const nextConfig = {
 
   // Environment variables that should be available at build time
   env: {
-    NEXT_PUBLIC_DISCORD_CLIENT_ID: process.env.NEXT_PUBLIC_DISCORD_CLIENT_ID,
-    NEXT_PUBLIC_URL: process.env.NEXT_PUBLIC_URL,
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+    NEXT_PUBLIC_DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+    NEXT_PUBLIC_URL: process.env.URL,
+    NEXT_PUBLIC_API_URL: `${process.env.URL}/backend`,
     NEXT_PUBLIC_ENABLE_ANALYTICS: process.env.NEXT_PUBLIC_ENABLE_ANALYTICS,
     NEXT_PUBLIC_DEFAULT_THEME: process.env.NEXT_PUBLIC_DEFAULT_THEME,
     NEXT_PUBLIC_ENABLE_THEME_SWITCHER: process.env.NEXT_PUBLIC_ENABLE_THEME_SWITCHER
@@ -61,6 +61,11 @@ const nextConfig = {
 
     // Handle API proxying
   async rewrites() {
+    // Skip rewrites if API_URL is not defined
+    if (!process.env.API_URL) {
+      return [];
+    }
+    
     // Use the same API URL for both development and production
     const apiUrl = process.env.API_URL;
     const fullApiUrl = apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`;

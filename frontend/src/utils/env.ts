@@ -21,18 +21,18 @@ export const env: EnvConfig = {
   enableThemeSwitcher: process.env.NEXT_PUBLIC_ENABLE_THEME_SWITCHER !== 'false' // enabled by default
 };
 
-// Validate required environment variables
+// Check for presence of required environment variables
 export function validateEnv() {
   const requiredVars = ['discordClientId', 'url'] as const;
   const missingVars = requiredVars.filter(key => !env[key]);
 
   if (missingVars.length > 0) {
-    throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
+    console.warn(`Missing required environment variables: ${missingVars.join(', ')}`);
   }
 }
 
-// Validate environment variables
+// Warn about missing environment variables
 validateEnv();
 
 // Return environment variables
-export default env; 
+export default env;

@@ -28,7 +28,7 @@ import { spawn } from 'child_process';
 import { TrackingService } from '../tracking/service.js';
 import { RecommendationEngine } from '../recommendation/engine.js';
 import { ChildProcessWithoutNullStreams } from 'child_process';
-import { resolveYouTubeMusicId, getThumbnailUrl } from '../utils/youtubeMusic.js';
+import { resolveYouTubeMusicId, getThumbnailUrl, isRecommendationsEnabled } from '../utils/youtubeMusic.js';
 import { RequestStatus, PlaylistMode, TrackStatus } from '../types/enums.js';
 import { broadcast, broadcastPlayerState } from '../routes/music.js';
 import { cleanupBlockedSong } from '../routes/music.js';
@@ -2509,17 +2509,27 @@ export class Player {
     setTimeout(() => {
       console.log('[INFO] Starting recommendation growth service');
       
-      // Refresh recommendations immediately using the enhanced system
-      refreshYoutubeRecommendationsPool().catch(error => {
-        console.error('[ERROR] Failed to refresh YouTube recommendations:', error);
-      });
-      
-      // Then set up the interval for regular refreshes
-      setInterval(() => {
-        console.log('[INFO] Running scheduled recommendation refresh');
+      // Only refresh if recommendations are enabled
+      if (isRecommendationsEnabled()) {
+        // Refresh recommendations immediately using the enhanced system
         refreshYoutubeRecommendationsPool().catch(error => {
           console.error('[ERROR] Failed to refresh YouTube recommendations:', error);
         });
+      } else {
+        console.log('[INFO] YouTube recommendations are disabled - skipping refresh');
+      }
+      
+      // Then set up the interval for regular refreshes
+      setInterval(() => {
+        // Only refresh if recommendations are enabled
+        if (isRecommendationsEnabled()) {
+          console.log('[INFO] Running scheduled recommendation refresh');
+          refreshYoutubeRecommendationsPool().catch(error => {
+            console.error('[ERROR] Failed to refresh YouTube recommendations:', error);
+          });
+        } else {
+          console.log('[INFO] YouTube recommendations are disabled - skipping scheduled refresh');
+        }
       }, interval);
     }, initialDelay);
     
