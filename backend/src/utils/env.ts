@@ -50,7 +50,10 @@ class EnvironmentManager {
       }
       return defaultValue;
     }
-    return value;
+    // Expand variables in the format ${VAR_NAME}
+    return value.replace(/\$\{([^}]+)\}/g, (match, varName) => {
+      return process.env[varName] || match;
+    });
   }
 
   public getNumber(name: string, defaultValue?: number): number {

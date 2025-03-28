@@ -18,7 +18,7 @@ const DISCORD_API_URL = 'https://discord.com/api/v10';
 const CLIENT_ID = env.getString('DISCORD_CLIENT_ID');
 const CLIENT_SECRET = env.getString('DISCORD_CLIENT_SECRET');
 const FRONTEND_URL = env.getString('FRONTEND_URL', 'http://localhost:3300');
-const REDIRECT_URI = process.env.NEXT_PUBLIC_DISCORD_REDIRECT_URI || `${FRONTEND_URL}/auth/callback`;
+const REDIRECT_URI = env.getString('NEXT_PUBLIC_DISCORD_REDIRECT_URI', `${FRONTEND_URL}/auth/callback`);
 
 // Validate that the redirect URI is a valid URL
 try {
@@ -28,7 +28,7 @@ try {
   throw new Error('Invalid redirect URI configuration');
 }
 
-const JWT_SECRET = env.getString('JWT_SECRET');
+const JWT_SECRET: jwt.Secret = env.getString('JWT_SECRET');
 
 if (process.env.NODE_ENV === 'development') {
   console.log(`Auth Configuration: CLIENT_ID=**present**, FRONTEND_URL=${FRONTEND_URL}, REDIRECT_URI=${REDIRECT_URI}, NODE_ENV=${process.env.NODE_ENV}`);
@@ -202,7 +202,9 @@ router.get('/callback', async (req, res) => {
         roles: user.roles.map(role => role.name),
       },
       JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRY || '365d' }
+      { 
+        expiresIn: '30d' // Fixed string format that definitely works
+      }
     );
 
     try {

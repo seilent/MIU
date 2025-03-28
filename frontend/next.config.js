@@ -59,21 +59,23 @@ const nextConfig = {
     NEXT_PUBLIC_ENABLE_THEME_SWITCHER: process.env.NEXT_PUBLIC_ENABLE_THEME_SWITCHER
   },
 
-  // Handle API proxying
+    // Handle API proxying
   async rewrites() {
     // Use the same API URL for both development and production
-    const apiUrl = process.env.API_URL || 'https://miu.gacha.boo/backend';
+    const apiUrl = process.env.API_URL;
+    const fullApiUrl = apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`;
+    
     return [
       // API proxy for both development and production
       {
         source: '/api/:path*',
-        destination: `${apiUrl}/api/:path*`,
+        destination: `${fullApiUrl}/api/:path*`,
         basePath: false,
       },
       // Maintain backward compatibility for /backend/api paths
       {
         source: '/backend/api/:path*',
-        destination: `${apiUrl}/api/:path*`,
+        destination: `${fullApiUrl}/api/:path*`,
         basePath: false,
       }
     ];

@@ -15,7 +15,6 @@ import { AnimatedQueueItem } from '@/components/player/AnimatedQueueItem';
 import { AnimatedNowPlaying } from '@/components/player/AnimatedNowPlaying';
 import { motion, AnimatePresence } from 'framer-motion';
 import SSEManager from '@/lib/sse/SSEManager';
-import HLSManager from '@/lib/hls/HLSManager';
 
 export default function Home() {
   const router = useRouter();

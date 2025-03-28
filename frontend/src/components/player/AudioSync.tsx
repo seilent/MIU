@@ -6,7 +6,6 @@ import { usePlayerStore } from '@/lib/store/playerStore';
 import env from '@/utils/env';
 import { useAudioWithAuth } from '@/hooks/useAudioWithAuth';
 import SSEManager from '@/lib/sse/SSEManager';
-import HLSManager from '@/lib/hls/HLSManager';
 
 // Constant for track playback offset (in seconds)
 const TRACK_PLAYBACK_OFFSET = 0;
@@ -250,41 +249,21 @@ export default function AudioSync() {
       
       console.log('Audio: Stream setup target status:', targetStatus);
       
-      const hlsManager = HLSManager.getInstance();
-      // Prefer direct secure streaming over HLS to avoid ffmpeg usage
-      // Check for secure streaming support in the browser
-      const supportsSecureStreaming = true; // All modern browsers support this
-      
-      if (supportsSecureStreaming) {
-        console.log('Audio: Using secure direct streaming for playback');
-        try {
-          // First fetch a secure token
-          const tokenResponse = await fetch(`${env.apiUrl}/api/music/secure-token/${currentTrack.youtubeId}`);
-          if (!tokenResponse.ok) {
-            throw new Error('Failed to obtain secure token');
-          }
-          
-          const { token } = await tokenResponse.json();
-          const streamUrl = `${env.apiUrl}/api/music/secure-stream/${token}`;
-          audio.src = streamUrl;
-          audio.load();
-        } catch (secureStreamError) {
-          console.error('Audio: Secure streaming failed, falling back to HLS:', secureStreamError);
-          if (hlsManager.isSupported()) {
-            console.log('Audio: Falling back to HLS for playback');
-            await hlsManager.attachMedia(audio, currentTrack.youtubeId);
-          } else {
-            console.log('Audio: Falling back to direct stream URL for playback');
-            const streamUrl = `${env.apiUrl}/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
-            audio.src = streamUrl;
-            audio.load();
-          }
+      // Prefer direct secure streaming
+      console.log('Audio: Using secure direct streaming for playback');
+      try {
+        // First fetch a secure token
+        const tokenResponse = await fetch(`${env.apiUrl}/api/music/secure-token/${currentTrack.youtubeId}`);
+        if (!tokenResponse.ok) {
+          throw new Error('Failed to obtain secure token');
         }
-      } else if (hlsManager.isSupported()) {
-        console.log('Audio: Using HLS for playback');
-        await hlsManager.attachMedia(audio, currentTrack.youtubeId);
-      } else {
-        console.log('Audio: Using direct stream URL for playback');
+        
+        const { token } = await tokenResponse.json();
+        const streamUrl = `${env.apiUrl}/api/music/secure-stream/${token}`;
+        audio.src = streamUrl;
+        audio.load();
+      } catch (secureStreamError) {
+        console.error('Audio: Secure streaming failed, falling back to direct stream URL:', secureStreamError);
         const streamUrl = `${env.apiUrl}/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
         audio.src = streamUrl;
         audio.load();
@@ -968,9 +947,6 @@ export default function AudioSync() {
         crossfadeAudioRef.current.src = '';
         crossfadeAudioRef.current = null;
       }
-      // Cleanup HLS
-      const hlsManager = HLSManager.getInstance();
-      hlsManager.destroy();
     };
   }, []);
 
@@ -1122,4 +1098,4 @@ export default function AudioSync() {
       preload="auto"
     />
   );
-} 
+}

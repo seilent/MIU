@@ -443,7 +443,7 @@ router.post('/recommendations/test', async (req: Request, res: Response, next: N
     console.log(`Testing YouTube recommendations for video ID: ${videoId}`);
     
     // Import the YouTube utilities
-    const { getYoutubeRecommendations } = await import('../utils/youtube');
+    const { getYoutubeRecommendations } = await import('../utils/youtube.js');
     
     // Get recommendations
     const recommendations = await getYoutubeRecommendations(videoId);
@@ -510,5 +510,3 @@ router.post('/recommendations/cleanup', async (req: Request, res: Response, next
 });
 
 export { router as adminRouter };
-
- 

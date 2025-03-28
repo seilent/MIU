@@ -16,7 +16,6 @@ import { execSync } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import { Readable, Writable } from 'stream';
 import { getRootDir } from './env.js';
-import { Prisma } from '@prisma/client';
 import { downloadAndCacheThumbnail, getThumbnailUrl } from './youtubeMusic.js';
 import { MAX_DURATION, MIN_DURATION } from '../config.js';
 import { decodeHTML } from 'entities';
@@ -28,10 +27,11 @@ import { filterBlockedContent, isLikelyJapaneseSong, BLOCKED_KEYWORDS } from './
 
 // Configure FFmpeg path
 if (ffmpeg && ffprobe) {
-  process.env.FFMPEG_PATH = ffmpeg;
+  process.env.FFMPEG_PATH = typeof ffmpeg === 'string' ? ffmpeg : 
+                           ffmpeg.default ?? undefined;
   process.env.FFPROBE_PATH = ffprobe.path;
-  console.log('Using FFmpeg from:', ffmpeg);
-  console.log('Using FFprobe from:', ffprobe.path);
+  console.log('Using FFmpeg from:', process.env.FFMPEG_PATH || 'Not found');
+  console.log('Using FFprobe from:', process.env.FFPROBE_PATH);
 } else {
   console.error('FFmpeg or FFprobe not found in packages');
 }
@@ -220,7 +220,7 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
         youtubeId: videoId,
         title,
         thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
-        duration
+        duration: Number(duration) || 0
       };
     }));
 
@@ -245,12 +245,12 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
           });
 
           if (localResults.length > 0) {
-            return localResults.map(track => ({
-              youtubeId: track.youtubeId,
-              title: track.title,
-              thumbnail: `${API_BASE_URL}/api/albumart/${track.youtubeId}`,
-              duration: track.duration
-            }));
+          return localResults.map(track => ({
+            youtubeId: track.youtubeId,
+            title: track.title,
+            thumbnail: `${API_BASE_URL}/api/albumart/${track.youtubeId}`,
+            duration: Number(track.duration) || 0
+          }));
           }
         }
       } catch (cacheError) {
