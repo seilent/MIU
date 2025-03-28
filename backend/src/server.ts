@@ -19,6 +19,7 @@ import { initializeDiscordClient } from './discord/client.js';
 import { initializeYouTubeAPI } from './utils/youtube.js';
 import getEnv from './utils/env.js';
 import http from 'http';
+import { Socket } from 'net';
 import bodyParser from 'body-parser';
 
 const env = getEnv();
@@ -26,6 +27,32 @@ const env = getEnv();
 export async function createServer() {
   const app = express();
   const server = http.createServer(app);
+  
+  // Track all active connections to close them properly during shutdown
+  const connections = new Map<string, Socket>();
+  let connectionCounter = 0;
+  
+  // Track active connections
+  server.on('connection', (socket) => {
+    const id = String(connectionCounter++);
+    connections.set(id, socket);
+    
+    // Remove connection from tracking when it closes naturally
+    socket.on('close', () => {
+      connections.delete(id);
+    });
+  });
+  
+  // Method to forcefully close active connections during shutdown
+  (server as any).closeAllConnections = () => {
+    if (connections.size > 0) {
+      logger.info(`Forcefully closing ${connections.size} active connections`);
+      for (const socket of connections.values()) {
+        socket.destroy();
+      }
+      connections.clear();
+    }
+  };
 
   // Initialize Discord client
   try {
@@ -87,7 +114,7 @@ export async function createServer() {
     proxy: true,
     cookie: {
       secure: true,
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+      maxAge: 1000 * 60 * 60 * 24 * 365, // 365 days
       sameSite: 'lax',
       path: '/',
       httpOnly: true,

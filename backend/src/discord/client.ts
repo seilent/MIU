@@ -1,5 +1,5 @@
 import { Client } from 'discord.js';
-import { setupDiscordBot } from './index';
+import { setupDiscordBot } from './index.js';
 
 let client: Client | null = null;
 

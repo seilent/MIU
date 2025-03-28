@@ -1,6 +1,6 @@
 import { CommandInteraction } from 'discord.js';
 import { SlashCommandBuilder } from '@discordjs/builders';
-import { setRecommendationsEnabled, isRecommendationsEnabled } from '../../utils/youtubeMusic';
+import { setRecommendationsEnabled, isRecommendationsEnabled } from '../../utils/youtubeMusic.js';
 
 export const data = new SlashCommandBuilder()
   .setName('youtube')

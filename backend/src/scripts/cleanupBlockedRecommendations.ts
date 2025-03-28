@@ -1,4 +1,4 @@
-import { prisma } from '../db';
+import { prisma } from '../db.js';
 import { TrackStatus } from '@prisma/client';
 
 async function cleanupBlockedRecommendations() {

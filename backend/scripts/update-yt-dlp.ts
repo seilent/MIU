@@ -176,8 +176,6 @@ async function updateYtDlp(): Promise<boolean> {
     return false;
   }
   
-  const newVersion = await getYtDlpVersion();
-  console.log(`yt-dlp updated successfully. New version: ${newVersion}`);
   return true;
 }
 

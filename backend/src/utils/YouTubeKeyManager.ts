@@ -1,3 +1,5 @@
+import { google } from 'googleapis';
+
 export class YouTubeKeyManager {
   private keys: Array<string>;
   private currentKeyIndex: number;
@@ -226,6 +228,64 @@ export class YouTubeKeyManager {
       }
     }
     return count;
+  }
+  
+  /**
+   * Validate all API keys
+   * This will check each key by making a lightweight API call and mark quota exceeded ones
+   */
+  public async validateKeys(): Promise<void> {
+    console.log('Validating YouTube API keys...');
+    
+    // Track validation results
+    let validCount = 0;
+    let invalidCount = 0;
+    let quotaExceededCount = 0;
+    
+    // Use Promise.all to validate all keys in parallel
+    const validationPromises = this.keys.map(async (key, index) => {
+      try {
+        // Create a temporary YouTube client for validation
+        const youtube = google.youtube('v3');
+        
+        // Try a lightweight API call to check if the key works
+        await youtube.search.list({
+          key,
+          part: ['id'],
+          q: 'test',
+          maxResults: 1,
+          type: ['video']
+        });
+        
+        console.log(`✓ API key *****${key.slice(-5)} is valid`);
+        validCount++;
+        return true;
+      } catch (error: any) {
+        const reason = error?.errors?.[0]?.reason;
+        if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
+          console.log(`✗ API key *****${key.slice(-5)} quota exceeded`);
+          this.markKeyAsQuotaExceeded(key, 'search.list');
+          quotaExceededCount++;
+          return false;
+        } else {
+          console.log(`✗ API key *****${key.slice(-5)} is invalid: ${reason || 'Unknown error'}`);
+          invalidCount++;
+          return false;
+        }
+      }
+    });
+
+    await Promise.all(validationPromises);
+    
+    console.log(`YouTube API key validation complete: ${validCount}/${this.keys.length} keys are valid`);
+    
+    if (quotaExceededCount > 0) {
+      console.log(`- ${quotaExceededCount} keys exceeded quota`);
+    }
+    
+    if (invalidCount > 0) {
+      console.log(`- ${invalidCount} keys appear to be invalid`);
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
-import { prisma } from '../../db';
-import { getYoutubeId, getYoutubeInfo, getPlaylistItems, downloadYoutubeAudio } from '../../utils/youtube';
+import { prisma } from '../../db.js';
+import { getYoutubeId, getYoutubeInfo, getPlaylistItems, downloadYoutubeAudio } from '../../utils/youtube.js';
 import type { Prisma } from '@prisma/client';
 
 // Get API base URL from environment
@@ -419,7 +419,12 @@ async function handleRemove(interaction: ChatInputCommandInteraction) {
 
   // Delete the track
   await prisma.defaultPlaylistTrack.delete({
-    where: { id: track.id }
+    where: { 
+      playlistId_position: {
+        playlistId: playlist.id,
+        position
+      }
+    }
   });
 
   // Reorder remaining tracks

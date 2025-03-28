@@ -1,12 +1,12 @@
 import { Client, REST, Routes, SlashCommandBuilder, Collection } from 'discord.js';
-import { play } from './play';
-import { skip } from './skip';
-import { queue } from './queue';
-import { search } from './search';
-import { ban } from './ban';
-import { data as playlistData, execute as playlistExecute } from './playlist';
-import { data as adminData, execute as adminExecute } from './admin';
-import { data as youtubeData, execute as youtubeExecute } from './youtube';
+import { play } from './play.js';
+import { skip } from './skip.js';
+import { queue } from './queue.js';
+import { search } from './search.js';
+import { ban } from './ban.js';
+import { data as playlistData, execute as playlistExecute } from './playlist.js';
+import { data as adminData, execute as adminExecute } from './admin.js';
+import { data as youtubeData, execute as youtubeExecute } from './youtube.js';
 
 export const commands = new Collection();
 commands.set('play', play);

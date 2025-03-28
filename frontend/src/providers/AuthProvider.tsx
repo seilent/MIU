@@ -24,7 +24,7 @@ interface AuthProviderProps {
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
-  const { token } = useAuthStore();
+  const { token, user } = useAuthStore();
   const [error, setError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const router = useRouter();
@@ -163,23 +163,33 @@ export function AuthProvider({ children }: AuthProviderProps) {
         return;
       }
 
-      // Only validate token if we have one
-      try {
-        await fetchUserData(token);
-      } catch (error) {
-        // Token validation error
-        setUser(null);
-        setToken(null);
-        setError(error instanceof Error ? error.message : 'Authentication failed');
-        setAuthError(null);
-        router.replace('/login');
+      // Only validate token if we don't already have user data
+      // This prevents unnecessary validation on page refreshes
+      if (!user) {
+        try {
+          await fetchUserData(token);
+        } catch (error) {
+          console.error("Auth token validation failed:", error);
+          
+          // Only clear auth and redirect if it's a critical error
+          // For network errors, keep the token and try again later
+          if (error instanceof Error && 
+              !error.message.includes('Failed to fetch') && 
+              !error.message.includes('Network error')) {
+            setUser(null);
+            setToken(null);
+            setError(error instanceof Error ? error.message : 'Authentication failed');
+            setAuthError(null);
+            router.replace('/login');
+          }
+        }
       }
     };
 
-    // Add a delay to ensure token is properly set
-    const timeoutId = setTimeout(checkAuth, 1000);
+    // Check immediately but with a slight delay to avoid race conditions
+    const timeoutId = setTimeout(checkAuth, 500);
     return () => clearTimeout(timeoutId);
-  }, [token, pathname, router, setError, setAuthError, isInitializing, fetchUserData]);
+  }, [token, pathname, router, setError, setAuthError, isInitializing, fetchUserData, user]);
 
   const login = () => {
     try {

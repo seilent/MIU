@@ -1,10 +1,10 @@
 import { Router, Request, Response, NextFunction, RequestHandler } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
-import { requireRole } from '../middleware/auth';
-import { HTTPError } from '../middleware/error';
-import { prisma } from '../db';
-import { authMiddleware } from '../middleware/auth';
-import { Cache } from '../utils/cache';
+import { requireRole } from '../middleware/auth.js';
+import { HTTPError } from '../middleware/error.js';
+import { prisma } from '../db.js';
+import { authMiddleware } from '../middleware/auth.js';
+import { Cache } from '../utils/cache.js';
 import { getPlayer } from '../discord/player.js';
 import { refreshYoutubeRecommendationsPool, cleanupExcessRecommendations } from '../utils/youtube.js';
 

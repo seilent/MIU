@@ -183,6 +183,7 @@ model WebPresence {
 
 model YoutubeRecommendation {
   youtubeId    String    @id
+  title        String?   // Title of the recommended video
   seedTrackId  String
   relevanceScore Float    @default(0)
   wasPlayed    Boolean   @default(false)

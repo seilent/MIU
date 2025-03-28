@@ -1,5 +1,5 @@
 import jwt, { SignOptions } from 'jsonwebtoken';
-import { prisma } from '../db';
+import { prisma } from '../db.js';
 
 export interface TokenPayload {
   userId: string;
@@ -22,7 +22,7 @@ export async function generateToken(userId: string): Promise<string> {
   };
 
   const options: SignOptions = {
-    expiresIn: process.env.JWT_EXPIRY ? parseInt(process.env.JWT_EXPIRY) : '7d'
+    expiresIn: process.env.JWT_EXPIRY ? parseInt(process.env.JWT_EXPIRY) : '365d'
   };
 
   return jwt.sign(payload, process.env.JWT_SECRET || 'default_secret', options);

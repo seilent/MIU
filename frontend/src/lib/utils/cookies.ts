@@ -28,14 +28,24 @@ export function setCookie(
     maxAge?: number; 
     sameSite?: 'Strict' | 'Lax' | 'None'; 
     secure?: boolean;
+    expires?: Date;
   } = {}
 ): void {
-  const { path = '/', maxAge, sameSite = 'Lax', secure } = options;
+  const { 
+    path = '/', 
+    maxAge = 31536000, // Default to 365 days
+    sameSite = 'Lax', 
+    secure = window.location.protocol === 'https:' 
+  } = options;
   
   let cookie = `${name}=${value}; path=${path}`;
   
   if (maxAge !== undefined) {
     cookie += `; max-age=${maxAge}`;
+  }
+  
+  if (options.expires) {
+    cookie += `; expires=${options.expires.toUTCString()}`;
   }
   
   if (sameSite) {

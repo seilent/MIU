@@ -1,6 +1,6 @@
 import Redis from 'ioredis';
-import logger from './logger';
-import { prisma } from '../db';
+import logger from './logger.js';
+import { prisma } from '../db.js';
 
 interface SettingsObject {
   [key: string]: string;
@@ -17,7 +17,9 @@ interface TrackStats {
     title: string;
     artist: string | null;
     userId: string;
-    _count: number;
+    _count: {
+      youtubeId: number;
+    };
   }>;
   totalPlays: number;
 }
@@ -119,19 +121,64 @@ export class Cache {
 
   static async getTrackStats() {
     return this.getOrSet<TrackStats>('track:stats', async () => {
-      const [topTracks, totalPlays] = await Promise.all([
-        prisma.request.groupBy({
-          by: ['youtubeId', 'title', 'artist', 'userId'],
-          _count: true,
-          orderBy: {
-            _count: {
-              youtubeId: 'desc'
+      // First get Request data with Track relations
+      const requestWithTracks = await prisma.request.findMany({
+        select: {
+          youtubeId: true,
+          userId: true,
+          track: {
+            select: {
+              title: true,
+              channelId: true
             }
-          },
-          take: 10
-        }),
-        prisma.request.count({ where: { status: 'completed' } })
-      ]);
+          }
+        },
+        where: {
+          status: 'COMPLETED'
+        },
+        take: 1000 // Limit to recent requests
+      });
+      
+      // Count and group the requests
+      const trackCounts: Record<string, {
+        youtubeId: string;
+        title: string;
+        artist: string | null;
+        userId: string;
+        count: number;
+      }> = {};
+      
+      for (const req of requestWithTracks) {
+        const key = `${req.youtubeId}:${req.userId}`;
+        if (!trackCounts[key]) {
+          trackCounts[key] = {
+            youtubeId: req.youtubeId,
+            title: req.track.title,
+            artist: req.track.channelId,
+            userId: req.userId,
+            count: 0
+          };
+        }
+        trackCounts[key].count++;
+      }
+      
+      // Convert to array, sort by count, and take top 10
+      const topTracks = Object.values(trackCounts)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10)
+        .map(item => ({
+          youtubeId: item.youtubeId,
+          title: item.title,
+          artist: item.artist,
+          userId: item.userId,
+          _count: {
+            youtubeId: item.count
+          }
+        }));
+      
+      const totalPlays = await prisma.request.count({ 
+        where: { status: 'COMPLETED' } 
+      });
 
       return { topTracks, totalPlays };
     }, 60 * 5); // Cache for 5 minutes

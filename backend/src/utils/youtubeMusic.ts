@@ -6,10 +6,11 @@ import type { SearchResult } from './types.js';
 import { google } from 'googleapis';
 import { getYoutubeInfo, youtube, processImage } from './youtube.js';
 import { executeYoutubeApi } from './youtubeApi.js';
-import { filterBlockedMusicContent, isLikelyJapaneseSong } from './contentFilter.js';
+import { filterBlockedMusicContent, isLikelyJapaneseSong, BLOCKED_KEYWORDS } from './contentFilter.js';
 import fetch from 'node-fetch';
 import execa from 'execa';
 import sharp from 'sharp';
+import { getKeyManager } from './YouTubeKeyManager.js';
 
 // API base URL for thumbnails
 const API_BASE_URL = process.env.API_BASE_URL;
@@ -17,17 +18,6 @@ const API_BASE_URL = process.env.API_BASE_URL;
 // Cache directory configuration
 const CACHE_DIR = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
 const THUMBNAIL_CACHE_DIR = path.join(CACHE_DIR, 'albumart');
-
-// Define blocked channel IDs
-const blockedChannelIds = [
-  'UC80BDLEsVWJKyi4F6mrlHvg', // Known cover/remix channel
-  'UCOlxqtcKc-HBEQJgDsylyhA', // Additional blocked channel
-  'zenigame0123', // Additional blocked channel (username)
-  'UCYoysb_NZvyfZQq5H_t4pGw', // Additional blocked channel
-  '@Mr.MusicChannel355', // Additional blocked channel
-  '@ort-music', // Additional blocked channel
-];
-
 
 // Initialize YouTube Music API
 const api = new YoutubeMusicApi();
@@ -224,16 +214,17 @@ export async function searchYoutubeMusic(query: string): Promise<SearchResult[]>
     }
 
     // Filter blocked content using shared utility
-    const filteredContent = filterBlockedMusicContent(searchResults.content, blockedChannelIds);
+    const filteredContent = await filterBlockedMusicContent(searchResults.content);
     
     console.log(`Found ${searchResults.content.length} results, ${filteredContent.length} after filtering`);
 
-    // Process results
+    // Process results and adapt to SearchResult type
     return filteredContent.map(item => ({
       youtubeId: item.videoId,
       title: item.name,
-      thumbnailUrl: item.thumbnails?.[0]?.url || null
-    })).filter((result): result is SearchResult => !!result.youtubeId);
+      thumbnail: item.thumbnails?.[0]?.url || '',
+      duration: item.duration || 0 // Use duration if available or default to 0
+    })).filter(result => !!result.youtubeId);
 
   } catch (error) {
     console.error('Error searching YouTube Music:', error);
@@ -262,7 +253,7 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
     
     if (trackDetails) {
       // Check if the track title contains Japanese characters or keywords
-      if (!isLikelyJapaneseSong(trackDetails.title)) {
+      if (!isLikelyJapaneseSong(trackDetails.title, '', [], [])) {
         console.log(`Seed track ${seedTrackId} "${trackDetails.title}" is not likely Japanese. Skipping YouTube Music recommendations.`);
         return [];
       }
@@ -305,47 +296,29 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
         
         console.log(`Found ${items.length} tracks in the recommendation playlist`);
         
-        // Filter out the seed track and extract video IDs
-        const recommendations = items
-          .filter(item => item.id && item.id !== seedTrackId)
-          // Filter for Japanese tracks using existing logic
-          .filter(item => {
-            // Create a simplified object that matches your isLikelyJapanese function's expected format
-            const trackData = {
-              name: item.title,
-              artist: { name: item.uploader || '' },
-              channelTitle: item.channel || '',
-              channelDescription: ''
-            };
-            
-            return isLikelyJapaneseSong(trackData.name);
-          })
-          // Filter out blocked channels
-          .filter(item => {
-            const channelId = item.channel_id || '';
-            return !blockedChannelIds.includes(channelId);
-          })
-          // Filter out covers, vocaloid, and live performances
-          .filter(item => {
-            const title = (item.title || '').toLowerCase();
-            
-            // Blocked keywords in title
-            const blockedKeywords = [
-              'cover', 'カバー', // Cover in English and Japanese
-              '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
-              'live', 'ライブ', 'concert', 'コンサート', // Live performances
-              'remix', 'リミックス', // Remixes
-              'acoustic', 'アコースティック', // Acoustic versions
-              'instrumental', 'インストゥルメンタル', // Instrumental versions
-              'karaoke', 'カラオケ', // Karaoke versions
-              'nightcore', // Nightcore versions
-            ];
-            
-            // Check if any blocked keyword is in the title
-            return !blockedKeywords.some(keyword => title.includes(keyword));
-          })
-          .slice(0, 20) // Limit to 20 results
-          .map(item => ({ youtubeId: item.id }));
+        // Filter out the seed track
+        let filteredItems = items.filter(item => item.id && item.id !== seedTrackId);
+        
+        // Apply content filtering
+        const processedItems = filteredItems.map(item => ({
+          name: item.title || '',
+          artist: { name: item.uploader || '' },
+          channelId: item.channel_id || '',
+          videoId: item.id
+        }));
+        
+        // Apply shared filtering utility
+        const filteredContent = await filterBlockedMusicContent(processedItems);
+        
+        // Apply Japanese-only filtering
+        const japaneseContent = filteredContent.filter(item => 
+          isLikelyJapaneseSong(item.name, item.artist?.name || '', [], [])
+        );
+        
+        // Limit to 20 results and map to the expected format
+        const recommendations = japaneseContent
+          .slice(0, 20)
+          .map(item => ({ youtubeId: item.videoId }));
         
         console.log(`Returning ${recommendations.length} YouTube Music recommendations after filtering`);
         return recommendations;
@@ -367,41 +340,25 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
       const response = await api.getPlaylist(`RDAMVM${seedTrackId}`);
       
       if (response && response.content && response.content.length > 0) {
-        // Filter out the seed track and extract video IDs
-        const recommendations = response.content
-          .filter((track: any) => track.videoId && track.videoId !== seedTrackId)
-          // Filter out blocked channels
-          .filter((track: any) => {
-            const channelId = track.channelId || '';
-            return !blockedChannelIds.includes(channelId);
-          })
-          // Filter out covers, vocaloid, and live performances
-          .filter((track: any) => {
-            const title = (track.name || '').toLowerCase();
-            const artist = (track.artist?.name || '').toLowerCase();
-            const album = (track.album?.name || '').toLowerCase();
-            
-            // Blocked keywords in title, artist, or album
-            const blockedKeywords = [
-              'cover', 'カバー', // Cover in English and Japanese
-              '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
-              'live', 'ライブ', 'concert', 'コンサート', // Live performances
-              'remix', 'リミックス', // Remixes
-              'acoustic', 'アコースティック', // Acoustic versions
-              'instrumental', 'インストゥルメンタル', // Instrumental versions
-              'karaoke', 'カラオケ', // Karaoke versions
-              'nightcore', // Nightcore versions
-            ];
-            
-            // Check if any blocked keyword is in the title, artist, or album
-            return !blockedKeywords.some(keyword => 
-              title.includes(keyword) || 
-              artist.includes(keyword) || 
-              album.includes(keyword)
-            );
-          })
-          // Filter for Japanese songs only
-          .filter(isLikelyJapaneseSong)
+        // Filter out the seed track
+        const filteredTracks = response.content
+          .filter((track: any) => track.videoId && track.videoId !== seedTrackId);
+          
+        // Apply content filtering from shared utility
+        const filteredContent = await filterBlockedMusicContent(filteredTracks);
+        
+        // Apply Japanese-only filtering
+        const japaneseContent = filteredContent.filter((track: any) => 
+          isLikelyJapaneseSong(
+            track.name || '', 
+            track.artist?.name || '', 
+            [], 
+            [track.album?.name || '']
+          )
+        );
+        
+        // Map to the required format
+        const recommendations = japaneseContent
           .map((track: any) => ({ youtubeId: track.videoId }));
         
         return recommendations;
@@ -432,42 +389,26 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
         const searchResults = await api.search(enhancedQuery, 'song');
         
         if (searchResults && searchResults.content && searchResults.content.length > 0) {
-          // Filter out the seed track and extract video IDs
-          const recommendations = searchResults.content
-            .filter((track: any) => track.videoId && track.videoId !== seedTrackId)
-            // Filter out blocked channels
-            .filter((track: any) => {
-              const channelId = track.channelId || '';
-              return !blockedChannelIds.includes(channelId);
-            })
-            // Filter out covers, vocaloid, and live performances
-            .filter((track: any) => {
-              const title = (track.name || '').toLowerCase();
-              const artist = (track.artist?.name || '').toLowerCase();
-              const album = (track.album?.name || '').toLowerCase();
-              
-              // Blocked keywords in title, artist, or album
-              const blockedKeywords = [
-                'cover', 'カバー', // Cover in English and Japanese
-                '歌ってみた', 'うたってみた', // "Tried to sing" in Japanese
-                'live', 'ライブ', 'concert', 'コンサート', // Live performances
-                'remix', 'リミックス', // Remixes
-                'acoustic', 'アコースティック', // Acoustic versions
-                'instrumental', 'インストゥルメンタル', // Instrumental versions
-                'karaoke', 'カラオケ', // Karaoke versions
-                'nightcore', // Nightcore versions
-              ];
-              
-              // Check if any blocked keyword is in the title, artist, or album
-              return !blockedKeywords.some(keyword => 
-                title.includes(keyword) || 
-                artist.includes(keyword) || 
-                album.includes(keyword)
-              );
-            })
-            // Filter for Japanese songs only
-            .filter(isLikelyJapaneseSong)
-            .slice(0, 10) // Limit to 10 results
+          // Filter out the seed track
+          const filteredTracks = searchResults.content
+            .filter((track: any) => track.videoId && track.videoId !== seedTrackId);
+          
+          // Apply content filtering from shared utility
+          const filteredContent = await filterBlockedMusicContent(filteredTracks);
+          
+          // Apply Japanese-only filtering
+          const japaneseContent = filteredContent.filter((track: any) => 
+            isLikelyJapaneseSong(
+              track.name || '', 
+              track.artist?.name || '', 
+              [], 
+              [track.album?.name || '']
+            )
+          );
+          
+          // Limit to 10 results and map to the required format
+          const recommendations = japaneseContent
+            .slice(0, 10)
             .map((track: any) => ({ youtubeId: track.videoId }));
           
           console.log(`Found ${searchResults.content.length} search results, ${recommendations.length} after filtering`);
@@ -659,12 +600,12 @@ async function searchBasedFallback(musicId: string, title?: string): Promise<str
     const reason = searchError?.errors?.[0]?.reason;
     if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
       console.log('❌ API quota exceeded during search fallback');
-      const currentKey = await youtube.keyManager().getCurrentKey();
-      youtube.keyManager().markKeyAsQuotaExceeded(currentKey);
+      const currentKey = await getKeyManager().getCurrentKey('search');
+      getKeyManager().markKeyAsQuotaExceeded(currentKey, 'search');
       
       // Try again with a different key if available
-      const keyCount = youtube.keyManager().getKeyCount();
-      if (keyCount > 1) {
+      const keys = await getKeyManager().getAllKeys();
+      if (keys.length > 1) {
         console.log('Trying again with a different API key...');
         return searchBasedFallback(musicId, title);
       }
@@ -681,6 +622,7 @@ async function searchBasedFallback(musicId: string, title?: string): Promise<str
  * @returns True if the track is likely an instrumental version
  */
 function isInstrumentalTrack(title: string): boolean {
+  // Use the shared BLOCKED_KEYWORDS from contentFilter
   const instrumentalKeywords = [
     'instrumental', 'インストゥルメンタル', 'インスト',
     'karaoke', 'カラオケ',
@@ -689,6 +631,17 @@ function isInstrumentalTrack(title: string): boolean {
   ];
   
   const lowerTitle = title.toLowerCase();
+  
+  // First check if the title contains any instrumental keywords from the common list
+  if (BLOCKED_KEYWORDS.some(keyword => 
+    lowerTitle.includes(keyword.toLowerCase()) && 
+    (keyword === 'instrumental' || keyword === 'インストゥルメンタル' || 
+     keyword === 'karaoke' || keyword === 'カラオケ')
+  )) {
+    return true;
+  }
+  
+  // Then check for specific instrumental-only keywords
   return instrumentalKeywords.some(keyword => 
     lowerTitle.includes(keyword.toLowerCase())
   );
@@ -707,7 +660,7 @@ async function cacheVideoThumbnail(videoId: string, originalMusicId: string): Pr
 
     // Get best quality thumbnail URL
     const youtubeApi = google.youtube('v3');
-    const apiKey = await youtube.keyManager().getCurrentKey();
+    const apiKey = await getKeyManager().getCurrentKey('videos.list');
     
     const videoResponse = await youtubeApi.videos.list({
       key: apiKey,
@@ -863,12 +816,12 @@ async function findAlternativeVideoId(title: string, channelId: string, original
       const reason = searchError?.errors?.[0]?.reason;
       if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') {
         console.error('Error searching for alternative video:', searchError);
-        const currentKey = await youtube.keyManager().getCurrentKey();
-        youtube.keyManager().markKeyAsQuotaExceeded(currentKey);
+        const currentKey = await getKeyManager().getCurrentKey('search');
+        getKeyManager().markKeyAsQuotaExceeded(currentKey, 'search');
         
         // Try again with a different key if available
-        const keyCount = youtube.keyManager().getKeyCount();
-        if (keyCount > 1) {
+        const keys = await getKeyManager().getAllKeys();
+        if (keys.length > 1) {
           console.log('Trying again with a different API key...');
           return findAlternativeVideoId(title, channelId, originalMusicId);
         } else {

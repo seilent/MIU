@@ -14,7 +14,7 @@ import {
 import { Readable, PassThrough } from 'stream';
 import path from 'path';
 import { getPlayer } from '../discord/player.js';
-import { RequestStatus } from '../types/enums.js';
+import { RequestStatus, TrackStatus } from '../types/enums.js';
 import { spawn } from 'child_process';
 import getEnv from '../utils/env.js';
 import crypto from 'crypto';
@@ -47,7 +47,7 @@ interface RequestWithTrack {
   user: {
     id: string;
     username: string;
-    avatar: string | null;
+    avatar: string;
   };
   requestedAt: Date;
   playedAt?: Date | null;
@@ -84,14 +84,14 @@ interface QueueItem {
     userId: string;
     username: string;
     discriminator: string;
-    avatar: string | null;
+    avatar: string;
   };
   requestedAt: Date;
   isAutoplay: boolean;
 }
 
 // Helper function to format track response
-function formatTrack(request: RequestWithTrack): TrackResponse {
+function formatTrack(request: any): TrackResponse {
   // Always use original youtubeId for consistency
   const youtubeId = request.track.youtubeId;
   
@@ -103,7 +103,7 @@ function formatTrack(request: RequestWithTrack): TrackResponse {
     requestedBy: {
       id: request.user.id,
       username: request.user.username,
-      avatar: request.user.avatar // Pass through null values directly
+      avatar: request.user.avatar
     },
     requestedAt: request.requestedAt.toISOString(),
     isAutoplay: request.isAutoplay
@@ -139,7 +139,7 @@ const historyQueue: Array<{
   requestedBy: {
     id: string;
     username: string;
-    avatar: string | null;
+    avatar: string;
   };
   requestedAt: Date;
   playedAt: Date;
@@ -481,8 +481,8 @@ router.get('/state', async (req: Request, res: Response) => {
     // After updating the state, broadcast to all SSE clients
     const state = {
       status: client.player.getStatus(),
-      currentTrack: currentTrack ? formatTrack(currentTrack as RequestWithTrack) : undefined,
-      queue: updatedQueuedTracks.map((track: RequestWithTrack) => formatTrack(track)),
+      currentTrack: currentTrack ? formatTrack(currentTrack) : undefined,
+      queue: updatedQueuedTracks.map((track) => formatTrack(track)),
       position: client.player.getPosition()
     };
 
@@ -490,8 +490,8 @@ router.get('/state', async (req: Request, res: Response) => {
 
     res.json({
       status: client.player.getStatus(),
-      currentTrack: currentTrack ? formatTrack(currentTrack as RequestWithTrack) : undefined,
-      queue: updatedQueuedTracks.map((track: RequestWithTrack) => formatTrack(track)),
+      currentTrack: currentTrack ? formatTrack(currentTrack) : undefined,
+      queue: updatedQueuedTracks.map((track) => formatTrack(track)),
       position: client.player.getPosition()
     });
   } catch (error) {
@@ -536,7 +536,12 @@ router.post('/playback', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'Discord client not available' });
     }
 
-    client.player.togglePlay();
+    if (action === 'play') {
+      client.player.resume();
+    } else {
+      client.player.pause();
+    }
+    
     res.json({ success: true });
   } catch (error) {
     console.error('Error controlling playback:', error);
@@ -1312,7 +1317,7 @@ router.get('/history', async (_req: Request, res: Response) => {
       requestedBy: {
         id: track.requestedBy.id,
         username: track.requestedBy.username,
-        avatar: track.requestedBy.avatar || undefined // Match queue format
+        avatar: track.requestedBy.avatar
       },
       requestedAt: track.requestedAt.toISOString(),
       playedAt: track.playedAt.toISOString(),
@@ -1425,7 +1430,7 @@ router.get('/state/live', (req: Request, res: Response) => {
           userId: currentTrack.requestedBy.userId,
           username: currentTrack.requestedBy.username,
           discriminator: '0000',
-          avatar: currentTrack.requestedBy.avatar
+          avatar: currentTrack.requestedBy.avatar || ''
         }
       })) : null,
       queue: queuedTracks.map(track => formatTrack(queueItemToRequestWithTrack({
@@ -1434,7 +1439,7 @@ router.get('/state/live', (req: Request, res: Response) => {
           userId: track.requestedBy.userId,
           username: track.requestedBy.username,
           discriminator: '0000',
-          avatar: track.requestedBy.avatar
+          avatar: track.requestedBy.avatar || ''
         }
       }))),
       position: player.getPosition()

@@ -202,7 +202,7 @@ router.get('/callback', async (req, res) => {
         roles: user.roles.map(role => role.name),
       },
       JWT_SECRET,
-      { expiresIn: '7d' }
+      { expiresIn: process.env.JWT_EXPIRY || '365d' }
     );
 
     try {
@@ -215,7 +215,7 @@ router.get('/callback', async (req, res) => {
         domain: string | undefined;
         path: string;
       } = {
-        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        maxAge: 365 * 24 * 60 * 60 * 1000, // 365 days
         secure: true,
         sameSite: 'none',
         domain: cookieDomain,

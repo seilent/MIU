@@ -63,7 +63,7 @@ router.post('/heartbeat', async (req: Request, res: Response) => {
 
     // Only log new web user joins or state changes
     if (!existingPresence) {
-      logger.info(`🌐 Web user joined: ${existingPresence?.user?.username || userId}`);
+      logger.info(`🌐 Web user joined: ${userId}`);
     }
 
     // Update player web presence

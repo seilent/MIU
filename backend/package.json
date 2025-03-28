@@ -9,6 +9,7 @@
     "build": "tsc",
     "build-no-lint": "tsc --noEmit false",
     "start": "node dist/index.js",
+    "stop": "./scripts/kill-server.sh",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:studio": "dotenv -e .env.development -- prisma studio --port 5000",

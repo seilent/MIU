@@ -1,5 +1,5 @@
 import { ChatInputCommandInteraction, GuildMember } from 'discord.js';
-import { getYoutubeId } from '../../utils/youtube';
+import { getYoutubeId } from '../../utils/youtube.js';
 import { AudioPlayerStatus } from '@discordjs/voice';
 import { getThumbnailUrl } from '../../utils/youtubeMusic.js';
 

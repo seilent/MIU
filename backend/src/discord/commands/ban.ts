@@ -1,9 +1,46 @@
 import { ChatInputCommandInteraction, GuildMember, SlashCommandBuilder } from 'discord.js';
-import { prisma } from '../../db';
-import { TrackingService } from '../../tracking/service';
-import { cleanupBlockedSong } from '../../routes/music';
-import { getKeyManager } from '../../utils/YouTubeKeyManager';
-import { youtube } from '../../utils/youtube';
+import { prisma } from '../../db.js';
+import { TrackingService } from '../../tracking/service.js';
+import { cleanupBlockedSong } from '../../routes/music.js';
+import { getKeyManager } from '../../utils/YouTubeKeyManager.js';
+import { youtube } from '../../utils/youtube.js';
+import { promisify } from 'util';
+import { exec } from 'child_process';
+
+const execAsync = promisify(exec);
+
+async function getChannelInfoFromVideo(youtubeId: string): Promise<{ channelId: string; channelTitle: string }> {
+  try {
+    const { stdout: channelInfo } = await execAsync(`yt-dlp --no-warnings --print channel,channel_id "https://www.youtube.com/watch?v=${youtubeId}"`);
+    const [channelTitle, channelId] = channelInfo.trim().split('\n');
+    // Take only the first line of channel title if it contains newlines
+    const cleanTitle = channelTitle.trim().split('\n')[0];
+    return { channelId, channelTitle: cleanTitle };
+  } catch (error) {
+    console.error('Error getting channel info:', error);
+    throw error;
+  }
+}
+
+async function getAllChannelVideos(channelId: string): Promise<string[]> {
+  try {
+    const tempFile = `/home/seilent/MIU/backend/cache/temp/channel_${channelId}_videos.txt`;
+    // Get all video IDs and save to a file
+    await execAsync(`yt-dlp --no-warnings --flat-playlist --print id "https://www.youtube.com/channel/${channelId}" > ${tempFile}`);
+    
+    // Read the file content
+    const { stdout: fileContent } = await execAsync(`cat ${tempFile}`);
+    
+    // Clean up temp file
+    await execAsync(`rm ${tempFile}`);
+    
+    // Split by newlines and filter empty lines
+    return fileContent.trim().split('\n').filter(id => id);
+  } catch (error) {
+    console.error('Error getting channel videos:', error);
+    throw error;
+  }
+}
 
 async function blockSeedRecommendations(youtubeId: string) {
   try {
@@ -71,60 +108,120 @@ async function blockSeedRecommendations(youtubeId: string) {
 
 async function blockChannelById(channelId: string, reason: string) {
   try {
-    // Update channel to blocked status
-    await prisma.channel.update({
-      where: { id: channelId },
-      data: {
-        isBlocked: true,
-        blockedAt: new Date(),
-        blockedReason: reason
-      }
+    console.log(`[Ban][Channel] Starting to block channel: ${channelId}`);
+    
+    // Get all video IDs from the channel using yt-dlp
+    console.log(`[Ban][Channel] Fetching all video IDs...`);
+    const allChannelVideos = await getAllChannelVideos(channelId);
+    console.log(`[Ban][Channel] Found ${allChannelVideos.length} videos`);
+    
+    // Get channel info for new channels
+    let channel = await prisma.channel.findUnique({
+      where: { id: channelId }
     });
+    console.log(`[Ban][Channel] Channel exists in DB: ${!!channel}`);
 
-    // Get all tracks from this channel
-    const tracks = await prisma.track.findMany({
-      where: { channelId }
-    });
-
-    // Block all tracks from this channel and clean up recommendations
-    for (const track of tracks) {
-      // Update track status and apply penalty
-      await prisma.track.update({
-        where: { youtubeId: track.youtubeId },
+    if (!channel) {
+      // Get channel title using yt-dlp
+      console.log(`[Ban][Channel] Getting channel title from YouTube...`);
+      const { stdout: channelTitle } = await execAsync(`yt-dlp --no-warnings --print channel "https://www.youtube.com/channel/${channelId}"`);
+      const cleanTitle = channelTitle.trim().split('\n')[0]; // Take only the first line
+      console.log(`[Ban][Channel] Channel title: "${cleanTitle}"`);
+      
+      // Create channel entry
+      console.log(`[Ban][Channel] Creating new channel entry in DB...`);
+      channel = await prisma.channel.create({
         data: {
-          status: 'BLOCKED',
-          globalScore: {
-            decrement: 10 // Apply ban penalty
-          }
+          id: channelId,
+          title: cleanTitle,
+          isBlocked: true,
+          blockedAt: new Date(),
+          blockedReason: reason
         }
       });
+    } else {
+      // Update existing channel to blocked status
+      console.log(`[Ban][Channel] Updating existing channel to blocked status...`);
+      await prisma.channel.update({
+        where: { id: channelId },
+        data: {
+          isBlocked: true,
+          blockedAt: new Date(),
+          blockedReason: reason
+        }
+      });
+    }
 
-      // Clean up blocked song from playlists and recommendations
-      await cleanupBlockedSong(track.youtubeId);
+    // Block all existing tracks from this channel
+    console.log(`[Ban][Channel] Finding existing tracks from this channel...`);
+    const existingTracks = await prisma.track.findMany({
+      where: {
+        youtubeId: {
+          in: allChannelVideos
+        }
+      }
+    });
+    console.log(`[Ban][Channel] Found ${existingTracks.length} existing tracks to block`);
+
+    // Update all existing tracks to BLOCKED status
+    if (existingTracks.length > 0) {
+      const trackIds = existingTracks.map(track => track.youtubeId);
+      
+      console.log(`[Ban][Channel] Updating tracks and user stats...`);
+      await prisma.$transaction([
+        // Update tracks to BLOCKED status
+        prisma.track.updateMany({
+          where: {
+            youtubeId: {
+              in: trackIds
+            }
+          },
+          data: {
+            status: 'BLOCKED',
+            globalScore: {
+              decrement: 10
+            }
+          }
+        }),
+        // Apply penalty to user stats
+        prisma.$executeRaw`
+          UPDATE "UserTrackStats"
+          SET "personalScore" = "UserTrackStats"."personalScore" - 5
+          WHERE "youtubeId" = ANY(${trackIds})
+        `
+      ]);
+
+      // Clean up blocked songs
+      console.log(`[Ban][Channel] Cleaning up blocked songs...`);
+      for (const youtubeId of trackIds) {
+        await cleanupBlockedSong(youtubeId);
+      }
     }
 
     // Remove all recommendations that use any track from this channel as a seed
-    const trackIds = tracks.map(track => track.youtubeId);
-    await prisma.youtubeRecommendation.deleteMany({
+    console.log(`[Ban][Channel] Removing recommendations...`);
+    const recommendationResult = await prisma.youtubeRecommendation.deleteMany({
       where: {
-        seedTrackId: {
-          in: trackIds
-        }
+        OR: [
+          {
+            seedTrackId: {
+              in: allChannelVideos
+            }
+          },
+          {
+            youtubeId: {
+              in: allChannelVideos
+            }
+          }
+        ]
       }
     });
+    console.log(`[Ban][Channel] Removed ${recommendationResult.count} recommendations`);
 
-    // Remove all recommendations of any track from this channel
-    await prisma.youtubeRecommendation.deleteMany({
-      where: {
-        youtubeId: {
-          in: trackIds
-        }
-      }
-    });
-
+    console.log(`[Ban][Channel] Channel blocking complete`);
     return {
-      channelTitle: (await prisma.channel.findUnique({ where: { id: channelId } }))?.title || 'Unknown Channel',
-      tracksBlocked: tracks.length
+      channelTitle: channel.title,
+      tracksBlocked: existingTracks.length
     };
   } catch (error) {
     console.error('Error blocking channel:', error);
@@ -281,31 +378,53 @@ export async function ban(interaction: ChatInputCommandInteraction) {
           const id = interaction.options.getString('id', true);
           const blockChannel = interaction.options.getBoolean('block_channel') || false;
           
-          // Find the track in the database
-          const track = await prisma.track.findUnique({
-            where: { youtubeId: id }
-          });
-
-          if (!track) {
-            await interaction.editReply(`Track ${id} not found.`);
-            return;
+          console.log(`[Ban] Starting ban process for video ID: ${id}`);
+          console.log(`[Ban] Block channel option: ${blockChannel}`);
+          
+          // Apply ban penalty to the track
+          try {
+            console.log(`[Ban] Applying ban penalty to video ID: ${id}`);
+            await applyBanPenalty(id, trackingService);
+            console.log(`[Ban] Successfully applied ban penalty`);
+          } catch (error) {
+            console.error(`[Ban] Error applying ban penalty:`, error);
+            throw error;
           }
 
-          // Apply ban penalty to the track
-          await applyBanPenalty(id, trackingService);
-
-          // Block channel if requested and channel exists
+          // Get channel info and block channel only if blockChannel is true
           let channelBlockMessage = '';
-          if (blockChannel && track.channelId) {
-            const channelResult = await blockChannelById(track.channelId, 'Banned along with track');
-            channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+          if (blockChannel) {
+            try {
+              console.log(`[Ban] Getting channel info for video ID: ${id}`);
+              const { channelId, channelTitle } = await getChannelInfoFromVideo(id);
+              console.log(`[Ban] Found channel: ${channelTitle} (${channelId})`);
+              
+              console.log(`[Ban] Blocking channel: ${channelId}`);
+              const channelResult = await blockChannelById(channelId, 'Banned along with track');
+              console.log(`[Ban] Channel blocked. Affected ${channelResult.tracksBlocked} tracks`);
+              
+              channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+            } catch (error) {
+              console.error(`[Ban] Error processing channel:`, error);
+              channelBlockMessage = '\nFailed to process channel information.';
+            }
           }
 
           // Block recommendations from this track
-          const { count: recommendationsBlocked } = await blockSeedRecommendations(id);
+          let recommendationsBlocked = 0;
+          try {
+            console.log(`[Ban] Blocking recommendations for video ID: ${id}`);
+            const result = await blockSeedRecommendations(id);
+            recommendationsBlocked = result.count;
+            console.log(`[Ban] Blocked ${recommendationsBlocked} recommendations`);
+          } catch (error) {
+            console.error(`[Ban] Error blocking recommendations:`, error);
+            throw error;
+          }
 
+          console.log(`[Ban] Ban process completed for video ID: ${id}`);
           await interaction.editReply(
-            `Banned song "${track.title}" (${track.youtubeId})\n` +
+            `Banned song "${id}"\n` +
             `Blocked ${recommendationsBlocked} recommendations from this song.${channelBlockMessage}`
           );
           break;

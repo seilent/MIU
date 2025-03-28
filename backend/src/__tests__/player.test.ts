@@ -1,7 +1,7 @@
 /// <reference types="jest" />
-import { Player } from '../discord/player';
+import { Player } from '../discord/player.js';
 import { Client } from 'discord.js';
-import { prisma } from '../db';
+import { prisma } from '../db.js';
 
 jest.mock('../db', () => ({
   prisma: {

@@ -12,14 +12,13 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
-    },
-    "allowImportingTsExtensions": true
+    }
   },
   "ts-node": {
     "esm": true,
     "experimentalSpecifiers": true,
     "transpileOnly": true
   },
-  "include": ["src/backend/**/*"],
+  "include": ["backend/src/**/*"],
   "exclude": ["node_modules", "dist", "src/frontend/**/*", "src/pages/**/*"]
 } 

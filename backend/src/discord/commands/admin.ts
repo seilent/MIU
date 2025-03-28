@@ -1,5 +1,5 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder } from 'discord.js';
-import { prisma } from '../../db';
+import { prisma } from '../../db.js';
 
 export const data = new SlashCommandBuilder()
   .setName('admin')

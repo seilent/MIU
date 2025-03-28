@@ -31,7 +31,7 @@ import { ChildProcessWithoutNullStreams } from 'child_process';
 import { resolveYouTubeMusicId, getThumbnailUrl } from '../utils/youtubeMusic.js';
 import { RequestStatus, PlaylistMode, TrackStatus } from '../types/enums.js';
 import { broadcast, broadcastPlayerState } from '../routes/music.js';
-import { cleanupBlockedSong } from '../routes/music';
+import { cleanupBlockedSong } from '../routes/music.js';
 import { addToHistory } from '../routes/music.js';
 
 // Base types
@@ -1051,8 +1051,16 @@ export class Player {
 
       console.log(`⬇️ [DOWNLOAD] Starting download for: ${youtubeId}`);
       
+      // Get track info to check if it's a music URL
+      const track = await prisma.track.findUnique({
+        where: { youtubeId }
+      });
+      
+      // Pass the isMusicUrl flag to downloadYoutubeAudio
+      const isMusicUrl = track?.isMusicUrl || false;
+      
       // Download using resolvedId but save as youtubeId
-      const tempPath = await downloadYoutubeAudio(resolvedId);
+      const tempPath = await downloadYoutubeAudio(resolvedId, isMusicUrl);
       const finalPath = path.join(path.dirname(tempPath), `${youtubeId}${path.extname(tempPath)}`);
       
       // Rename the file to use original youtubeId
@@ -1462,7 +1470,8 @@ export class Player {
                 where: { youtubeId: rec.youtubeId },
                 create: { 
                   youtubeId: rec.youtubeId,
-                  seedTrackId: seedTrack.youtubeId
+                  seedTrackId: seedTrack.youtubeId,
+                  title: rec.title || 'Unknown'
                 },
                 update: {} // No updates needed, just ensure it exists
               });
@@ -1853,7 +1862,9 @@ export class Player {
       console.error('Failed to get audio resource');
       
       // Update track status back to STANDBY only if it's not BLOCKED
-      if (track && track.status !== TrackStatus.BLOCKED) {
+      // Using type casting to handle the type system limitation
+      const trackStatus = track?.status as unknown as TrackStatus;
+      if (track && trackStatus !== TrackStatus.BLOCKED) {
         await prisma.track.update({
           where: { youtubeId: nextTrack.youtubeId },
           data: {
@@ -2475,6 +2486,11 @@ export class Player {
   public isAutoplayEnabled(): boolean {
     return this.autoplayEnabled;
   }
+  
+  public setAutoplay(enabled: boolean): void {
+    this.autoplayEnabled = enabled;
+    console.log(`[PLAYER] Autoplay ${enabled ? 'enabled' : 'disabled'}`);
+  }
 
   /**
    * Periodically grows the YouTube recommendation database regardless of player activity
@@ -2762,7 +2778,7 @@ export class Player {
         }
 
         // Ensure we maintain at least 5 songs in queue if autoplay is enabled
-        if (this.isAutoplayEnabled && this.queue.length + this.autoplayQueue.length < 5) {
+        if (this.isAutoplayEnabled() && this.queue.length + this.autoplayQueue.length < 5) {
           await this.prefetchAutoplayTracks();
         }
 

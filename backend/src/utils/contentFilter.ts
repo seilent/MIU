@@ -1,11 +1,10 @@
 import { youtube_v3 } from 'googleapis';
-import { prisma } from '../db';
+import { prisma } from '../db.js';
 
 // Shared blocked keywords for all content types
 export const BLOCKED_KEYWORDS = [
   // Covers and user-generated content
-  'cover', 'カバー',
-  '歌ってみた', 'うたってみた',
+  'うたってみた',
   'vocaloid', 'ボーカロイド', 'ボカロ',
   'hatsune', 'miku', '初音ミク',
   'live', 'ライブ', 'concert', 'コンサート',
@@ -24,6 +23,42 @@ export const BLOCKED_KEYWORDS = [
   'tutorial', 'lesson', 'how to', 'music theory',
   'guitar', 'drum', 'piano', 'tabs', 'off vocal',
   'ギター', 'ドラム', 'ピアノ', 'オフボーカル',
+  
+  // VOCALOID characters - Kanji names
+  '初音ミク', '鏡音リン', '鏡音レン', '巡音ルカ', 'KAITO', 'MEIKO',
+  '神威がくぽ', 'GUMI', 'Lily', '氷山キヨテル', '歌愛ユキ',
+  '猫村いろは', 'SF-A2 開発コード miki', 'VY1', 'VY2', '蒼姫ラピス',
+  '結月ゆかり', '兎眠りおん', 'MAYU', 'ZOLA PROJECT', '心華',
+  'CYBER DIVA', 'CYBER SONGMAN', 'Fukase', '音街ウナ',
+  '鏡音リン・レン V4X', '初音ミク V4X', '巡音ルカ V4X',
+  
+  // VOCALOID characters - Romaji names
+  'Hatsune Miku', 'Kagamine Rin', 'Kagamine Len', 'Megurine Luka',
+  'Kaito', 'Meiko', 'Kamui Gakupo', 'Gumi', 'Lily', 'Hiyama Kiyoteru',
+  'Kaai Yuki', 'Nekomura Iroha', 'SF-A2 Kaihatsu Kōdo Miki',
+  'Aoki Lapis', 'Yuzuki Yukari', 'Tone Rion', 'Mayu', 'Zola Project',
+  'Xin Hua', 'Cyber Diva', 'Cyber Songman', 'Fukase', 'Otomachi Una',
+  'Kagamine Rin & Len V4X', 'Hatsune Miku V4X', 'Megurine Luka V4X',
+  
+  // UTAU characters - Kanji names
+  '重音テト', '桃音モモ', '欲音ルコ', '波音リツ', '健音テイ',
+  '春歌ナナ', '櫻歌ミコ', 'デフォ子', '穂歌ソラ', '蒼音タヤ',
+  '緋惺', '戯歌ラカン', '薪宮風季', '夢音ミライ', '和音マコ',
+  '響震路', '神音ロン', '朝音ボウ', '夜音オウ', '闇音レンリ',
+  '月代はくぽ', '白鐘ヒヨリ', '緋音アオ', '闇音フク', '朱音イナリ',
+  '紫音リア', '蒼音カズ', '緑音ユウ', '橙音レン', '黄音ミツ',
+  '藍音ソラ', '桜音ハル', '鈴音リン', '鈴音レン', '鈴音ミク',
+  '鈴音ルカ', '鈴音カイト', '鈴音メイコ',
+  
+  // UTAU characters - Romaji names
+  'Kasane Teto', 'Momone Momo', 'Yokune Ruko', 'Namine Ritsu', 'Sukone Tei',
+  'Haruka Nana', 'Sakura Miko', 'Defoko', 'Hokaze Sora', 'Aone Taya',
+  'Hikarisyuyo', 'Geika Rakan', 'Makimiya Fuki', 'Yumene Mirai', 'Waon Mako',
+  'Hibiki Shinji', 'Kamene Ron', 'Asane Bou', 'Yorune Ou', 'Yamine Renri',
+  'Tsukishiro Hakupo', 'Shirogane Hiyori', 'Hine Ao', 'Yamine Fuku', 'Akane Inari',
+  'Shion Ria', 'Aone Kazu', 'Midone Yuu', 'Daione Ren', 'Kione Mitsu',
+  'Aine Sora', 'Sakurane Haru', 'Suzune Rin', 'Suzune Len', 'Suzune Miku',
+  'Suzune Luka', 'Suzune Kaito', 'Suzune Meiko'
 ];
 
 // Chinese-specific keywords that indicate Chinese content

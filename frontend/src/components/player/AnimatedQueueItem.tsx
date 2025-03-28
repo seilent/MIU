@@ -103,7 +103,7 @@ export function AnimatedQueueItem({
 
       {/* Track info */}
       <div className="flex-1 min-w-0">
-        <h3 className="text-white font-medium truncate">
+        <h3 className="text-white font-medium truncate text-left">
           {track.title}
         </h3>
         <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-sm mt-1">

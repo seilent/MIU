@@ -37,9 +37,14 @@ export const useAuthStore = create<AuthState>()(
         if (token) {
           // Also set token in cookie for API requests
           try {
-            setCookie('auth_token', token, { maxAge: 2592000 });
+            // Use more secure defaults and don't explicitly set maxAge
+            // since the utility now defaults to 365 days
+            setCookie('auth_token', token, { 
+              sameSite: 'Lax',
+              secure: window.location.protocol === 'https:'
+            });
           } catch (err) {
-            // Failed to set cookie
+            console.error('Failed to set auth cookie:', err);
           }
         } else {
           // Clear cookies

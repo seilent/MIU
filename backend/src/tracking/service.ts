@@ -1,4 +1,4 @@
-import { prisma } from '../db';
+import { prisma } from '../db.js';
 import type { Track, User, Request, Prisma } from '@prisma/client';
 
 export class TrackingService {
