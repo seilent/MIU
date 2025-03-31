@@ -18,6 +18,24 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const { setPlayerState, setQueue } = usePlayerStore();
   const [isConnected, setIsConnected] = useState(false);
   const sseConnectionRef = useRef(false);
+  const prevStateRef = useRef<any>(null);
+  const prevQueueRef = useRef<any>(null);
+
+  // Helper to check if state has meaningful changes
+  const hasStateChanged = (newState: any) => {
+    if (!prevStateRef.current) return true;
+    return (
+      newState.status !== prevStateRef.current.status ||
+      (newState.currentTrack?.id !== prevStateRef.current.currentTrack?.id) ||
+      Math.abs(newState.position - prevStateRef.current.position) > 5 // Only log position changes > 5 seconds
+    );
+  };
+
+  // Helper to check if queue has meaningful changes
+  const hasQueueChanged = (newQueue: any[]) => {
+    if (!prevQueueRef.current) return true;
+    return JSON.stringify(newQueue) !== JSON.stringify(prevQueueRef.current);
+  };
 
   // Centralized SSE connection management
   useEffect(() => {
@@ -28,57 +46,67 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     
     // Handle state updates (current track, status, position)
     const handleState = (data: any) => {
-      console.log('PlayerProvider: State update received', {
+      const stateUpdate = {
         status: data.status,
         track: data.currentTrack ? {
           id: data.currentTrack.youtubeId,
           title: data.currentTrack.title
         } : null
-      });
-      
-      // Update all state at once to prevent race conditions
-      if (data.currentTrack) {
-        setPlayerState({
-          status: data.status,
-          position: data.position,
-          currentTrack: {
-            ...data.currentTrack,
-            requestedBy: data.currentTrack.requestedBy ? {
-              id: data.currentTrack.requestedBy.id,
-              username: data.currentTrack.requestedBy.username,
-              avatar: data.currentTrack.requestedBy.avatar || undefined,
-              hasAvatar: !!data.currentTrack.requestedBy.avatar
-            } : null,
-            requestedAt: data.currentTrack.requestedAt || new Date().toISOString()
-          }
-        });
-      } else {
-        setPlayerState({
-          status: data.status,
-          position: data.position,
-          currentTrack: undefined
-        });
+      };
+
+      // Only log and update if there are meaningful changes
+      if (hasStateChanged(stateUpdate)) {
+        console.log('PlayerProvider: State update received', stateUpdate);
+        prevStateRef.current = stateUpdate;
+        
+        // Update all state at once to prevent race conditions
+        if (data.currentTrack) {
+          setPlayerState({
+            status: data.status,
+            position: data.position,
+            currentTrack: {
+              ...data.currentTrack,
+              requestedBy: data.currentTrack.requestedBy ? {
+                id: data.currentTrack.requestedBy.id,
+                username: data.currentTrack.requestedBy.username,
+                avatar: data.currentTrack.requestedBy.avatar || undefined,
+                hasAvatar: !!data.currentTrack.requestedBy.avatar
+              } : null,
+              requestedAt: data.currentTrack.requestedAt || new Date().toISOString()
+            }
+          });
+        } else {
+          setPlayerState({
+            status: data.status,
+            position: data.position,
+            currentTrack: undefined
+          });
+        }
       }
       
       // Process queue data from state event if available
       if (data.queue && Array.isArray(data.queue)) {
-        console.log('PlayerProvider: Queue update from state event', { 
-          queueLength: data.queue.length 
-        });
+        const queueUpdate = { queueLength: data.queue.length };
         
-        const processedQueue = data.queue.map((track: any) => ({
-          ...track,
-          requestedBy: track.requestedBy ? {
-            id: track.requestedBy.id,
-            username: track.requestedBy.username,
-            avatar: track.requestedBy.avatar || undefined,
-            hasAvatar: !!track.requestedBy.avatar
-          } : null,
-          requestedAt: track.requestedAt || new Date().toISOString(),
-          isAutoplay: !!track.isAutoplay
-        }));
-        
-        setQueue(processedQueue);
+        // Only log and update if queue has changed
+        if (hasQueueChanged(data.queue)) {
+          console.log('PlayerProvider: Queue update from state event', queueUpdate);
+          prevQueueRef.current = data.queue;
+          
+          const processedQueue = data.queue.map((track: any) => ({
+            ...track,
+            requestedBy: track.requestedBy ? {
+              id: track.requestedBy.id,
+              username: track.requestedBy.username,
+              avatar: track.requestedBy.avatar || undefined,
+              hasAvatar: !!track.requestedBy.avatar
+            } : null,
+            requestedAt: track.requestedAt || new Date().toISOString(),
+            isAutoplay: !!track.isAutoplay
+          }));
+          
+          setQueue(processedQueue);
+        }
       }
     };
     

@@ -430,35 +430,36 @@ export default function AudioSync() {
     // Rate limit status changes to prevent rapid consecutive triggers
     const now = performance.now();
     const timeSinceLastChange = now - lastStatusChangeTimeRef.current;
-    if (timeSinceLastChange < 300) { // 300ms debounce
-      console.log('Audio: Status change throttled (too frequent)', { 
-        status, 
-        timeSinceLastChange: `${timeSinceLastChange.toFixed(2)}ms`,
-        minInterval: '300ms'
-      });
+    if (timeSinceLastChange < 1000) { // Increased debounce to 1000ms
       return;
     }
     
-    lastStatusChangeTimeRef.current = now;
-
     const audio = audioRef.current;
-    console.log('Audio: Status change effect triggered', { 
-      status, 
-      isPaused: audio.paused,
-      isInitialized,
-      currentTrack: currentTrack?.youtubeId,
-      hasInitialSync: hasInitialSyncRef.current
-    });
-
-    // Don't attempt to play if we're loading a new track
-    if (loadingRef.current) {
-      console.log('Audio: Loading in progress, deferring playback');
+    const currentAudioState = audio.paused ? 'paused' : 'playing';
+    
+    // Skip if status and audio state are already aligned
+    if ((status === 'playing' && currentAudioState === 'playing') || 
+        (status === 'paused' && currentAudioState === 'paused')) {
       return;
     }
 
-    // Skip if status and audio state are already aligned
-    if ((status === 'playing' && !audio.paused) || (status === 'paused' && audio.paused)) {
-      console.log('Audio: Status already aligned with desired state');
+    lastStatusChangeTimeRef.current = now;
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Audio: Status change effect triggered', { 
+        status, 
+        currentAudioState,
+        isInitialized,
+        currentTrack: currentTrack?.youtubeId,
+        hasInitialSync: hasInitialSyncRef.current
+      });
+    }
+
+    // Don't attempt to play if we're loading a new track
+    if (loadingRef.current) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Audio: Loading in progress, deferring playback');
+      }
       return;
     }
 
@@ -707,10 +708,12 @@ export default function AudioSync() {
     };
   }, [token]); // Only run when token changes
 
-  // Track change effect
+  // Track change effect - optimized
   useEffect(() => {
     if (!currentTrack) {
-      console.log('AudioSync: No current track available');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('AudioSync: No current track available');
+      }
       // Reset sync state when we have no track
       hasInitialSyncRef.current = false;
       positionSyncInProgressRef.current = false;
@@ -720,33 +723,38 @@ export default function AudioSync() {
     
     // Skip if component is not mounted or audio not initialized
     if (!mountedRef.current || !isInitialized) {
-      console.log('AudioSync: Component not ready, skipping track change');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('AudioSync: Component not ready, skipping track change');
+      }
       return;
     }
     
     // Skip if already loading
     if (loadingRef.current) {
-      console.log('AudioSync: Loading in progress, skipping track change');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('AudioSync: Loading in progress, skipping track change');
+      }
       return;
     }
     
     // Skip if track hasn't actually changed
     if (trackIdRef.current === currentTrack.youtubeId) {
-      console.log('AudioSync: Track ID unchanged, skipping track change effect');
       return;
     }
     
-    console.log('AudioSync: Track change effect triggered', {
-      id: currentTrack.youtubeId,
-      title: currentTrack.title,
-      requestedBy: {
-        username: currentTrack.requestedBy?.username,
-        avatar: currentTrack.requestedBy?.avatar
-      },
-      loading: loadingRef.current,
-      initialized: isInitialized,
-      syncInProgress: positionSyncInProgressRef.current
-    });
+    if (process.env.NODE_ENV === 'development') {
+      console.log('AudioSync: Track change effect triggered', {
+        id: currentTrack.youtubeId,
+        title: currentTrack.title,
+        requestedBy: {
+          username: currentTrack.requestedBy?.username,
+          avatar: currentTrack.requestedBy?.avatar
+        },
+        loading: loadingRef.current,
+        initialized: isInitialized,
+        syncInProgress: positionSyncInProgressRef.current
+      });
+    }
     
     // Reset sync state for new track
     resetSyncState();

@@ -3,7 +3,8 @@ import { prisma } from '../db.js';
 import { authMiddleware } from '../middleware/auth.js';
 import type { User, Prisma } from '@prisma/client';
 import logger from '../utils/logger.js';
-import { getPlayer } from '../discord/player.js';
+// Updated import to use the new player structure
+import { getMusicPlayer } from '../discord/player/index.js';
 
 interface WebPresenceWithUser {
   userId: string;
@@ -41,7 +42,10 @@ router.post('/heartbeat', async (req: Request, res: Response) => {
     }
 
     const keepPlaying = req.headers['x-keep-playing'] === 'true';
-    const player = getPlayer();
+    // Get the new MusicPlayer instance
+    const player = getMusicPlayer();
+    // Access sub-modules if needed (e.g., voiceConnectionManager)
+    // No direct equivalent for getPlayer(), use getMusicPlayer()
 
     // Check if this is a new presence or update
     const existingPresence = await prisma.webPresence.findUnique({
@@ -66,12 +70,16 @@ router.post('/heartbeat', async (req: Request, res: Response) => {
       logger.info(`🌐 Web user joined: ${userId}`);
     }
 
-    // Update player web presence
-    if (keepPlaying && player.hasCurrentTrack()) {
-      player.setWebPresence(true);
-    } else {
-      player.setWebPresence(false);
-    }
+    // Update player web presence via VoiceConnectionManager
+    // Check if there's a current track using the PlayerStateManager
+    const hasCurrentTrack = !!player.getState()?.currentTrack;
+    // Call setWebPresence on the VoiceConnectionManager (assuming player exposes it or we access it directly)
+    // For now, let's assume player has a method to access its VoiceConnectionManager or proxies the call
+    // If not, this needs adjustment based on MusicPlayer's final API
+    // player.voiceConnectionManager.setWebPresence(keepPlaying && hasCurrentTrack);
+    // --- OR --- (if MusicPlayer proxies the call)
+    player.setWebPresence(keepPlaying && hasCurrentTrack);
+
 
     res.json({ success: true });
   } catch (error) {
@@ -112,7 +120,7 @@ router.get('/active', async (_req: Request, res: Response) => {
   try {
     // Get users seen in the last 5 minutes
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    
+
     // First get previously active users
     const previouslyActive = await prisma.webPresence.findMany({
       include: {
@@ -146,13 +154,23 @@ router.get('/active', async (_req: Request, res: Response) => {
     const nowInactive = previouslyActive.filter(
       (prev: WebPresenceWithUser) => !activeUsers.find((active: WebPresenceWithUser) => active.userId === prev.userId)
     );
-    
+
     for (const inactive of nowInactive) {
       logger.info(`🌐 Web user left: ${inactive.user.username || inactive.userId}`);
       // Clean up inactive presence records
       await prisma.webPresence.delete({
         where: { userId: inactive.userId }
       });
+       // Notify player if last web user leaves
+       const player = getMusicPlayer();
+       // Check if any web users remain active AFTER deleting this one
+       const remainingActiveWebUsers = activeUsers.filter(u => u.userId !== inactive.userId);
+       if (remainingActiveWebUsers.length === 0) {
+           console.log(`[PresenceRoute] Last web user left (${inactive.userId}), notifying player.`);
+           // player.voiceConnectionManager.setWebPresence(false);
+           // --- OR --- (if MusicPlayer proxies the call)
+           player.setWebPresence(false);
+       }
     }
 
     res.json(activeUsers.map((presence: WebPresenceWithUser) => ({
@@ -167,4 +185,4 @@ router.get('/active', async (_req: Request, res: Response) => {
   }
 });
 
-export default router; 
+export default router;

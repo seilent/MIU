@@ -2,11 +2,17 @@ import { ChatInputCommandInteraction, SlashCommandBuilder, EmbedBuilder } from '
 import { prisma } from '../../db.js';
 import { getYoutubeId, getYoutubeInfo, getPlaylistItems, downloadYoutubeAudio } from '../../utils/youtube.js';
 import type { Prisma } from '@prisma/client';
+import { TrackProcessor } from '../player/trackProcessor.js';
+import { DatabaseService } from '../player/databaseService.js';
 
 // Get API base URL from environment
 const API_BASE_URL = process.env.API_URL || 'http://localhost:3000';
 
 type DefaultPlaylistTrack = Prisma.DefaultPlaylistTrackGetPayload<{}>;
+
+// Initialize services
+const databaseService = new DatabaseService();
+const trackProcessor = new TrackProcessor(databaseService);
 
 export const data = new SlashCommandBuilder()
   .setName('playlist')
@@ -281,10 +287,6 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
 
     await interaction.reply({ content: `Adding ${videoIds.length} tracks to playlist "${playlistName}"...` });
 
-    let addedCount = 0;
-    let skippedCount = 0;
-    let errorCount = 0;
-
     // Get the current highest position
     const lastTrack = await prisma.defaultPlaylistTrack.findFirst({
       where: { playlistId: playlist.id },
@@ -299,74 +301,31 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
     for (let i = 0; i < videoIds.length; i += 5) {
       const batch = videoIds.slice(i, i + 5);
       
-      // Process each video in the batch
-      await Promise.all(batch.map(async (videoId) => {
-        try {
-          if (!videoId) {
-            skippedCount++;
-            return;
+      // Process batch using TrackProcessor
+      const result = await trackProcessor.processBatch(batch, isMusicUrl);
+
+      // Add processed tracks to playlist
+      await Promise.all(result.tracks.map(async (track) => {
+        // Check if track is already in playlist
+        const existingPlaylistTrack = await prisma.defaultPlaylistTrack.findFirst({
+          where: {
+            playlistId: playlist.id,
+            trackId: track.youtubeId
           }
+        });
 
-          // Check if track already exists in database
-          const existingTrack = await prisma.track.findUnique({
-            where: { youtubeId: videoId }
-          });
-
-          if (existingTrack) {
-            // Add to playlist if not already in it
-            const existingPlaylistTrack = await prisma.defaultPlaylistTrack.findFirst({
-              where: {
-                playlistId: playlist.id,
-                trackId: existingTrack.youtubeId
-              }
-            });
-
-            if (!existingPlaylistTrack) {
-              await prisma.defaultPlaylistTrack.create({
-                data: {
-                  position: nextPosition++,
-                  playlist: {
-                    connect: { id: playlist.id }
-                  },
-                  track: {
-                    connect: { youtubeId: existingTrack.youtubeId }
-                  }
-                }
-              });
-              addedCount++;
-            } else {
-              skippedCount++;
-            }
-          } else {
-            // Create minimal track entry - queue will handle fetching details
-            await prisma.track.upsert({
-              where: { youtubeId: videoId },
-              create: {
-                youtubeId: videoId,
-                title: videoId, // Temporary title, will be updated by queue
-                duration: 0, // Will be updated by queue
-                isMusicUrl: isMusicUrl // Set flag for YouTube Music URLs
+        if (!existingPlaylistTrack) {
+          await prisma.defaultPlaylistTrack.create({
+            data: {
+              position: nextPosition++,
+              playlist: {
+                connect: { id: playlist.id }
               },
-              update: {} // No update needed
-            });
-
-            // Add to playlist
-            await prisma.defaultPlaylistTrack.create({
-              data: {
-                position: nextPosition++,
-                playlist: {
-                  connect: { id: playlist.id }
-                },
-                track: {
-                  connect: { youtubeId: videoId }
-                }
+              track: {
+                connect: { youtubeId: track.youtubeId }
               }
-            });
-            addedCount++;
-          }
-        } catch (error) {
-          console.error(`Error processing video ${videoId}:`, error);
-          errorCount++;
+            }
+          });
         }
       }));
 
@@ -374,13 +333,13 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
       if ((i + 5) % 25 === 0 || i + 5 >= videoIds.length) {
         const progress = Math.min(100, Math.round(((i + 5) / videoIds.length) * 100));
         await interaction.editReply({
-          content: `Progress: ${progress}%\nAdded: ${addedCount}\nSkipped: ${skippedCount}\nErrors: ${errorCount}`
+          content: `Progress: ${progress}%\nAdded: ${result.addedCount}\nSkipped: ${result.skippedCount}\nErrors: ${result.errorCount}`
         });
       }
     }
 
     await interaction.editReply({
-      content: `Finished adding tracks to playlist "${playlistName}".\nAdded: ${addedCount}\nSkipped: ${skippedCount}\nErrors: ${errorCount}${isMusicUrl ? '\nNote: YouTube Music tracks will be resolved when played.' : ''}`
+      content: `Finished adding tracks to playlist "${playlistName}".${isMusicUrl ? '\nNote: YouTube Music tracks will be resolved when played.' : ''}`
     });
   } catch (error) {
     console.error('Error in handleAdd:', error);

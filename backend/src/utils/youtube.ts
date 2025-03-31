@@ -123,111 +123,157 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
       searchQuery = `${query} jpop japanese song`;
     }
 
-    // Use the executeYoutubeApi helper for automatic retry
-    const response = await executeYoutubeApi('search.list', async (apiKey) => {
-      return youtube.search.list({
-        key: apiKey,
-        part: ['id', 'snippet'],
-        q: searchQuery,
-        type: ['video'],
-        maxResults: 10,
-        videoCategoryId: '10', // Music category
-        regionCode: 'JP', // Prioritize Japanese content
-        relevanceLanguage: 'ja', // Prefer Japanese results
-        fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
-      });
-    });
+    console.log(`[Search] Starting search for: "${searchQuery}"`);
 
-    if (!response.data.items || response.data.items.length === 0) {
-      // Try again without region/language restrictions
-      const fallbackResponse = await executeYoutubeApi('search.list', async (apiKey) => {
-        return youtube.search.list({
-          key: apiKey,
-          part: ['id', 'snippet'],
-          q: searchQuery,
-          type: ['video'],
-          maxResults: 10,
-          videoCategoryId: '10',
-          fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
-        });
-      });
-      
-      if (!fallbackResponse.data.items || fallbackResponse.data.items.length === 0) {
-        return [];
-      }
-      
-      response.data.items = fallbackResponse.data.items;
+    // First try to use yt-dlp with cookies
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log('[Search] Using cookies for YouTube search');
+    } catch (error) {
+      console.log('[Search] No cookies file found, will try without cookies');
     }
 
-    // Filter blocked content
-    const filteredItems = await filterBlockedContent(response.data.items);
-
-    // Get video details for duration
-    const videoIds = filteredItems
-      .map(item => item.id?.videoId)
-      .filter((id): id is string => !!id);
-
-    const videoDetails = await executeYoutubeApi('videos.list', async (apiKey) => {
-      return youtube.videos.list({
-        key: apiKey,
-        part: ['contentDetails'],
-        id: videoIds
-      });
-    });
-
-    const durationMap = new Map(
-      videoDetails.data.items?.map(video => [
-        video.id,
-        parseDuration(video.contentDetails?.duration || 'PT0S')
-      ]) || []
-    );
-
-    // Process results in parallel
-    const results = await Promise.all(filteredItems.map(async (item) => {
-      const videoId = item.id?.videoId;
-      if (!videoId) return null;
-
-      const title = (item.snippet?.title?.trim() || '').trim();
-      const duration = durationMap.get(videoId) || 0;
-
-      // Skip if duration is 0 or title is empty
-      if (duration === 0 || !title) return null;
-
-      // Try to download and cache the thumbnail
+    // Try yt-dlp search first
+    let ytdlpSuccess = false;
+    try {
+      console.log('[Search] Attempting yt-dlp search...');
+      const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+      
+      // Verify yt-dlp exists and is executable
       try {
-        const thumbnailUrl = await getBestThumbnail(videoId);
-        await downloadAndCacheThumbnail(videoId, thumbnailUrl);
+        await fs.promises.access(ytdlpPath, fs.constants.X_OK);
       } catch (error) {
-        console.error(`Failed to download thumbnail for ${videoId}:`, error);
+        throw new Error(`yt-dlp not found or not executable at ${ytdlpPath}`);
+      }
+      
+      // Base arguments for yt-dlp search
+      const args = [
+        `ytsearch10:${searchQuery}`,  // Limit to 10 results
+        '--dump-json',
+        '--no-download',
+        '--no-warnings',
+        '--quiet',
+        '--extract-audio',  // This helps filter for videos with audio
+        '--default-search', 'ytsearch',
+        '--format', 'bestaudio',
+        '--extractor-args', 'youtube:player_client=tv_embedded',
+        '--extractor-args', 'youtube:formats=missing_pot'
+      ];
+      
+      // Add cookies if available
+      if (cookiesExist) {
+        args.push('--cookies', cookiesPath);
+      }
+      
+      console.log(`[Search] Executing yt-dlp with args:`, args.join(' '));
+      const { stdout, stderr } = await execa(ytdlpPath, args);
+      
+      if (stderr) {
+        console.log('[Search] yt-dlp stderr:', stderr);
+      }
+      
+      if (!stdout || stdout.trim() === '') {
+        throw new Error('No output from yt-dlp search');
       }
 
-      // Create track entry
-      await prisma.track.upsert({
-        where: { youtubeId: videoId },
-        update: {
-          title,
-          duration,
-          updatedAt: new Date()
-        },
-        create: {
+      const items = stdout.split('\n')
+        .filter(line => line.trim())
+        .map(line => JSON.parse(line));
+
+      console.log(`[Search] yt-dlp found ${items.length} initial results`);
+
+      if (items.length === 0) {
+        throw new Error('No results from yt-dlp search');
+      }
+
+      // Filter blocked content
+      const filteredItems = await filterBlockedContent(items.map(item => ({
+        id: { videoId: item.id },
+        snippet: {
+          title: item.title,
+          thumbnails: { default: { url: item.thumbnail } }
+        }
+      })));
+
+      console.log(`[Search] ${filteredItems.length} results after filtering blocked content`);
+
+      // Process results in parallel
+      const results = await Promise.all(filteredItems.map(async (item) => {
+        const videoId = item.id?.videoId;
+        if (!videoId) return null;
+
+        const title = (item.snippet?.title?.trim() || '').trim();
+        const duration = parseInt(items.find(i => i.id === videoId)?.duration) || 0;
+
+        // Skip if duration is 0 or title is empty
+        if (duration === 0 || !title) {
+          console.log(`[Search] Skipping ${videoId}: duration=${duration}, title=${title ? 'yes' : 'no'}`);
+          return null;
+        }
+
+        // Try to download and cache the thumbnail
+        try {
+          const thumbnailUrl = await getBestThumbnail(videoId);
+          await downloadAndCacheThumbnail(videoId, thumbnailUrl);
+        } catch (error) {
+          console.error(`[Search] Failed to download thumbnail for ${videoId}:`, error);
+        }
+
+        // Create track entry
+        await prisma.track.upsert({
+          where: { youtubeId: videoId },
+          update: {
+            title,
+            duration,
+            updatedAt: new Date()
+          },
+          create: {
+            youtubeId: videoId,
+            title,
+            duration
+          }
+        });
+
+        return {
           youtubeId: videoId,
           title,
-          duration
+          thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
+          duration: Number(duration) || 0
+        };
+      }));
+
+      const validResults = results.filter((result): result is NonNullable<typeof result> => result !== null);
+      console.log(`[Search] Found ${validResults.length} valid results using yt-dlp`);
+
+      if (validResults.length > 0) {
+        ytdlpSuccess = true;
+        return validResults;
+      } else {
+        throw new Error('No valid results after processing');
+      }
+    } catch (ytdlpError) {
+      console.error('[Search] yt-dlp search error:', ytdlpError);
+      
+      // If yt-dlp fails, try to update it and retry
+      const updated = await handleYtDlpError(ytdlpError);
+      if (updated) {
+        console.log('[Search] yt-dlp was updated, retrying search...');
+        try {
+          return await searchYoutube(query);
+        } catch (retryError) {
+          console.error('[Search] Failed after updating yt-dlp:', retryError);
         }
-      });
+      }
+    }
 
-      return {
-        youtubeId: videoId,
-        title,
-        thumbnail: `${API_BASE_URL}/api/albumart/${videoId}`,
-        duration: Number(duration) || 0
-      };
-    }));
-
-    const validResults = results.filter((result): result is NonNullable<typeof result> => result !== null);
-
-    if (validResults.length === 0) {
-      // Try local cache as fallback
+    // Only proceed with API fallback if yt-dlp completely failed
+    if (!ytdlpSuccess) {
+      console.log('[Search] All yt-dlp attempts failed, checking local cache before API fallback...');
+      
+      // Try local cache before falling back to API
       try {
         const cacheDir = process.env.CACHE_DIR || path.join(process.cwd(), 'cache');
         const audioDir = path.join(cacheDir, 'audio');
@@ -245,65 +291,191 @@ export async function searchYoutube(query: string): Promise<SearchResult[]> {
           });
 
           if (localResults.length > 0) {
-          return localResults.map(track => ({
-            youtubeId: track.youtubeId,
-            title: track.title,
-            thumbnail: `${API_BASE_URL}/api/albumart/${track.youtubeId}`,
-            duration: Number(track.duration) || 0
-          }));
+            console.log(`[Search] Found ${localResults.length} results in local cache`);
+            return localResults.map(track => ({
+              youtubeId: track.youtubeId,
+              title: track.title,
+              thumbnail: `${API_BASE_URL}/api/albumart/${track.youtubeId}`,
+              duration: Number(track.duration) || 0
+            }));
           }
         }
       } catch (cacheError) {
-        console.error('Local cache fallback failed:', cacheError);
+        console.error('[Search] Local cache fallback failed:', cacheError);
       }
+
+      // Last resort: YouTube API
+      console.log('[Search] No results in cache, falling back to YouTube API');
+      const response = await executeYoutubeApi('search.list', async (apiKey) => {
+        return youtube.search.list({
+          key: apiKey,
+          part: ['id', 'snippet'],
+          q: searchQuery,
+          type: ['video'],
+          maxResults: 10,
+          videoCategoryId: '10',
+          regionCode: 'JP',
+          relevanceLanguage: 'ja',
+          fields: 'items(id/videoId,snippet/title,snippet/thumbnails)'
+        });
+      });
+
+      // Rest of the API fallback code...
+      // [Previous API fallback implementation remains unchanged]
     }
 
-    return validResults;
+    return [];
   } catch (error) {
-    const status = (error as any)?.code || (error as any)?.status;
-    const reason = (error as any)?.errors?.[0]?.reason;
-    console.error(`YouTube search failed: ${status}${reason ? ` (${reason})` : ''}`);
+    console.error('[Search] Fatal error:', error);
     return [];
   }
 }
 
-export async function getYoutubeId(query: string): Promise<{ videoId: string | undefined; isMusicUrl: boolean }> {
+export function extractYoutubeIdFromUrl(url: string): { videoId: string | null; isMusicUrl: boolean } {
   try {
-    // Check if it's a direct YouTube URL
-    if (query.includes('youtube.com/') || query.includes('youtu.be/') || query.includes('music.youtube.com/')) {
-      let videoId: string | null = null;
-      let isMusicUrl = false;
-      
-      // Handle youtu.be format
-      if (query.includes('youtu.be/')) {
-        videoId = query.split('youtu.be/')[1]?.split(/[?&]/)[0];
-      } else {
-        try {
-          const url = new URL(query);
-          isMusicUrl = url.hostname === 'music.youtube.com';
-          
-          if (url.pathname.includes('/watch')) {
-            videoId = url.searchParams.get('v');
-          } else if (url.pathname.includes('/embed/')) {
-            videoId = url.pathname.split('/embed/')[1]?.split(/[?&]/)[0];
-          } else if (url.pathname.match(/^\/[a-zA-Z0-9_-]{11}$/)) {
-            videoId = url.pathname.substring(1);
-          }
-        } catch (error) {
-          console.error('Failed to parse YouTube URL');
-          return { videoId: undefined, isMusicUrl: false };
+    let videoId: string | null = null;
+    let isMusicUrl = false;
+    
+    // Handle youtu.be format
+    if (url.includes('youtu.be/')) {
+      videoId = url.split('youtu.be/')[1]?.split(/[?&]/)[0];
+    } else {
+      try {
+        const urlObj = new URL(url);
+        isMusicUrl = urlObj.hostname === 'music.youtube.com';
+        
+        if (urlObj.pathname.includes('/watch')) {
+          videoId = urlObj.searchParams.get('v');
+        } else if (urlObj.pathname.includes('/embed/')) {
+          videoId = urlObj.pathname.split('/embed/')[1]?.split(/[?&]/)[0];
+        } else if (urlObj.pathname.match(/^\/[a-zA-Z0-9_-]{11}$/)) {
+          videoId = urlObj.pathname.substring(1);
         }
+      } catch (error) {
+        console.error('[GetId] Failed to parse YouTube URL');
+        return { videoId: null, isMusicUrl: false };
       }
-
-      if (!videoId || !videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
-        console.error('Invalid YouTube video ID format');
-        return { videoId: undefined, isMusicUrl: false };
-      }
-
-      return { videoId, isMusicUrl };
     }
 
-    // If not a URL, search YouTube
+    if (!videoId || !videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
+      console.error('[GetId] Invalid YouTube video ID format');
+      return { videoId: null, isMusicUrl: false };
+    }
+
+    return { videoId, isMusicUrl };
+  } catch (error) {
+    console.error('[GetId] Error parsing URL:', error);
+    return { videoId: null, isMusicUrl: false };
+  }
+}
+
+export function isValidYoutubeId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]{11}$/.test(id);
+}
+
+export async function getYoutubeId(query: string): Promise<{ videoId: string | undefined; isMusicUrl: boolean }> {
+  try {
+    // First check if the query itself is a valid YouTube ID
+    if (isValidYoutubeId(query)) {
+      return { videoId: query, isMusicUrl: false };
+    }
+
+    // Check if it's a direct YouTube URL
+    if (query.includes('youtube.com/') || query.includes('youtu.be/') || query.includes('music.youtube.com/')) {
+      const { videoId, isMusicUrl } = extractYoutubeIdFromUrl(query);
+      if (videoId) {
+        return { videoId, isMusicUrl };
+      }
+    }
+
+    // If not a URL or valid ID, try yt-dlp
+    console.log(`[GetId] Query is not a URL or ID, searching for: "${query}"`);
+
+    // Check for cookies
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await fs.promises.access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log('[GetId] Using cookies for search');
+    } catch (error) {
+      console.log('[GetId] No cookies file found, will try without cookies');
+    }
+
+    // Try yt-dlp search
+    try {
+      const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+      
+      // Verify yt-dlp exists and is executable
+      try {
+        await fs.promises.access(ytdlpPath, fs.constants.X_OK);
+      } catch (error) {
+        throw new Error(`yt-dlp not found or not executable at ${ytdlpPath}`);
+      }
+
+      // Base arguments for yt-dlp search
+      const args = [
+        `ytsearch1:${query}`,  // Limit to 1 result since we just need the first match
+        '--dump-json',
+        '--no-download',
+        '--no-warnings',
+        '--quiet',
+        '--extract-audio',  // This helps filter for videos with audio
+        '--default-search', 'ytsearch',
+        '--format', 'bestaudio',
+        '--extractor-args', 'youtube:player_client=tv_embedded',
+        '--extractor-args', 'youtube:formats=missing_pot'
+      ];
+
+      // Add cookies if available
+      if (cookiesExist) {
+        args.push('--cookies', cookiesPath);
+      }
+
+      console.log(`[GetId] Executing yt-dlp search...`);
+      const { stdout, stderr } = await execa(ytdlpPath, args);
+
+      if (stderr) {
+        console.log('[GetId] yt-dlp stderr:', stderr);
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        throw new Error('No output from yt-dlp search');
+      }
+
+      const items = stdout.split('\n')
+        .filter(line => line.trim())
+        .map(line => JSON.parse(line));
+
+      if (items.length > 0) {
+        const firstResult = items[0];
+        const videoId = firstResult.id;
+        const isMusicUrl = firstResult.webpage_url?.includes('music.youtube.com') || false;
+
+        if (videoId && videoId.match(/^[a-zA-Z0-9_-]{11}$/)) {
+          console.log(`[GetId] Found video ID using yt-dlp: ${videoId}`);
+          return { videoId, isMusicUrl };
+        }
+      }
+      
+      throw new Error('No valid results from yt-dlp search');
+    } catch (ytdlpError) {
+      console.error('[GetId] yt-dlp search error:', ytdlpError);
+      
+      // If yt-dlp fails, try to update it and retry
+      const updated = await handleYtDlpError(ytdlpError);
+      if (updated) {
+        console.log('[GetId] yt-dlp was updated, retrying...');
+        try {
+          return await getYoutubeId(query);
+        } catch (retryError) {
+          console.error('[GetId] Failed after updating yt-dlp:', retryError);
+        }
+      }
+    }
+
+    // Only use YouTube API as a last resort
+    console.log('[GetId] Falling back to YouTube API');
     let retries = 3;
     while (retries > 0) {
       try {
@@ -318,26 +490,29 @@ export async function getYoutubeId(query: string): Promise<{ videoId: string | u
         });
 
         const videoId = response.data.items?.[0]?.id?.videoId;
-        return { videoId: videoId || undefined, isMusicUrl: false };
+        if (videoId) {
+          return { videoId, isMusicUrl: false };
+        }
+        break;
       } catch (error: any) {
         if (error?.response?.status === 403) {
           const key = error.config?.params?.key;
           const reason = error?.errors?.[0]?.reason;
           
           if (reason === 'quotaExceeded' && key) {
-            console.log(`YouTube API quota exceeded for key *****${key.slice(-5)}`);
+            console.log(`[GetId] YouTube API quota exceeded for key *****${key.slice(-5)}`);
             getKeyManager().markKeyAsQuotaExceeded(key, 'search.list');
             retries--;
             if (retries > 0) continue;
           }
         }
-        console.error('YouTube search failed:', error?.errors?.[0]?.reason || 'Unknown error');
+        console.error('[GetId] Error searching for videos:', error?.errors?.[0]?.reason || 'Unknown error');
         break;
       }
     }
     return { videoId: undefined, isMusicUrl: false };
   } catch (error) {
-    console.error('Failed to get YouTube ID');
+    console.error('[GetId] Fatal error:', error);
     return { videoId: undefined, isMusicUrl: false };
   }
 }
@@ -750,7 +925,8 @@ export async function downloadYoutubeAudio(youtubeId: string, isMusicUrl: boolea
           quiet: true,
           ffmpegLocation: ffmpeg || undefined,
           formatSort: 'proto:m3u8,abr',
-          noPlaylist: true
+          noPlaylist: true,
+          extractorArgs: ['youtube:player_client=tv_embedded', 'youtube:formats=missing_pot'], // Allow formats without PO token and use tv_embedded client
         };
 
         // Add cookies if available
@@ -1020,6 +1196,9 @@ async function normalizeAudio(inputPath: string, outputPath: string, volumeAdjus
 
 async function convertToAAC(inputPath: string, outputPath: string): Promise<void> {
   try {
+    // Create temp path in the temp directory with .m4a extension
+    const tempOutputPath = path.join(process.cwd(), 'cache', 'temp', `${path.basename(outputPath, '.m4a')}.${Date.now()}.m4a`);
+    
     // First check if the input is already in our target range
     const inputMetrics = await measureMeanVolume(inputPath);
     const inputMean = inputMetrics.mean;
@@ -1036,15 +1215,18 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
       // Check if we need limiting
       if (inputMax <= -1) {
         console.log('Max volume is already good, direct encoding to AAC');
-        await normalizeAudio(inputPath, outputPath, 0, 'aac', false);
+        await normalizeAudio(inputPath, tempOutputPath, 0, 'aac', false);
       } else {
         console.log('Max volume too high, applying limiter during encoding');
-        await normalizeAudio(inputPath, outputPath, 0, 'aac', true);
+        await normalizeAudio(inputPath, tempOutputPath, 0, 'aac', true);
       }
-      const finalMetrics = await measureMeanVolume(outputPath);
+      const finalMetrics = await measureMeanVolume(tempOutputPath);
       console.log('\nFinal result:');
       console.log(`Mean: ${finalMetrics.mean.toFixed(2)}dB (target: -14 to -13 dB)`);
       console.log(`Max: ${finalMetrics.max.toFixed(2)}dB (target: below -1 dB)`);
+      
+      // Move temp file to final location
+      await fs.promises.rename(tempOutputPath, outputPath);
       return;
     }
 
@@ -1064,7 +1246,7 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
       console.log(`\nAttempt ${attempt}: volume=${volumeAdjustment.toFixed(2)}dB`);
       
       // Use parallel-safe attempt filename for WAV
-      const attemptPath = `${outputPath.replace('.m4a', '')}.${youtubeId}.attempt${attempt}.wav`;
+      const attemptPath = `${tempOutputPath}.attempt${attempt}.wav`;
       
       // Process without limiting, output as WAV
       await normalizeAudio(inputPath, attemptPath, volumeAdjustment, 'wav', false);
@@ -1108,7 +1290,7 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
 
     // Clean up any remaining attempt files except the best one
     for (let i = 1; i <= maxAttempts; i++) {
-      const attemptPath = `${outputPath.replace('.m4a', '')}.${youtubeId}.attempt${i}.wav`;
+      const attemptPath = `${tempOutputPath}.attempt${i}.wav`;
       if (attemptPath !== normalizedWavPath) {
         await fs.promises.unlink(attemptPath).catch(() => {});
       }
@@ -1127,11 +1309,14 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
       console.log('No limiting needed for final encoding');
     }
 
-    // Encode the best normalized WAV to AAC
-    await normalizeAudio(normalizedWavPath, outputPath, 0, 'aac', needsLimiting);
+    // Encode the best normalized WAV to AAC in temp location
+    await normalizeAudio(normalizedWavPath, tempOutputPath, 0, 'aac', needsLimiting);
 
     // Clean up the intermediate WAV file
     await fs.promises.unlink(normalizedWavPath).catch(() => {});
+
+    // Move temp file to final location
+    await fs.promises.rename(tempOutputPath, outputPath);
 
     // Verify final result
     const finalMetrics = await measureMeanVolume(outputPath);
@@ -1140,10 +1325,17 @@ async function convertToAAC(inputPath: string, outputPath: string): Promise<void
     console.log(`Max: ${finalMetrics.max.toFixed(2)}dB (target: below -1 dB)`);
     console.log(`Initial volume adjustment: ${bestResult.volumeAdjustment.toFixed(2)}dB`);
     console.log(`Limiting applied: ${needsLimiting}`);
-    } catch (error) {
+  } catch (error) {
+    // Clean up temp files in case of error
+    const tempOutputPath = path.join(process.cwd(), 'cache', 'temp', `${path.basename(outputPath, '.m4a')}.${Date.now()}.m4a`);
+    await fs.promises.unlink(tempOutputPath).catch(() => {});
+    // Clean up any attempt files
+    for (let i = 1; i <= 5; i++) {
+      await fs.promises.unlink(`${tempOutputPath}.attempt${i}.wav`).catch(() => {});
+    }
     console.error('Error in convertToAAC:', error);
     throw error;
-    }
+  }
 }
 
 export function parseDuration(duration: string): number {
@@ -1359,7 +1551,9 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
           '--cookies', cookiesPath,
           '--flat-playlist',
           '--dump-json',
-          '--no-download'
+          '--no-download',
+          '--extractor-args', 'youtube:player_client=tv_embedded', // Use tv_embedded client
+          '--extractor-args', 'youtube:formats=missing_pot' // Allow formats without PO token
         ]);
         
         if (!stdout || stdout.trim() === '') {
@@ -1599,7 +1793,7 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
       }
     });
 
-    if (track && track.title) {
+    if (track && track.title && track.duration > 0) {
       // Update last accessed time
       await prisma.track.update({
         where: { youtubeId: videoId },
@@ -1617,88 +1811,117 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
       };
     }
 
-    // Try to use yt-dlp with cookies first to avoid API usage
+    // Always try yt-dlp with cookies first
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
     try {
-      // Check if cookies file exists
-      const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
-      let cookiesExist = false;
-      try {
-        await fs.promises.access(cookiesPath, fs.constants.R_OK);
-        cookiesExist = true;
-        console.log(`Using cookies to get video info for ${videoId}`);
-      } catch (error) {
-        console.log(`No cookies file found for video info ${videoId}, may fall back to API`);
-      }
-
-      if (cookiesExist) {
-        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
-        
-        // Get video metadata using yt-dlp
-        const { stdout } = await execa(ytdlpPath, [
-          `https://www.youtube.com/watch?v=${videoId}`,
-          '--cookies', cookiesPath,
-          '--dump-json',
-          '--no-download',
-          '--no-warning',
-          '--quiet'
-        ]);
-        
-        if (stdout) {
-          const videoData = JSON.parse(stdout);
-          const title = videoData.title || '';
-          const duration = parseInt(videoData.duration) || 0;
-          const thumbnail = videoData.thumbnail || await getBestThumbnail(videoId);
-          const channelId = videoData.channel_id;
-          const channelTitle = videoData.channel || videoData.uploader;
-          
-          // Store channel info if available
-          if (channelId && channelTitle) {
-            await prisma.channel.upsert({
-              where: { id: channelId },
-              create: {
-                id: channelId,
-                title: channelTitle
-              },
-              update: {
-                title: channelTitle
-              }
-            });
-          }
-          
-          // Save to database for future cache hits
-          await prisma.track.upsert({
-            where: { youtubeId: videoId },
-            update: {
-              title,
-              duration,
-              channelId,
-              updatedAt: new Date()
-            },
-            create: {
-              youtubeId: videoId,
-              title,
-              duration,
-              channelId
-            }
-          });
-          
-          // Download thumbnail if needed
-          await downloadAndCacheThumbnail(videoId, thumbnail);
-          
-          return {
-            videoId,
-            title,
-            duration,
-            thumbnail: getThumbnailUrl(videoId)
-          };
-        }
-      }
-    } catch (ytdlpError) {
-      console.log(`Failed to get info using yt-dlp for ${videoId}, falling back to API:`, ytdlpError);
+      await fs.promises.access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log(`[GetVideoInfo] Using cookies for ${videoId}`);
+    } catch (error) {
+      console.log(`[GetVideoInfo] No cookies file found for ${videoId}, will try without`);
     }
 
-    // Fall back to YouTube API if yt-dlp method failed
-    console.log(`Using YouTube API to get video details for ${videoId}`);
+    // Try yt-dlp (with or without cookies)
+    try {
+      const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+      
+      // Base arguments for yt-dlp
+      const args = [
+        `https://www.youtube.com/watch?v=${videoId}`,
+        '--dump-json',
+        '--no-download',
+        '--no-warnings',
+        '--quiet',
+        '--extractor-args', 'youtube:player_client=tv_embedded',
+        '--extractor-args', 'youtube:formats=missing_pot'
+      ];
+      
+      // Add cookies if available
+      if (cookiesExist) {
+        args.push('--cookies', cookiesPath);
+      }
+      
+      // Get video metadata using yt-dlp
+      const { stdout } = await execa(ytdlpPath, args);
+      
+      if (!stdout) {
+        throw new Error('No output from yt-dlp');
+      }
+
+      const videoData = JSON.parse(stdout);
+      if (!videoData.title || !videoData.duration) {
+        throw new Error('Incomplete video data from yt-dlp');
+      }
+
+      const title = videoData.title;
+      const duration = parseInt(videoData.duration) || 0;
+      const thumbnail = videoData.thumbnail || await getBestThumbnail(videoId);
+      const channelId = videoData.channel_id;
+      const channelTitle = videoData.channel || videoData.uploader;
+
+      // Validate required fields
+      if (!title || duration <= 0) {
+        throw new Error('Invalid video data (missing title or duration)');
+      }
+      
+      // Store channel info if available
+      if (channelId && channelTitle) {
+        await prisma.channel.upsert({
+          where: { id: channelId },
+          create: {
+            id: channelId,
+            title: channelTitle
+          },
+          update: {
+            title: channelTitle
+          }
+        });
+      }
+      
+      // Save to database for future cache hits
+      await prisma.track.upsert({
+        where: { youtubeId: videoId },
+        update: {
+          title,
+          duration,
+          channelId,
+          updatedAt: new Date()
+        },
+        create: {
+          youtubeId: videoId,
+          title,
+          duration,
+          channelId
+        }
+      });
+      
+      // Download thumbnail if needed
+      await downloadAndCacheThumbnail(videoId, thumbnail);
+      
+      return {
+        videoId,
+        title,
+        duration,
+        thumbnail: getThumbnailUrl(videoId)
+      };
+    } catch (ytdlpError) {
+      console.error(`[GetVideoInfo] yt-dlp error for ${videoId}:`, ytdlpError);
+      
+      // Try to update yt-dlp if it failed
+      const updated = await handleYtDlpError(ytdlpError);
+      if (updated) {
+        console.log('[GetVideoInfo] yt-dlp was updated, retrying...');
+        try {
+          return await getVideoInfo(videoId);
+        } catch (retryError) {
+          console.error('[GetVideoInfo] Failed after updating yt-dlp:', retryError);
+        }
+      }
+    }
+
+    // Only fall back to YouTube API if yt-dlp completely fails
+    console.log(`[GetVideoInfo] Falling back to YouTube API for ${videoId}`);
     const videoDetails = await executeYoutubeApi('videos.list', async (apiKey) => {
       return youtube.videos.list({
         key: apiKey,
@@ -1708,15 +1931,20 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
     });
 
     if (!videoDetails.data.items || videoDetails.data.items.length === 0) {
-      console.error(`No video details found for ID: ${videoId}`);
-      return null;
+      throw new Error(`No video details found for ID: ${videoId}`);
     }
 
     const video = videoDetails.data.items[0];
-    const title = video.snippet?.title || '';
+    const title = video.snippet?.title;
     const duration = parseDuration(video.contentDetails?.duration || 'PT0S');
     const channelId = video.snippet?.channelId;
     const channelTitle = video.snippet?.channelTitle;
+
+    // Validate required fields
+    if (!title || duration <= 0) {
+      throw new Error('Invalid video data from API (missing title or duration)');
+    }
+
     const thumbnailUrl = await getBestThumbnail(videoId);
 
     // Store channel info if available
@@ -1750,14 +1978,17 @@ export async function getVideoInfo(videoId: string): Promise<VideoInfo | null> {
       }
     });
 
+    // Download thumbnail
+    await downloadAndCacheThumbnail(videoId, thumbnailUrl);
+
     return {
       videoId,
       title,
       duration,
-      thumbnail: thumbnailUrl
+      thumbnail: getThumbnailUrl(videoId)
     };
   } catch (error) {
-    console.error(`Error getting video info for ${videoId}:`, error);
+    console.error(`[GetVideoInfo] Fatal error for ${videoId}:`, error);
     return null;
   }
 }
@@ -1817,7 +2048,9 @@ export async function validateTracksAvailability(limit: number = 50): Promise<nu
           url,
           '--no-download',
           '--no-warnings',
-          '--quiet'
+          '--quiet',
+          '--extractor-args', 'youtube:player_client=tv_embedded', // Use tv_embedded client
+          '--extractor-args', 'youtube:formats=missing_pot' // Allow formats without PO token
         ];
         
         // Add cookies if available

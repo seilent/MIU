@@ -4,31 +4,27 @@ import { AudioPlayerStatus } from '@discordjs/voice';
 export async function handleVoiceStateUpdate(
   oldState: VoiceState,
   newState: VoiceState,
-  client: Client
+  client: Client // Client already includes the player property due to declaration merging
 ) {
   try {
     // Check if bot was moved or disconnected
     if (oldState.member?.id === client.user?.id) {
       if (!newState.channel) {
-        // Bot was disconnected, pause playback but preserve queue
-        await client.player.stop(true); // Stop but preserve state
+        // Bot was disconnected. VoiceConnectionManager handles state and reconnection attempt.
+        console.log('[Event:VoiceStateUpdate] Bot disconnected from voice channel.');
+      } else if (newState.channelId !== oldState.channelId) {
+          // Bot was moved. VoiceConnectionManager handles rejoining the default channel if necessary.
+          console.log(`[Event:VoiceStateUpdate] Bot moved from ${oldState.channelId} to ${newState.channelId}.`);
       }
+      // No direct player action needed here; VCM manages connection state.
       return;
     }
 
-    // Check if channel is empty (except for bot)
-    const channel = oldState.channel || newState.channel;
-    if (channel) {
-      const members = channel.members.filter(member => !member.user.bot);
-      if (members.size === 0) {
-        // Channel is empty, pause playback but preserve queue
-        await client.player.pause();
-      } else if (members.size > 0 && !client.player.isPlaying()) {
-        // Users joined and player is paused, resume playback
-        await client.player.resume();
-      }
-    }
+    // User join/leave events in the bot's channel are handled by VoiceConnectionManager's
+    // internal presence check, which is triggered by this event.
+    // No specific pause/resume logic needed directly in this handler anymore.
+
   } catch (error) {
     console.error('Voice state update error:', error);
   }
-} 
+}

@@ -5,7 +5,8 @@ import { HTTPError } from '../middleware/error.js';
 import { prisma } from '../db.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { Cache } from '../utils/cache.js';
-import { getPlayer } from '../discord/player.js';
+// Updated import for the new player structure
+import { getMusicPlayer } from '../discord/player/index.js';
 import { refreshYoutubeRecommendationsPool, cleanupExcessRecommendations } from '../utils/youtube.js';
 
 const router = Router();
@@ -164,7 +165,7 @@ router.get('/roles', async (req: Request, res: Response, next: NextFunction) => 
  *           schema:
  *             type: object
  *             properties:
- *               name: 
+ *               name:
  *                 type: string
  *               permissions:
  *                 type: array
@@ -393,10 +394,10 @@ router.post('/recommendations/refresh', async (req: Request, res: Response, next
   try {
     // Call the enhanced recommendation refresh function
     await refreshYoutubeRecommendationsPool();
-    
-    return res.json({ 
-      success: true, 
-      message: 'YouTube recommendations pool refresh triggered successfully' 
+
+    return res.json({
+      success: true,
+      message: 'YouTube recommendations pool refresh triggered successfully'
     });
   } catch (error) {
     next(error);
@@ -435,19 +436,19 @@ router.post('/recommendations/test', async (req: Request, res: Response, next: N
   try {
     // Extract videoId from request body
     const { videoId } = req.body;
-    
+
     if (!videoId || typeof videoId !== 'string') {
       throw new HTTPError(400, 'Valid videoId is required');
     }
-    
+
     console.log(`Testing YouTube recommendations for video ID: ${videoId}`);
-    
+
     // Import the YouTube utilities
     const { getYoutubeRecommendations } = await import('../utils/youtube.js');
-    
+
     // Get recommendations
     const recommendations = await getYoutubeRecommendations(videoId);
-    
+
     return res.json({
       success: true,
       videoId,
@@ -489,18 +490,18 @@ router.post('/recommendations/test', async (req: Request, res: Response, next: N
 router.post('/recommendations/cleanup', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const maxPerSeed = req.body.maxPerSeed || 5;
-    
+
     // Call the cleanup function
     const removedCount = await cleanupExcessRecommendations(maxPerSeed);
-    
+
     // Reset the player's recommendation pool
-    const player = getPlayer();
-    if (typeof player.resetRecommendationsPool === 'function') {
-      await player.resetRecommendationsPool();
-    }
-    
-    return res.json({ 
-      success: true, 
+    const player = getMusicPlayer(); // Use the new player getter
+    // Call the proxied method
+    await player.resetRecommendationsPool();
+
+
+    return res.json({
+      success: true,
       message: `YouTube recommendations cleanup complete. Removed ${removedCount} excess recommendations.`,
       removedCount
     });

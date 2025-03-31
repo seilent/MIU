@@ -39,15 +39,21 @@ export async function play(interaction: ChatInputCommandInteraction) {
         isMusicUrl
       );
 
+      // Only proceed if we have track info
+      if (!track.trackInfo || !track.success) {
+        await interaction.editReply(track.message);
+        return;
+      }
+
       // Convert cached thumbnail path to YouTube URL if needed
       const thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
-      const queuePosition = track.queuePosition ? ` (#${track.queuePosition} in queue)` : '';
-      const playingNext = track.willPlayNext ? ' - Playing next!' : '';
+      const queuePosition = track.trackInfo.queuePosition ? ` (#${track.trackInfo.queuePosition} in queue)` : '';
+      const playingNext = track.trackInfo.willPlayNext ? ' - Playing next!' : '';
       const status = `${queuePosition}${playingNext}`;
 
-      // Just display the title without artist information
-      const titleDisplay = track.title || 'Unknown Title';
+      // Use the track info title instead of temporary one
+      const titleDisplay = track.trackInfo.title || 'Unknown Title';
 
       // Respond with track information
       await interaction.editReply({
