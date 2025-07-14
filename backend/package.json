@@ -12,7 +12,7 @@
     "stop": "./scripts/kill-server.sh",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
-    "prisma:studio": "dotenv -e .env.development -- prisma studio --port 5000",
+    "prisma:studio": "dotenv -e ../.env -- prisma studio --port 5000",
     "prisma:create-admin": "tsx scripts/create-admin.ts",
     "docker:up": "docker-compose -f docker/docker-compose.yml up -d",
     "docker:down": "docker-compose -f docker/docker-compose.yml down",

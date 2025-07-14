@@ -188,6 +188,7 @@ export class Player {
   private timeout?: NodeJS.Timeout;
   private autoplayEnabled: boolean = true;
   private playedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for ALL tracks
+  private playedChannels: Map<string, number> = new Map(); // Channel ID -> Timestamp for channel cooldown
   private usedSeedTracks: Map<string, number> = new Map(); // Track ID -> Timestamp for seed tracks
   // Convert hours to milliseconds (1 hour = 3600000 ms)
   private readonly HOURS_TO_MS = 3600000;
@@ -197,6 +198,7 @@ export class Player {
   private readonly TOP_TIER_EXPIRY = parseInt(process.env.TOP_TIER_EXPIRY || '6') * this.HOURS_TO_MS; 
   private readonly MID_TIER_EXPIRY = parseInt(process.env.MID_TIER_EXPIRY || '8') * this.HOURS_TO_MS; 
   private readonly LOW_TIER_EXPIRY = parseInt(process.env.LOW_TIER_EXPIRY || '10') * this.HOURS_TO_MS; 
+  private readonly CHANNEL_COOLDOWN = parseInt(process.env.CHANNEL_COOLDOWN || '2') * this.HOURS_TO_MS; 
   private readonly MAX_DURATION = parseInt(process.env.MAX_DURATION || '420'); // 7 minutes in seconds
   private readonly MIN_DURATION = parseInt(process.env.MIN_DURATION || '30'); // 30 seconds minimum
   private retryCount: number = 0;
@@ -1234,8 +1236,13 @@ export class Player {
   }
 
   resetAutoplayTracking() {
+    console.log('Resetting autoplay tracking...');
     this.playedTracks.clear();
-    console.log('Reset track history');
+    this.playedChannels.clear();
+    this.usedSeedTracks.clear();
+    this.trackCooldownCache.clear();
+    
+    console.log('Autoplay tracking reset completed');
   }
 
   private async updatePlayerState() {
@@ -1941,6 +1948,22 @@ export class Player {
 
       // Add to played tracks for cooldown and remove from recommendations pool
       this.playedTracks.set(this.currentTrack.youtubeId, Date.now());
+      
+      // Get channel ID for the track and add it to played channels for cooldown
+      try {
+        const track = await prisma.track.findUnique({
+          where: { youtubeId: this.currentTrack.youtubeId },
+          select: { channelId: true }
+        });
+        
+        if (track && track.channelId) {
+          this.playedChannels.set(track.channelId, Date.now());
+          console.log(`[DEBUG] Added channel ${track.channelId} to cooldown`);
+        }
+      } catch (error) {
+        console.error('Error getting channel ID for cooldown:', error);
+      }
+      
       this.youtubeRecommendationsPool = this.youtubeRecommendationsPool.filter(
         rec => rec.youtubeId !== this.currentTrack?.youtubeId
       );
@@ -1997,6 +2020,14 @@ export class Player {
       if (now - timestamp >= cooldownPeriod) {
         this.playedTracks.delete(trackId);
         console.log(`[DEBUG] Removed expired cooldown for track: ${trackId}`);
+      }
+    }
+    
+    // Clean up expired channel cooldowns
+    for (const [channelId, timestamp] of this.playedChannels.entries()) {
+      if (now - timestamp >= this.CHANNEL_COOLDOWN) {
+        this.playedChannels.delete(channelId);
+        console.log(`[DEBUG] Removed expired cooldown for channel: ${channelId}`);
       }
     }
   }
@@ -2192,21 +2223,38 @@ export class Player {
                 // Randomly select one recommendation
                 const randomRec = recommendations[Math.floor(Math.random() * recommendations.length)];
                 const info = await getYoutubeInfo(randomRec.youtubeId);
-                if (!this.areSongsSimilar(info.title, Array.from(seenTitles))) {
-                  track = {
-                    youtubeId: randomRec.youtubeId,
-                    title: info.title,
-                    thumbnail: getThumbnailUrl(randomRec.youtubeId),
-                    duration: info.duration,
-                    requestedBy: {
-                      userId: botUserId,
-                      username: this.client.user?.username || 'Autoplay',
-                      avatar: this.client.user?.avatar || undefined
-                    },
-                    requestedAt: new Date(),
-                    isAutoplay: true,
-                    autoplaySource: this.AutoplaySources.YOUTUBE
-                  };
+                
+                try {
+                  // Get channel ID for the track
+                  const trackData = await prisma.track.findUnique({
+                    where: { youtubeId: randomRec.youtubeId },
+                    select: { channelId: true }
+                  });
+                  
+                  // Only add if the channel is not on cooldown
+                  if (trackData?.channelId && this.isChannelRecentlyPlayed(trackData.channelId)) {
+                    console.log(`[DEBUG] Skipping track ${randomRec.youtubeId} - channel ${trackData.channelId} is on cooldown`);
+                    continue;
+                  }
+                
+                  if (!this.areSongsSimilar(info.title, Array.from(seenTitles))) {
+                    track = {
+                      youtubeId: randomRec.youtubeId,
+                      title: info.title,
+                      thumbnail: getThumbnailUrl(randomRec.youtubeId),
+                      duration: info.duration,
+                      requestedBy: {
+                        userId: botUserId,
+                        username: this.client.user?.username || 'Autoplay',
+                        avatar: this.client.user?.avatar || undefined
+                      },
+                      requestedAt: new Date(),
+                      isAutoplay: true,
+                      autoplaySource: this.AutoplaySources.YOUTUBE
+                    };
+                  }
+                } catch (error) {
+                  console.error(`[ERROR] Error checking channel cooldown for track ${randomRec.youtubeId}:`, error);
                 }
               }
               break;
@@ -2234,6 +2282,13 @@ export class Player {
 
                   if (availableTracks.length > 0) {
                     const randomTrack = availableTracks[Math.floor(Math.random() * availableTracks.length)];
+                    
+                    // Check channel cooldown before adding
+                    if (randomTrack.track.channelId && this.isChannelRecentlyPlayed(randomTrack.track.channelId)) {
+                      console.log(`[DEBUG] Skipping playlist track ${randomTrack.track.youtubeId} - channel ${randomTrack.track.channelId} is on cooldown`);
+                      continue;
+                    }
+                    
                     const info = await getYoutubeInfo(randomTrack.track.youtubeId);
                     track = {
                       youtubeId: randomTrack.track.youtubeId,
@@ -2284,21 +2339,39 @@ export class Player {
 
               if (availableFavorites.length > 0) {
                 const randomFavorite = availableFavorites[Math.floor(Math.random() * availableFavorites.length)];
-                const info = await getYoutubeInfo(randomFavorite.youtubeId);
-                track = {
-                  youtubeId: randomFavorite.youtubeId,
-                  title: info.title,
-                  thumbnail: getThumbnailUrl(randomFavorite.youtubeId),
-                  duration: info.duration,
-                  requestedBy: {
-                    userId: botUserId,
-                    username: this.client.user?.username || 'Autoplay',
-                    avatar: this.client.user?.avatar || undefined
-                  },
-                  requestedAt: new Date(),
-                  isAutoplay: true,
-                  autoplaySource: this.AutoplaySources.HISTORY
-                };
+                
+                // Check channel cooldown before adding
+                try {
+                  const trackData = await prisma.track.findUnique({
+                    where: { youtubeId: randomFavorite.youtubeId },
+                    select: { channelId: true }
+                  });
+                  
+                  if (trackData?.channelId && this.isChannelRecentlyPlayed(trackData.channelId)) {
+                    console.log(`[DEBUG] Skipping history track ${randomFavorite.youtubeId} - channel ${trackData.channelId} is on cooldown`);
+                    continue;
+                  }
+                  
+                  const info = await getYoutubeInfo(randomFavorite.youtubeId);
+                  // Proceed with adding track if no cooldown issues
+                  track = {
+                    youtubeId: randomFavorite.youtubeId,
+                    title: info.title,
+                    thumbnail: getThumbnailUrl(randomFavorite.youtubeId),
+                    duration: info.duration,
+                    requestedBy: {
+                      userId: botUserId,
+                      username: this.client.user?.username || 'Autoplay',
+                      avatar: this.client.user?.avatar || undefined
+                    },
+                    requestedAt: new Date(),
+                    isAutoplay: true,
+                    autoplaySource: this.AutoplaySources.HISTORY
+                  };
+                } catch (error) {
+                  console.error(`[ERROR] Error checking channel cooldown for history track ${randomFavorite.youtubeId}:`, error);
+                  continue;
+                }
               }
               break;
 
@@ -2322,6 +2395,13 @@ export class Player {
 
               if (availablePopular.length > 0) {
                 const randomPopular = availablePopular[Math.floor(Math.random() * availablePopular.length)];
+                
+                // Check channel cooldown before adding
+                if (randomPopular.channelId && this.isChannelRecentlyPlayed(randomPopular.channelId)) {
+                  console.log(`[DEBUG] Skipping popular track ${randomPopular.youtubeId} - channel ${randomPopular.channelId} is on cooldown`);
+                  continue;
+                }
+                
                 const info = await getYoutubeInfo(randomPopular.youtubeId);
                 track = {
                   youtubeId: randomPopular.youtubeId,
@@ -2424,6 +2504,16 @@ export class Player {
     // Get cooldown from cache or use default
     const cooldownPeriod = this.trackCooldownCache.get(youtubeId) || this.AUTOPLAY_TRACKS_EXPIRY;
     return (now - playedTime) < cooldownPeriod;
+  }
+  
+  private isChannelRecentlyPlayed(channelId: string): boolean {
+    if (!channelId) return false;
+    
+    const playedTime = this.playedChannels.get(channelId);
+    if (!playedTime) return false;
+    
+    const now = Date.now();
+    return (now - playedTime) < this.CHANNEL_COOLDOWN;
   }
   
   private async updateTrackCooldownCache(youtubeId: string): Promise<void> {

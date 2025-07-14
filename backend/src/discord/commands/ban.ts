@@ -292,31 +292,42 @@ export async function ban(interaction: ChatInputCommandInteraction) {
             // Apply ban penalty to the track (-10 score)
             await applyBanPenalty(trackToBan.youtubeId, trackingService);
 
-            // Block channel if requested and channel exists
-            let channelBlockMessage = '';
-            if (blockChannel && trackInfo.channelId) {
-              const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
-              channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+            // If this was the currently playing track, skip it immediately
+            const currentTrack = player.getCurrentTrack();
+            if (currentTrack && currentTrack.youtubeId === trackToBan.youtubeId) {
+              await player.skip();
             }
 
-            // Remove from queue
-            await prisma.request.updateMany({
-              where: {
-                youtubeId: trackToBan.youtubeId,
-                status: 'QUEUED',
-                requestedAt: trackToBan.requestedAt
-              },
-              data: {
-                status: 'SKIPPED'
+            // Send initial response
+            if (blockChannel && trackInfo.channelId) {
+              await interaction.editReply(`Banned song at position ${uiPosition}: ${trackToBan.title}\nProcessing channel block...`);
+            } else {
+              await interaction.editReply(`Banned song at position ${uiPosition}: ${trackToBan.title}`);
+            }
+
+            // Block channel if requested and channel exists (in background)
+            if (blockChannel && trackInfo.channelId) {
+              try {
+                const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
+                // Update the message after channel is blocked
+                await interaction.editReply(
+                  `Banned song at position ${uiPosition}: ${trackToBan.title}\n` +
+                  `Also blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`
+                );
+              } catch (error: any) {
+                console.error('Error blocking channel:', error);
+                await interaction.editReply(
+                  `Banned song at position ${uiPosition}: ${trackToBan.title}\n` +
+                  `Failed to block channel: ${error.message || 'Unknown error'}`
+                );
               }
-            });
+            }
             
             // Force queue repopulation by resetting autoplay tracking if enabled
             if (player.isAutoplayEnabled()) {
               player.resetAutoplayTracking();
             }
             
-            await interaction.editReply(`Banned song at position ${uiPosition}: ${trackToBan.title}${channelBlockMessage}`);
             return;
           }
 
@@ -341,17 +352,37 @@ export async function ban(interaction: ChatInputCommandInteraction) {
           // Apply ban penalty to the track (-10 score)
           await applyBanPenalty(currentTrack.youtubeId, trackingService);
 
-          // Block channel if requested and channel exists
-          let channelBlockMessage = '';
-          if (blockChannel && trackInfo.channelId) {
-            const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
-            channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+          // Skip the current track immediately if it's still playing
+          const newCurrentTrack = player.getCurrentTrack();
+          if (newCurrentTrack && newCurrentTrack.youtubeId === currentTrack.youtubeId) {
+            await player.skip();
           }
 
-          // Skip the current track
-          await player.skip();
+          // Send initial response
+          if (blockChannel && trackInfo.channelId) {
+            await interaction.editReply(`Banned and skipped: ${currentTrack.title}\nProcessing channel block...`);
+          } else {
+            await interaction.editReply(`Banned and skipped: ${currentTrack.title}`);
+          }
+
+          // Block channel if requested and channel exists (in background)
+          if (blockChannel && trackInfo.channelId) {
+            try {
+              const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
+              // Update the message after channel is blocked
+              await interaction.editReply(
+                `Banned and skipped: ${currentTrack.title}\n` +
+                `Also blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`
+              );
+            } catch (error: any) {
+              console.error('Error blocking channel:', error);
+              await interaction.editReply(
+                `Banned and skipped: ${currentTrack.title}\n` +
+                `Failed to block channel: ${error.message || 'Unknown error'}`
+              );
+            }
+          }
           
-          await interaction.editReply(`Banned and skipped: ${currentTrack.title}${channelBlockMessage}`);
           break;
         }
         

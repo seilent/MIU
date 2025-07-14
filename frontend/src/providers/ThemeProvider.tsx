@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { usePlayerStore } from '@/lib/store/playerStore';
-import { BokehBackground } from '@/components/ui/BokehBackground';
+import { FrostedBackground } from '@/components/ui/FrostedBackground';
 import { useAuthStore } from '@/lib/store/authStore';
 import env from '@/utils/env';
 
@@ -32,10 +32,12 @@ const defaultColors: ThemeColors = {
 
 interface ThemeContextType {
   colors: ThemeColors;
+  setColors: React.Dispatch<React.SetStateAction<ThemeColors>>;
 }
 
 const ThemeContext = createContext<ThemeContextType>({
-  colors: defaultColors
+  colors: defaultColors,
+  setColors: () => {}
 });
 
 export const useTheme = () => useContext(ThemeContext);
@@ -434,40 +436,9 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     };
   }, [token, currentTrack?.youtubeId, previousThumbnail, publicTrack?.youtubeId, env.apiUrl]);
 
-
   return (
-    <ThemeContext.Provider value={{ colors }}>
-      <div className="relative min-h-screen w-full overflow-hidden">
-        {/* Base background with static color */}
-        <div 
-          className="fixed inset-0 w-full h-full transition-[background] duration-1000 pointer-events-none" 
-          style={{ 
-            zIndex: -3,
-            backgroundColor: colors.background
-          }}
-        />
-        
-        {/* Add a subtle gradient overlay for more depth and vibrancy */}
-        <div 
-          className="fixed inset-0 w-full h-full opacity-50 transition-opacity duration-1000 ease-in-out pointer-events-none" 
-          style={{
-            zIndex: -2,
-            background: `radial-gradient(circle at 50% 50%, 
-                        rgba(${colors.primaryRgb}, 0.15) 0%, 
-                        rgba(${colors.backgroundRgb}, 0.08) 50%, 
-                        rgba(${colors.backgroundRgb}, 0) 100%)`,
-            mixBlendMode: 'overlay'
-          }}
-        />
-
-        {/* Bokeh effect layer */}
-        <BokehBackground colors={colors} numParticles={25} />
-
-        {/* Content layer - slightly more transparent to let more color through */}
-        <div className="relative z-10 min-h-screen w-full bg-background/90 text-foreground">
-          {children}
-        </div>
-      </div>
+    <ThemeContext.Provider value={{ colors, setColors }}>
+      {children}
     </ThemeContext.Provider>
   );
 }
