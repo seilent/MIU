@@ -3,23 +3,47 @@ import { prisma } from '../../db.js';
 import { TrackingService } from '../../tracking/service.js';
 import { cleanupBlockedSong } from '../../routes/music.js';
 import { getKeyManager } from '../../utils/YouTubeKeyManager.js';
-import { youtube } from '../../utils/youtube.js';
+import { youtube, getYoutubeInfo } from '../../utils/youtube.js';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 
 const execAsync = promisify(exec);
 
-async function getChannelInfoFromVideo(youtubeId: string): Promise<{ channelId: string; channelTitle: string }> {
+async function getChannelInfoFromVideo(youtubeId: string): Promise<{ channelId: string; channelTitle: string } | null> {
+  // 1. First try to get channel info from our database
+  const track = await prisma.track.findUnique({
+    where: { youtubeId },
+    select: { 
+      channelId: true,
+      channel: {
+        select: {
+          title: true
+        }
+      }
+    }
+  });
+
+  if (track?.channelId && track.channel) {
+    return {
+      channelId: track.channelId,
+      channelTitle: track.channel.title
+    };
+  }
+
+  // 2. Fall back to getYoutubeInfo() (which has its own yt-dlp fallback)
   try {
-    const { stdout: channelInfo } = await execAsync(`yt-dlp --no-warnings --print channel,channel_id "https://www.youtube.com/watch?v=${youtubeId}"`);
-    const [channelTitle, channelId] = channelInfo.trim().split('\n');
-    // Take only the first line of channel title if it contains newlines
-    const cleanTitle = channelTitle.trim().split('\n')[0];
-    return { channelId, channelTitle: cleanTitle };
+    const trackInfo = await getYoutubeInfo(youtubeId);
+    if (trackInfo?.channelId && trackInfo.channelTitle) {
+      return {
+        channelId: trackInfo.channelId,
+        channelTitle: trackInfo.channelTitle
+      };
+    }
   } catch (error) {
     console.error('Error getting channel info:', error);
-    throw error;
   }
+
+  return null;
 }
 
 async function getAllChannelVideos(channelId: string): Promise<string[]> {
@@ -104,6 +128,15 @@ async function blockSeedRecommendations(youtubeId: string) {
     console.error('Error blocking seed recommendations:', error);
     throw error;
   }
+}
+
+async function findDuplicateChannels(channelTitle: string) {
+  return await prisma.channel.findMany({
+    where: {
+      title: channelTitle,
+      isBlocked: false
+    }
+  });
 }
 
 async function blockChannelById(channelId: string, reason: string) {
@@ -219,9 +252,33 @@ async function blockChannelById(channelId: string, reason: string) {
     console.log(`[Ban][Channel] Removed ${recommendationResult.count} recommendations`);
 
     console.log(`[Ban][Channel] Channel blocking complete`);
+
+    // Find and block duplicate channels with same name
+    let duplicateChannelsBlocked = 0;
+    const duplicateChannelIds: string[] = [];
+    const duplicateChannels = await findDuplicateChannels(channel.title);
+    
+    for (const dupChannel of duplicateChannels) {
+      // Skip if: original channel, already blocked, or same as current channel
+      if (dupChannel.id !== channelId && !dupChannel.isBlocked) {
+        console.log(`[Ban][Channel] Found unblocked duplicate channel: ${dupChannel.id} (${dupChannel.title})`);
+        try {
+          await blockChannelById(dupChannel.id, `Duplicate of blocked channel ${channelId}: ${reason}`);
+          duplicateChannelsBlocked++;
+          duplicateChannelIds.push(dupChannel.id);
+        } catch (error) {
+          console.error(`[Ban][Channel] Error blocking duplicate channel ${dupChannel.id}:`, error);
+        }
+      } else {
+        console.log(`[Ban][Channel] Skipping duplicate channel ${dupChannel.id} (already blocked or same as original)`);
+      }
+    }
+
     return {
       channelTitle: channel.title,
-      tracksBlocked: existingTracks.length
+      tracksBlocked: existingTracks.length,
+      duplicateChannelsBlocked,
+      duplicateChannelIds
     };
   } catch (error) {
     console.error('Error blocking channel:', error);
@@ -310,10 +367,15 @@ export async function ban(interaction: ChatInputCommandInteraction) {
               try {
                 const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
                 // Update the message after channel is blocked
-                await interaction.editReply(
-                  `Banned song at position ${uiPosition}: ${trackToBan.title}\n` +
-                  `Also blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`
-                );
+                let replyMessage = `Banned song at position ${uiPosition}: ${trackToBan.title}\n` +
+                  `Blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+                
+                if (channelResult.duplicateChannelsBlocked > 0) {
+                  replyMessage += `\nAlso blocked ${channelResult.duplicateChannelsBlocked} duplicate channels: ` +
+                    channelResult.duplicateChannelIds.join(', ');
+                }
+
+                await interaction.editReply(replyMessage);
               } catch (error: any) {
                 console.error('Error blocking channel:', error);
                 await interaction.editReply(
@@ -370,10 +432,15 @@ export async function ban(interaction: ChatInputCommandInteraction) {
             try {
               const channelResult = await blockChannelById(trackInfo.channelId, 'Banned along with track');
               // Update the message after channel is blocked
-              await interaction.editReply(
-                `Banned and skipped: ${currentTrack.title}\n` +
-                `Also blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`
-              );
+              let replyMessage = `Banned and skipped: ${currentTrack.title}\n` +
+                `Blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+              
+              if (channelResult.duplicateChannelsBlocked > 0) {
+                replyMessage += `\nAlso blocked ${channelResult.duplicateChannelsBlocked} duplicate channels: ` +
+                  channelResult.duplicateChannelIds.join(', ');
+              }
+
+              await interaction.editReply(replyMessage);
             } catch (error: any) {
               console.error('Error blocking channel:', error);
               await interaction.editReply(
@@ -392,6 +459,23 @@ export async function ban(interaction: ChatInputCommandInteraction) {
           
           console.log(`[Ban] Starting ban process for video ID: ${id}`);
           console.log(`[Ban] Block channel option: ${blockChannel}`);
+
+          // First check if track exists and get channel info
+          const track = await prisma.track.findUnique({
+            where: { youtubeId: id },
+            include: { channel: true }
+          });
+
+          // If track's channel is already blocked, use blockChannelById
+          if (track?.channel?.isBlocked) {
+            console.log(`[Ban] Channel ${track.channel.id} is already blocked, blocking all tracks`);
+            const channelResult = await blockChannelById(track.channel.id, 'Channel already blocked');
+            await interaction.editReply(
+              `Banned song "${id}" from already-blocked channel "${track.channel.title}"\n` +
+              `Blocked ${channelResult.tracksBlocked} tracks from this channel.`
+            );
+            return;
+          }
           
           // Apply ban penalty to the track
           try {
@@ -408,14 +492,23 @@ export async function ban(interaction: ChatInputCommandInteraction) {
           if (blockChannel) {
             try {
               console.log(`[Ban] Getting channel info for video ID: ${id}`);
-              const { channelId, channelTitle } = await getChannelInfoFromVideo(id);
-              console.log(`[Ban] Found channel: ${channelTitle} (${channelId})`);
+              const channelInfo = await getChannelInfoFromVideo(id);
               
-              console.log(`[Ban] Blocking channel: ${channelId}`);
-              const channelResult = await blockChannelById(channelId, 'Banned along with track');
-              console.log(`[Ban] Channel blocked. Affected ${channelResult.tracksBlocked} tracks`);
-              
-              channelBlockMessage = `\nAlso blocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+              if (channelInfo) {
+                console.log(`[Ban] Found channel: ${channelInfo.channelTitle} (${channelInfo.channelId})`);
+                console.log(`[Ban] Blocking channel: ${channelInfo.channelId}`);
+                const channelResult = await blockChannelById(channelInfo.channelId, 'Banned along with track');
+                console.log(`[Ban] Channel blocked. Affected ${channelResult.tracksBlocked} tracks`);
+                channelBlockMessage = `\nBlocked channel "${channelResult.channelTitle}" with ${channelResult.tracksBlocked} tracks.`;
+                
+                if (channelResult.duplicateChannelsBlocked > 0) {
+                  channelBlockMessage += `\nAlso blocked ${channelResult.duplicateChannelsBlocked} duplicate channels: ` +
+                    channelResult.duplicateChannelIds.join(', ');
+                }
+              } else {
+                console.log(`[Ban] Could not get channel info for video ${id}`);
+                channelBlockMessage = '\nCould not get channel information - track was banned but channel could not be blocked.';
+              }
             } catch (error) {
               console.error(`[Ban] Error processing channel:`, error);
               channelBlockMessage = '\nFailed to process channel information.';

@@ -1,0 +1,195 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id // Discord user ID
+  username      String
+  discriminator String
+  avatar        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  requests      Request[]
+  roles         Role[]    @relation("UserRoles")
+  trackStats    UserTrackStats[]
+  webPresence   WebPresence?
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  permissions String[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  users       User[]   @relation("UserRoles")
+}
+
+enum RequestStatus {
+  PENDING
+  PLAYING
+  QUEUED
+  COMPLETED
+  DOWNLOADING
+  SKIPPED
+  EXPIRED
+  READY
+}
+
+enum TrackStatus {
+  PLAYING     // Currently playing
+  STANDBY     // Finished playing / not in queue or just added to queue but no metadata processed yet
+  QUEUED      // In queue, fetched metadata
+  DOWNLOADING // In queue, but currently downloading
+  READY       // QUEUED and DOWNLOADED
+  BLOCKED     // Banned song by admin
+}
+
+model Channel {
+  id            String    @id  // YouTube channel ID
+  title         String
+  isBlocked     Boolean   @default(false)
+  blockedAt     DateTime?
+  blockedReason String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  tracks        Track[]
+}
+
+model Track {
+  youtubeId     String    @id
+  channelId     String?
+  channel       Channel?  @relation(fields: [channelId], references: [id])
+  isMusicUrl    Boolean   @default(false)
+  resolvedYtId  String?
+  title         String
+  duration      Int
+  globalScore   Float     @default(0)
+  playCount     Int       @default(0)
+  skipCount     Int       @default(0)
+  isActive      Boolean   @default(true)
+  status        TrackStatus @default(STANDBY)
+  lastPlayed    DateTime?
+  lastValidated DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  requests      Request[]
+  audioCache    AudioCache?
+  defaultPlaylistTracks DefaultPlaylistTrack[]
+  userStats     UserTrackStats[]
+  state         TrackState?
+}
+
+model TrackState {
+  youtubeId    String       @id
+  status       RequestStatus @default(PENDING)
+  lastUpdated  DateTime     @default(now())
+  queuedAt     DateTime?
+  playedAt     DateTime?
+  track        Track        @relation(fields: [youtubeId], references: [youtubeId])
+}
+
+model Request {
+  youtubeId   String
+  userId      String
+  requestedAt DateTime      @default(now())
+  playedAt    DateTime?
+  isAutoplay  Boolean       @default(false)
+  status      RequestStatus @default(PENDING)
+  user        User          @relation(fields: [userId], references: [id])
+  track       Track         @relation(fields: [youtubeId], references: [youtubeId])
+
+  @@id([youtubeId, requestedAt])
+  @@index([youtubeId])
+}
+
+model UserTrackStats {
+  userId         String
+  youtubeId      String
+  playCount      Int       @default(0)
+  skipCount      Int       @default(0)
+  totalListenTime Int      @default(0)
+  lastPlayed     DateTime  @default(now())
+  personalScore  Float     @default(0)
+  user           User      @relation(fields: [userId], references: [id])
+  track          Track     @relation(fields: [youtubeId], references: [youtubeId])
+
+  @@id([userId, youtubeId])
+  @@index([userId])
+  @@index([youtubeId])
+}
+
+model AudioCache {
+  youtubeId   String   @id
+  filePath    String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  track       Track    @relation(fields: [youtubeId], references: [youtubeId])
+}
+
+model ThumbnailCache {
+  youtubeId   String   @id
+  filePath    String
+  width       Int      @default(0)
+  height      Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DefaultPlaylist {
+  id        String                 @id @default(cuid())
+  name      String                 @unique
+  active    Boolean                @default(true)
+  mode      PlaylistMode          @default(LINEAR)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  tracks    DefaultPlaylistTrack[]
+}
+
+enum PlaylistMode {
+  LINEAR
+  POOL
+}
+
+model DefaultPlaylistTrack {
+  playlistId String
+  trackId    String
+  position   Int
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  playlist   DefaultPlaylist @relation(fields: [playlistId], references: [id])
+  track      Track          @relation(fields: [trackId], references: [youtubeId])
+
+  @@id([playlistId, position])
+  @@index([trackId])
+}
+
+model WebPresence {
+  userId      String   @id // Discord user ID
+  lastSeen    DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+}
+
+model YoutubeRecommendation {
+  youtubeId    String    @id
+  title        String?   // Title of the recommended video
+  seedTrackId  String
+  relevanceScore Float    @default(0)
+  wasPlayed    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([seedTrackId])
+  @@unique([seedTrackId, youtubeId])
+}

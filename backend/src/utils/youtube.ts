@@ -1434,22 +1434,27 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
             continue;
           }
 
-          // Check if track is blocked
-          const track = await prisma.track.findUnique({
-            where: { youtubeId: item.id },
-            include: { channel: true }
-          });
+        // Check if track is blocked
+        const track = await prisma.track.findUnique({
+          where: { youtubeId: item.id },
+          include: { channel: true }
+        });
 
-          if (track?.status === 'BLOCKED') continue;
-          if (track?.channel?.isBlocked) continue;
+        if (track?.status === 'BLOCKED') {
+          console.log(`Skipping blocked track: ${item.id}`);
+          continue;
+        }
 
-          // Check if channel is blocked even if track doesn't exist
-          if (item.channel_id) {
-            const channel = await prisma.channel.findUnique({
-              where: { id: item.channel_id }
-            });
-            if (channel?.isBlocked) continue;
-          }
+        // Check if track's channel is blocked (by ID or name)
+        const channelBlocked = await isChannelBlocked(
+          track?.channel?.id || item.channel_id,
+          track?.channel?.title || item.channel
+        );
+        
+        if (channelBlocked) {
+          console.log(`Skipping track from blocked channel: ${item.id} (channel: ${track?.channel?.id || item.channel_id})`);
+          continue;
+        }
 
           filteredItems.push(item);
         }
@@ -1549,6 +1554,33 @@ export async function getYoutubeRecommendations(seedTrackId: string): Promise<Ar
 /**
  * Check if a duration is valid according to MIN_DURATION and MAX_DURATION
  */
+async function isChannelBlocked(channelId?: string, channelName?: string): Promise<boolean> {
+  if (!channelId && !channelName) return false;
+  
+  // First try by ID
+  if (channelId) {
+    const byId = await prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { isBlocked: true }
+    });
+    if (byId) return byId.isBlocked;
+  }
+
+  // Fallback to name check
+  if (channelName) {
+    const normalized = channelName.toLowerCase().trim();
+    const byName = await prisma.channel.findFirst({
+      where: {
+        title: { equals: normalized, mode: 'insensitive' },
+        isBlocked: true
+      }
+    });
+    return !!byName;
+  }
+
+  return false;
+}
+
 function isValidDuration(duration: number): boolean {
   if (!duration) return false;
   return duration >= MIN_DURATION && duration <= MAX_DURATION;
@@ -1953,6 +1985,22 @@ export async function validateTracksAvailability(limit: number = 50): Promise<nu
         
         // Check if the track is available
         await execa(ytdlpPath, args);
+        
+        // Verify channel is not blocked (in case channel was blocked since last validation)
+        const currentTrack = await prisma.track.findUnique({
+          where: { youtubeId: track.youtubeId },
+          include: { channel: true }
+        });
+
+        const channelBlocked = await isChannelBlocked(
+          currentTrack?.channel?.id,
+          currentTrack?.channel?.title
+        );
+
+        if (channelBlocked) {
+          console.log(`✗ Track's channel is now blocked: ${track.title} (${track.youtubeId})`);
+          throw new Error('Channel is blocked');
+        }
         
         // Update the track's validation timestamp
         await prisma.track.update({
