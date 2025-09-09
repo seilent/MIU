@@ -1,60 +1,28 @@
-import express, { Request, Response, NextFunction, ErrorRequestHandler } from 'express';
-import session from 'express-session';
-import cookieParser from 'cookie-parser';
-import swaggerUi from 'swagger-ui-express';
-import { createTRPCRouter } from './trpc.js';
-import { authRouter } from './routes/auth.js';
-import { musicRouter } from './routes/music.js';
-import { adminRouter } from './routes/admin.js';
-import { healthRouter } from './routes/health.js';
-import historyRouter from './routes/history.js';
-import presenceRouter from './routes/presence.js';
-import { errorHandler } from './middleware/error.js';
-import { authMiddleware, internalMiddleware } from './middleware/auth.js';
+import express from 'express';
+import http from 'http';
 import logger from './utils/logger.js';
-import { swaggerSpec } from './swagger.js';
-import cors from 'cors';
-import { albumArtRouter } from './routes/albumart.js';
 import { initializeDiscordClient } from './discord/client.js';
 import { initializeYouTubeAPI } from './utils/youtube.js';
-import getEnv from './utils/env.js';
-import http from 'http';
-import { Socket } from 'net';
-import bodyParser from 'body-parser';
 
-const env = getEnv();
+// Configuration modules
+import { 
+  configureCORS, 
+  configureBasicMiddleware, 
+  configureSession, 
+  configureURLRewriting 
+} from './config/middleware.js';
+import { configureAPIRoutes, configureAPIDocumentation } from './config/routes.js';
+import { configureErrorHandling } from './config/errorHandling.js';
+import { setupConnectionTracking } from './config/connections.js';
 
 export async function createServer() {
   const app = express();
   const server = http.createServer(app);
   
-  // Track all active connections to close them properly during shutdown
-  const connections = new Map<string, Socket>();
-  let connectionCounter = 0;
-  
-  // Track active connections
-  server.on('connection', (socket) => {
-    const id = String(connectionCounter++);
-    connections.set(id, socket);
-    
-    // Remove connection from tracking when it closes naturally
-    socket.on('close', () => {
-      connections.delete(id);
-    });
-  });
-  
-  // Method to forcefully close active connections during shutdown
-  (server as any).closeAllConnections = () => {
-    if (connections.size > 0) {
-      logger.info(`Forcefully closing ${connections.size} active connections`);
-      for (const socket of connections.values()) {
-        socket.destroy();
-      }
-      connections.clear();
-    }
-  };
+  // Setup connection tracking for graceful shutdown
+  const serverWithTracking = setupConnectionTracking(server);
 
-  // Initialize Discord client
+  // Initialize external services
   try {
     await initializeDiscordClient();
     logger.info('Discord client initialized successfully');
@@ -63,7 +31,6 @@ export async function createServer() {
     throw error; // This will prevent the server from starting if Discord init fails
   }
 
-  // Initialize YouTube API
   try {
     await initializeYouTubeAPI();
     logger.info('YouTube API initialized successfully');
@@ -72,142 +39,21 @@ export async function createServer() {
     // Don't throw error here, as the server can still function with some API keys
   }
 
-  // Middleware setup
-  app.use(cors({
-    origin: env.getString('CORS_ORIGIN', '*'),
-    credentials: true
-  }));
-  app.use(cookieParser());
-  app.use(bodyParser.json());
+  // Configure middleware
+  configureCORS(app);
+  configureBasicMiddleware(app);
+  configureSession(app);
+  configureURLRewriting(app);
 
-  // CORS configuration
-  const corsOrigins = env.getString('CORS_ORIGIN', 'http://localhost:3300').split(',').map(origin => origin.trim());
-  const isProduction = env.getString('NODE_ENV', 'development') === 'production';
-  logger.info('Configured CORS origins:', corsOrigins);
+  // Configure routes
+  configureAPIRoutes(app);
+  configureAPIDocumentation(app);
 
-  // Configure trusted proxies
-  const trustedProxies = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
-  app.set('trust proxy', trustedProxies);
-  
-  // CORS configuration
-  app.use(cors({
-    origin: (origin, callback) => {
-      if (!origin || corsOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        logger.warn('CORS blocked request from:', origin);
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Accept-Version', 'Content-Length', 'Content-MD5', 'Date', 'X-Api-Version', 'Origin', 'X-Internal-Request', 'Last-Event-ID'],
-    exposedHeaders: ['Set-Cookie', 'Authorization', 'Content-Type', 'Content-Length', 'X-Initial-Position', 'X-Playback-Start', 'X-Track-Id', 'X-Track-Duration'],
-    maxAge: 86400 // 24 hours
-  }));
-
-  // Session configuration
-  app.use(session({
-    secret: env.getString('JWT_SECRET'),
-    resave: false,
-    saveUninitialized: false,
-    proxy: true,
-    cookie: {
-      secure: true,
-      maxAge: 1000 * 60 * 60 * 24 * 365, // 365 days
-      sameSite: 'lax',
-      path: '/',
-      httpOnly: true,
-      domain: isProduction ? '.gacha.boo' : undefined
-    },
-    name: 'miu.session'
-  }));
-
-  // Remove /backend prefix from API routes
-  app.use((req, res, next) => {
-    if (req.url.startsWith('/backend/api/')) {
-      // Special handling for SSE endpoints
-      if (req.url.startsWith('/backend/api/music/state/live')) {
-        // Keep the original URL for SSE endpoints
-        next();
-        return;
-      }
-      // Special handling for presence endpoints
-      if (req.url.startsWith('/backend/api/discord/presence')) {
-        req.url = req.url.replace('/backend/api/discord/presence', '/api/presence/heartbeat');
-      } else {
-        req.url = req.url.replace('/backend', '');
-      }
-    }
-    next();
-  });
-
-  // Health check routes
-  app.use('/api/health', healthRouter);
-
-  // API Routes
-  app.use('/api/auth', authRouter);
-  app.use('/api/music', authMiddleware, musicRouter);
-  app.use('/api/admin', authMiddleware, adminRouter);
-  app.use('/api/history', authMiddleware, historyRouter);
-  app.use('/api/presence', authMiddleware, presenceRouter);
-  app.use('/api/albumart', albumArtRouter);
-
-  // API Documentation
-  if (env.getString('NODE_ENV', 'development') !== 'production') {
-    const swaggerUiOptions = {
-      explorer: true,
-      customSiteTitle: 'MIU API Documentation'
-    };
-
-    app.use('/api-docs', swaggerUi.serve);
-    app.use('/api-docs', swaggerUi.setup(swaggerSpec, swaggerUiOptions));
-
-    app.get('/api-docs.json', (_req: Request, res: Response) => {
-      res.setHeader('Content-Type', 'application/json');
-      res.json(swaggerSpec);
-    });
-
-    logger.info('API documentation available at /api-docs');
-  }
-
-  // tRPC
-  app.use('/trpc', createTRPCRouter);
-
-  // Error handling
-  const errorHandlerWrapper: ErrorRequestHandler = (err, req, res, next) => {
-    try {
-      errorHandler(err, req, res, next);
-    } catch (error) {
-      logger.error('Error in error handler:', error);
-      next(error);
-    }
-  };
-  app.use(errorHandlerWrapper);
-
-  // Add error handling for broken SSE connections
-  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-    if (err.name === 'UnauthorizedError') {
-      res.status(401).json({ error: 'Invalid token' });
-    } else if (req.headers.accept === 'text/event-stream') {
-      // Handle SSE connection errors gracefully
-      if (!res.headersSent) {
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Connection': 'keep-alive',
-          'Cache-Control': 'no-cache',
-          'X-Accel-Buffering': 'no'
-        });
-      }
-      res.write('event: error\ndata: ' + JSON.stringify({ error: err.message }) + '\n\n');
-      res.end();
-    } else {
-      next(err);
-    }
-  });
+  // Configure error handling
+  configureErrorHandling(app);
 
   // Log server startup
   logger.info('Server created and configured');
 
-  return { app, server };
+  return { app, server: serverWithTracking };
 }
