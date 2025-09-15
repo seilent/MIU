@@ -3,6 +3,7 @@ import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlayIcon, PauseIcon } from '@heroicons/react/24/solid';
 import { PlayerControls } from '@/components/player/PlayerControls';
+import { useAuthStore } from '@/lib/store/authStore';
 import env from '@/utils/env';
 
 interface AnimatedNowPlayingProps {
@@ -11,6 +12,7 @@ interface AnimatedNowPlayingProps {
     title: string;
     thumbnail?: string;
     duration: number;
+    channelTitle?: string;
     requestedBy?: {
       id: string;
       username: string;
@@ -26,6 +28,88 @@ export function AnimatedNowPlaying({
   isPlaying, 
   onPlayPause
 }: AnimatedNowPlayingProps) {
+  const { user } = useAuthStore();
+  const isAdmin = user?.roles?.includes('admin') || false;
+
+  const handleSkip = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      
+      // Only add Authorization header if token exists
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch('/backend/api/music/skip', {
+        method: 'POST',
+        headers
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to skip track');
+      }
+    } catch (error) {
+      console.error('Error skipping track:', error);
+    }
+  };;;
+
+  const handleBanTrack = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch('/backend/api/music/ban', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          block_channel: false
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to ban track');
+      }
+    } catch (error) {
+      console.error('Error banning track:', error);
+    }
+  };
+
+  const handleBanChannel = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch('/backend/api/music/ban', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          block_channel: true
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to ban channel');
+      }
+    } catch (error) {
+      console.error('Error banning channel:', error);
+    }
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
@@ -95,7 +179,12 @@ export function AnimatedNowPlaying({
       >
         <h1 className="text-3xl md:text-4xl font-bold text-white mb-4">Now Playing</h1>
         <h2 className="text-xl md:text-2xl font-bold text-white/90 mb-2">{track.title}</h2>
-        <div className="flex items-center space-x-2 text-sm">
+        {track.channelTitle && (
+          <div className="text-sm text-white/60 mb-2">
+            {track.channelTitle}
+          </div>
+        )}
+        <div className="flex items-center space-x-2 text-sm mb-3">
           <span className="text-white/40">Requested by</span>
           <span className="text-white/60">{track.requestedBy?.username}</span>
           {track.requestedBy?.avatar && (
@@ -107,6 +196,44 @@ export function AnimatedNowPlaying({
             />
           )}
         </div>
+        {isAdmin && (
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              onClick={handleSkip}
+              className="p-2 rounded-full bg-orange-500/20 hover:bg-orange-500/30 
+                         text-orange-400 hover:text-orange-300 transition-colors
+                         flex items-center justify-center"
+              title="Skip track"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798l-5.445-3.63z"/>
+              </svg>
+            </button>
+            <button
+              onClick={handleBanTrack}
+              className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30 
+                         text-red-400 hover:text-red-300 transition-colors
+                         flex items-center justify-center"
+              title="Ban track"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clipRule="evenodd"/>
+              </svg>
+            </button>
+            <button
+              onClick={handleBanChannel}
+              className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30 
+                         text-purple-400 hover:text-purple-300 transition-colors
+                         flex items-center justify-center"
+              title="Ban channel"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
+                <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367z"/>
+              </svg>
+            </button>
+          </div>
+        )}
       </motion.div>
     </motion.div>
   );

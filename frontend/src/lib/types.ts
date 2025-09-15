@@ -19,6 +19,7 @@ export interface Track {
   title: string;
   thumbnail?: string;
   duration: number;
+  channelTitle?: string;
 }
 
 export interface Request {
@@ -38,6 +39,7 @@ export interface QueueItem {
   title: string;
   thumbnail?: string;
   duration: number;
+  channelTitle?: string;
   requestedBy: {
     id: string;
     username: string;

@@ -34,6 +34,7 @@ Thumbs.db
 *.iml
 *.iws
 .idea_modules/
+.codanna/
 
 # Logs
 logs/
@@ -168,3 +169,8 @@ lib-cov/
 # Storybook
 storybook-static/
 youtube_cookies.txt
+
+.fastembed_cache/
+.codannaignore
+miu.gacha.boo.conf
+backups/

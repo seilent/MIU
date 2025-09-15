@@ -83,6 +83,12 @@ export function AppShell({ children }: AppShellProps) {
     e.preventDefault();
     if (!query.trim()) return;
 
+    // Redirect guests to login page
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+
     try {
       if (isYouTubeUrl(query)) {
         // Handle YouTube URL - add directly to queue
@@ -235,9 +241,9 @@ export function AppShell({ children }: AppShellProps) {
                 toastOptions={{
                   className: 'border rounded-lg',
                   style: {
-                    background: 'var(--color-primary)',
-                    color: 'var(--color-accent)',
-                    border: '1px solid rgba(var(--color-accent-rgb), 0.1)',
+                    background: `rgba(var(--color-background-rgb), 0.85)`,
+                    color: '#ffffff',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
                     backdropFilter: 'blur(12px)',
                     WebkitBackdropFilter: 'blur(12px)',
                   },
@@ -271,13 +277,23 @@ export function AppShell({ children }: AppShellProps) {
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       onFocus={() => {
+                        if (!user) {
+                          router.push('/login');
+                          return;
+                        }
                         if (searchResults.length > 0) setShowResults(true);
                       }}
-                      placeholder="Search for songs or paste YouTube URL..."
+                      onClick={() => {
+                        if (!user) {
+                          router.push('/login');
+                        }
+                      }}
+                      placeholder={user ? "Search for songs or paste YouTube URL..." : "Login to request / search songs"}
                       className={`w-full px-4 py-2 rounded-lg bg-black/20 border 
                                text-theme-accent placeholder:text-theme-accent/40 focus:outline-none 
                                transition-all duration-200 text-sm
                                ${isUrlLoading ? 'pr-10' : ''}
+                               ${!user ? 'cursor-pointer opacity-75 hover:opacity-100' : ''}
                                ${urlRequestStatus === 'success' ? 'border-green-500/30 focus:border-green-500/50 focus:ring-1 focus:ring-green-500/20' :
                                  urlRequestStatus === 'error' ? 'border-red-500/30 focus:border-red-500/50 focus:ring-1 focus:ring-red-500/20' :
                                  'border-theme-accent/10 focus:border-theme-accent/30 focus:bg-black/30 focus:ring-1 focus:ring-theme-accent/20'}`}
@@ -285,7 +301,7 @@ export function AppShell({ children }: AppShellProps) {
                         backdropFilter: 'blur(4px)',
                         WebkitBackdropFilter: 'blur(4px)'
                       }}
-                      disabled={isUrlLoading}
+                      disabled={isUrlLoading || !user}
                     />
                     {isUrlLoading && (
                       <div className="absolute right-3 top-1/2 -translate-y-1/2">
@@ -369,7 +385,7 @@ export function AppShell({ children }: AppShellProps) {
 
                 {/* User menu */}
                 <div className="flex items-center gap-x-4">
-                  {user && (
+                  {user ? (
                     <div className="relative" ref={userMenuRef}>
                       <button
                         onClick={() => setShowUserMenu(!showUserMenu)}
@@ -413,6 +429,18 @@ export function AppShell({ children }: AppShellProps) {
                         </div>
                       )}
                     </div>
+                  ) : (
+                    <button
+                      onClick={() => router.push('/login')}
+                      className="flex items-center gap-2 px-4 py-2 rounded-lg bg-theme-accent/20 hover:bg-theme-accent/30 
+                                text-theme-accent border border-theme-accent/20 hover:border-theme-accent/30
+                                transition-all duration-200 text-sm font-medium"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                      </svg>
+                      Login
+                    </button>
                   )}
                 </div>
               </nav>

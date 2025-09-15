@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { usePlayerStore } from '@/lib/store/playerStore';
 import { FrostedBackground } from '@/components/ui/FrostedBackground';
 import { useAuthStore } from '@/lib/store/authStore';
@@ -51,33 +51,52 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const currentTrack = usePlayerStore((state) => state.currentTrack);
   const [colors, setColors] = useState<ThemeColors>(defaultColors);
   const [previousThumbnail, setPreviousThumbnail] = useState<string | null>(null);
-  const [publicTrack, setPublicTrack] = useState<{ youtubeId: string; thumbnail?: string } | null>(null);
+  
+  // Add refs to prevent race conditions
+  const currentImageRef = useRef<HTMLImageElement | null>(null);
+  const extractionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const colorCacheRef = useRef<Map<string, ThemeColors>>(new Map());
 
-  // Fetch public track state when not authenticated
+  // Note: Removed polling for guests since they now get real-time updates via SSE through PlayerProvider
+
+  // Add visibility change handler to re-apply colors when window becomes visible
   useEffect(() => {
-    if (token) return;
-
-    const fetchCurrentTrack = async () => {
-      try {
-        const response = await fetch(`${env.apiUrl}/api/music/current`);
-        if (!response.ok) throw new Error('Failed to fetch current track');
-        const data = await response.json();
-        if (data.currentTrack) {
-          setPublicTrack(data.currentTrack);
-        }
-      } catch (error) {
-        console.error('Error fetching current track:', error);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('ThemeProvider: Page became visible, re-applying theme colors');
+        
+        // Re-apply current colors to ensure they persist after minimization
+        requestAnimationFrame(() => {
+          // Apply colors to CSS variables for global access
+          document.documentElement.style.setProperty('--color-primary', colors.primary);
+          document.documentElement.style.setProperty('--color-secondary', colors.secondary);
+          document.documentElement.style.setProperty('--color-accent', colors.accent);
+          document.documentElement.style.setProperty('--color-background', colors.background);
+          
+          // Set RGB variables for opacity adjustments
+          document.documentElement.style.setProperty('--color-primary-rgb', colors.primaryRgb);
+          document.documentElement.style.setProperty('--color-secondary-rgb', colors.secondaryRgb);
+          document.documentElement.style.setProperty('--color-accent-rgb', colors.accentRgb);
+          document.documentElement.style.setProperty('--color-background-rgb', colors.backgroundRgb);
+          
+          // Chrome-specific fallbacks
+          document.documentElement.style.setProperty('--theme-primary', colors.primary);
+          document.documentElement.style.setProperty('--theme-secondary', colors.secondary);
+          document.documentElement.style.setProperty('--theme-accent', colors.accent);
+          document.documentElement.style.setProperty('--theme-background', colors.background);
+        });
       }
     };
 
-    fetchCurrentTrack();
-    const interval = setInterval(fetchCurrentTrack, 5000);
-    return () => clearInterval(interval);
-  }, [token]);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [colors]);
 
   useEffect(() => {
-    // Keep track of the previous thumbnail to prevent UI flicker during transitions
-    const track = token ? currentTrack : publicTrack;
+    // Use currentTrack for both authenticated and guest users (both get real-time updates via SSE)
+    const track = currentTrack;
     
     if (track?.youtubeId) {
       const thumbnailUrl = env.apiUrl 
@@ -127,13 +146,62 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       transformedUrl += '?square=1';
     }
 
+    // Check cache first to avoid unnecessary re-extraction
+    const cacheKey = transformedUrl;
+    const cachedColors = colorCacheRef.current.get(cacheKey);
+    
+    if (cachedColors) {
+      console.log('ThemeProvider: Using cached colors for', cacheKey);
+      setColors(cachedColors);
+      
+      // Apply cached colors immediately
+      requestAnimationFrame(() => {
+        document.documentElement.style.setProperty('--color-primary', cachedColors.primary);
+        document.documentElement.style.setProperty('--color-secondary', cachedColors.secondary);
+        document.documentElement.style.setProperty('--color-accent', cachedColors.accent);
+        document.documentElement.style.setProperty('--color-background', cachedColors.background);
+        
+        document.documentElement.style.setProperty('--color-primary-rgb', cachedColors.primaryRgb);
+        document.documentElement.style.setProperty('--color-secondary-rgb', cachedColors.secondaryRgb);
+        document.documentElement.style.setProperty('--color-accent-rgb', cachedColors.accentRgb);
+        document.documentElement.style.setProperty('--color-background-rgb', cachedColors.backgroundRgb);
+        
+        document.documentElement.style.setProperty('--theme-primary', cachedColors.primary);
+        document.documentElement.style.setProperty('--theme-secondary', cachedColors.secondary);
+        document.documentElement.style.setProperty('--theme-accent', cachedColors.accent);
+        document.documentElement.style.setProperty('--theme-background', cachedColors.background);
+      });
+      return;
+    }
+
+    // Cancel any previous extraction timeout
+    if (extractionTimeoutRef.current) {
+      clearTimeout(extractionTimeoutRef.current);
+      extractionTimeoutRef.current = null;
+    }
+
+    // Cancel previous image loading
+    if (currentImageRef.current) {
+      currentImageRef.current.onload = null;
+      currentImageRef.current.onerror = null;
+      currentImageRef.current.src = '';
+      currentImageRef.current = null;
+    }
+
     // Create an image element to load the thumbnail
     const img = new Image();
+    currentImageRef.current = img;
     
     // Function to extract colors from the image
     const loadImage = () => {
       img.crossOrigin = 'Anonymous';
       img.onload = () => {
+        // Check if this is still the current image (prevent race conditions)
+        if (currentImageRef.current !== img) {
+          console.log('ThemeProvider: Image load cancelled (new image started)');
+          return;
+        }
+
         try {
           // Create a canvas to draw the image
           const canvas = document.createElement('canvas');
@@ -388,17 +456,28 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
               backgroundRgb: `${background.r}, ${background.g}, ${background.b}`
             };
             
+            // Cache the extracted colors
+            colorCacheRef.current.set(cacheKey, newColors);
+            
+            // Limit cache size to prevent memory leaks
+            if (colorCacheRef.current.size > 50) {
+              const firstKey = colorCacheRef.current.keys().next().value;
+              if (firstKey) {
+                colorCacheRef.current.delete(firstKey);
+              }
+            }
+            
             setColors(newColors);
             
             // Apply colors to CSS variables with transitions
             // Use requestAnimationFrame for smoother transitions
-      requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
               // Apply colors to CSS variables for global access
-        document.documentElement.style.setProperty('--color-primary', newColors.primary);
-        document.documentElement.style.setProperty('--color-secondary', newColors.secondary);
-        document.documentElement.style.setProperty('--color-accent', newColors.accent);
-        document.documentElement.style.setProperty('--color-background', newColors.background);
-        
+              document.documentElement.style.setProperty('--color-primary', newColors.primary);
+              document.documentElement.style.setProperty('--color-secondary', newColors.secondary);
+              document.documentElement.style.setProperty('--color-accent', newColors.accent);
+              document.documentElement.style.setProperty('--color-background', newColors.background);
+              
               // Set RGB variables for opacity adjustments
               document.documentElement.style.setProperty('--color-primary-rgb', newColors.primaryRgb);
               document.documentElement.style.setProperty('--color-secondary-rgb', newColors.secondaryRgb);
@@ -406,35 +485,46 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
               document.documentElement.style.setProperty('--color-background-rgb', newColors.backgroundRgb);
               
               // Chrome-specific fallbacks
-        document.documentElement.style.setProperty('--theme-primary', newColors.primary);
-        document.documentElement.style.setProperty('--theme-secondary', newColors.secondary);
-        document.documentElement.style.setProperty('--theme-accent', newColors.accent);
-        document.documentElement.style.setProperty('--theme-background', newColors.background);
-      });
+              document.documentElement.style.setProperty('--theme-primary', newColors.primary);
+              document.documentElement.style.setProperty('--theme-secondary', newColors.secondary);
+              document.documentElement.style.setProperty('--theme-accent', newColors.accent);
+              document.documentElement.style.setProperty('--theme-background', newColors.background);
+            });
           }
         } catch (error) {
           // Error extracting colors
+          console.error('ThemeProvider: Error extracting colors:', error);
           setColors(defaultColors);
         }
       };
       
       img.onerror = () => {
         // Failed to load image for color extraction
+        console.error('ThemeProvider: Failed to load image for color extraction:', transformedUrl);
         setColors(defaultColors);
       };
       
       img.src = transformedUrl;
     };
 
-    loadImage();
+    // Add a small delay to prevent rapid successive extractions
+    extractionTimeoutRef.current = setTimeout(loadImage, 100);
 
     // Cleanup function to prevent memory leaks and race conditions
     return () => {
-      img.onload = null;
-      img.onerror = null;
-      img.src = '';
+      if (extractionTimeoutRef.current) {
+        clearTimeout(extractionTimeoutRef.current);
+        extractionTimeoutRef.current = null;
+      }
+      
+      if (currentImageRef.current) {
+        currentImageRef.current.onload = null;
+        currentImageRef.current.onerror = null;
+        currentImageRef.current.src = '';
+        currentImageRef.current = null;
+      }
     };
-  }, [token, currentTrack?.youtubeId, previousThumbnail, publicTrack?.youtubeId, env.apiUrl]);
+  }, [currentTrack?.youtubeId, previousThumbnail, env.apiUrl]);
 
   return (
     <ThemeContext.Provider value={{ colors, setColors }}>

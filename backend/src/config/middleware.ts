@@ -90,12 +90,6 @@ export function configureURLRewriting(app: Express): void {
   // Remove /backend prefix from API routes
   app.use((req, res, next) => {
     if (req.url.startsWith('/backend/api/')) {
-      // Special handling for SSE endpoints
-      if (req.url.startsWith('/backend/api/music/state/live')) {
-        // Keep the original URL for SSE endpoints
-        next();
-        return;
-      }
       // Special handling for presence endpoints
       if (req.url.startsWith('/backend/api/discord/presence')) {
         req.url = req.url.replace('/backend/api/discord/presence', '/api/presence/heartbeat');

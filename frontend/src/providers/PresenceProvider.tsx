@@ -17,17 +17,23 @@ export function PresenceProvider({ children }: PresenceProviderProps) {
   const consecutiveErrorsRef = useRef(0);
 
   useEffect(() => {
-    if (!token) return;
+    // Send heartbeat for both authenticated and anonymous users
 
     const sendHeartbeat = async () => {
       try {
+        const headers: HeadersInit = {
+          'Content-Type': 'application/json',
+          'X-Keep-Playing': 'true'
+        };
+        
+        // Only add Authorization header if we have a token
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+
         const response = await fetch(`${env.apiUrl}/api/presence/heartbeat`, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'X-Keep-Playing': 'true'
-          }
+          headers
         });
 
         if (!response.ok) {
@@ -80,7 +86,7 @@ export function PresenceProvider({ children }: PresenceProviderProps) {
         clearTimeout(retryTimeoutRef.current);
       }
     };
-  }, [token]);
+  }, [token]); // Keep token as dependency so it restarts with auth changes
 
   return (
     <PresenceContext.Provider value={null}>

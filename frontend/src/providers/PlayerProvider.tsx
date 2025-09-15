@@ -19,9 +19,22 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [isConnected, setIsConnected] = useState(false);
   const sseConnectionRef = useRef(false);
 
-  // Centralized SSE connection management
+  // Stable references for callbacks to prevent unnecessary re-renders
+  const setPlayerStateRef = useRef(setPlayerState);
+  const setQueueRef = useRef(setQueue);
+  
+  // Update refs when the functions change
   useEffect(() => {
-    if (!token || sseConnectionRef.current) return;
+    setPlayerStateRef.current = setPlayerState;
+  }, [setPlayerState]);
+  
+  useEffect(() => {
+    setQueueRef.current = setQueue;
+  }, [setQueue]);
+
+  // Centralized SSE connection management - allow anonymous connections
+  useEffect(() => {
+    if (sseConnectionRef.current) return;
 
     const sseManager = SSEManager.getInstance();
     sseConnectionRef.current = true;
@@ -38,7 +51,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       
       // Update all state at once to prevent race conditions
       if (data.currentTrack) {
-        setPlayerState({
+        setPlayerStateRef.current({
           status: data.status,
           position: data.position,
           currentTrack: {
@@ -53,7 +66,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           }
         });
       } else {
-        setPlayerState({
+        setPlayerStateRef.current({
           status: data.status,
           position: data.position,
           currentTrack: undefined
@@ -78,7 +91,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           isAutoplay: !!track.isAutoplay
         }));
         
-        setQueue(processedQueue);
+        setQueueRef.current(processedQueue);
       }
     };
     
@@ -97,8 +110,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     sseManager.addEventListener('heartbeat', handleHeartbeat);
     sseManager.addErrorListener(handleConnectionError);
     
-    // Connect with token
-    sseManager.connect(token).catch(error => {
+    // Connect with optional token (supports anonymous connections)
+    sseManager.connect(token || undefined).catch(error => {
       console.error('PlayerProvider: Failed to connect SSE:', error);
       setIsConnected(false);
     });
@@ -109,11 +122,23 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       sseManager.removeEventListener('heartbeat', handleHeartbeat);
       sseManager.removeErrorListener(handleConnectionError);
     };
-  }, [token, setPlayerState, setQueue]);
+  }, []); // Remove token dependency to prevent reconnections
+
+  // Handle token changes separately without recreating the entire connection
+  useEffect(() => {
+    if (sseConnectionRef.current) {
+      const sseManager = SSEManager.getInstance();
+      // Only reconnect if the connection is not already established with this token
+      sseManager.connect(token || undefined).catch(error => {
+        console.error('PlayerProvider: Failed to update SSE connection with new token:', error);
+        setIsConnected(false);
+      });
+    }
+  }, [token]);
 
   const sendCommand = useCallback(async (command: string, params: Record<string, any> = {}) => {
     if (!token) {
-      throw new Error('Not authenticated');
+      throw new Error('Login required to send commands');
     }
 
     try {

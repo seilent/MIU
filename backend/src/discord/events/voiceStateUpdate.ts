@@ -16,18 +16,7 @@ export async function handleVoiceStateUpdate(
       return;
     }
 
-    // Check if channel is empty (except for bot)
-    const channel = oldState.channel || newState.channel;
-    if (channel) {
-      const members = channel.members.filter(member => !member.user.bot);
-      if (members.size === 0) {
-        // Channel is empty, pause playback but preserve queue
-        await client.player.pause();
-      } else if (members.size > 0 && !client.player.isPlaying()) {
-        // Users joined and player is paused, resume playback
-        await client.player.resume();
-      }
-    }
+    // Removed auto-pause logic - keep playing music regardless of voice channel users
   } catch (error) {
     console.error('Voice state update error:', error);
   }

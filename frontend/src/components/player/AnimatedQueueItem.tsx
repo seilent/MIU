@@ -3,12 +3,14 @@
 import { motion } from 'framer-motion';
 import Image from 'next/image';
 import env from '@/utils/env';
+import { useAuthStore } from '@/lib/store/authStore';
 
 interface AnimatedQueueItemProps {
   track: {
     youtubeId: string;
     title: string;
     thumbnail?: string;
+    channelTitle?: string;
     requestedBy: {
       username: string;
       id: string;
@@ -30,6 +32,66 @@ export function AnimatedQueueItem({
   isLeaving = false,
   onAnimationComplete
 }: AnimatedQueueItemProps) {
+  const { user } = useAuthStore();
+  const isAdmin = user?.roles?.includes('admin') || false;
+
+
+  const handleBanTrack = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch('/backend/api/music/ban', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          position: position,
+          block_channel: false
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to ban track');
+      }
+    } catch (error) {
+      console.error('Error banning track:', error);
+    }
+  };
+
+  const handleBanChannel = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch('/backend/api/music/ban', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          position: position,
+          block_channel: true
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to ban channel');
+      }
+    } catch (error) {
+      console.error('Error banning channel:', error);
+    }
+  };
+
   // Simplified animation variants
   const variants = {
     enter: {
@@ -106,6 +168,11 @@ export function AnimatedQueueItem({
         <h3 className="text-white font-medium truncate text-left">
           {track.title}
         </h3>
+        {track.channelTitle && (
+          <div className="text-xs text-white/50 truncate">
+            {track.channelTitle}
+          </div>
+        )}
         <div className="flex items-center flex-wrap gap-x-2 gap-y-1 text-sm mt-1">
           <div className="flex items-center gap-x-2">
             <span className="text-white/30">by</span>
@@ -135,6 +202,33 @@ export function AnimatedQueueItem({
           </div>
         </div>
       </div>
+
+      {/* Admin controls */}
+      {isAdmin && (
+        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={handleBanTrack}
+            className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30 
+                       text-red-400 hover:text-red-300 transition-colors"
+            title="Ban track"
+          >
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clipRule="evenodd"/>
+            </svg>
+          </button>
+          <button
+            onClick={handleBanChannel}
+            className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30 
+                       text-purple-400 hover:text-purple-300 transition-colors"
+            title="Ban channel"
+          >
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
+              <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367z"/>
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Queue number */}
       {showPosition && (

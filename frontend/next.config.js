@@ -61,29 +61,8 @@ const nextConfig = {
 
     // Handle API proxying
   async rewrites() {
-    // Skip rewrites if API_URL is not defined
-    if (!process.env.API_URL) {
-      return [];
-    }
-    
-    // Use the same API URL for both development and production
-    const apiUrl = process.env.API_URL;
-    const fullApiUrl = apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`;
-    
-    return [
-      // API proxy for both development and production
-      {
-        source: '/api/:path*',
-        destination: `${fullApiUrl}/api/:path*`,
-        basePath: false,
-      },
-      // Maintain backward compatibility for /backend/api paths
-      {
-        source: '/backend/api/:path*',
-        destination: `${fullApiUrl}/api/:path*`,
-        basePath: false,
-      }
-    ];
+    // No rewrites needed - frontend uses /backend/ paths directly via Apache proxy
+    return [];
   },
 
   // Add headers configuration for CORS

@@ -7,7 +7,7 @@ import {
   StringSelectMenuInteraction,
   MessageComponentInteraction
 } from 'discord.js';
-import { searchYoutube } from '../../utils/youtube.js';
+// Removed: import { searchYoutube } from '../../utils/youtube.js';
 import type { SearchResult } from '../../utils/types.js';
 import { getThumbnailUrl } from '../../utils/youtubeMusic.js';
 
@@ -16,7 +16,24 @@ export async function search(interaction: ChatInputCommandInteraction) {
     const query = interaction.options.getString('query', true);
     await interaction.deferReply();
 
-    const results = await searchYoutube(query);
+    // Use YouTubeAPIManager for search
+    const { getYouTubeAPIManager } = await import('../../utils/youtubeApiManager.js');
+    const youtubeAPI = getYouTubeAPIManager();
+    
+    const searchResults = await youtubeAPI.searchVideos(query, {
+      maxResults: 10,
+      order: 'relevance',
+      regionCode: 'JP',
+      relevanceLanguage: 'ja'
+    });
+    
+    const results: SearchResult[] = searchResults.map(result => ({
+      youtubeId: result.youtubeId,
+      title: result.title,
+      thumbnail: getThumbnailUrl(result.youtubeId),
+      duration: result.duration || 0
+    }));
+    
     if (!results || results.length === 0) {
       await interaction.editReply('No results found.');
       return;

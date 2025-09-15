@@ -25,10 +25,10 @@ export function configureAPIRoutes(app: Express): void {
 
   // API Routes
   app.use('/api/auth', authRouter);
-  app.use('/api/music', authMiddleware, musicRouter);
+  app.use('/api/music', musicRouter);
   app.use('/api/admin', authMiddleware, adminRouter);
   app.use('/api/history', authMiddleware, historyRouter);
-  app.use('/api/presence', authMiddleware, presenceRouter);
+  app.use('/api/presence', presenceRouter);
   app.use('/api/albumart', albumArtRouter);
 
   // tRPC

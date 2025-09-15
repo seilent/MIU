@@ -3,7 +3,11 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import { prisma } from '../prisma.js';
 import { getDiscordClient } from '../discord/client.js';
 import fs from 'fs';
-import { getYoutubeId, getYoutubeInfo, searchYoutube, parseDuration, downloadYoutubeAudio } from '../utils/youtube.js';
+import { getYoutubeId, parseDuration } from '../utils/youtube.js';
+import { getYouTubeAPIManager } from '../utils/youtubeApiManager.js';
+import { getAudioProcessingManager } from '../utils/audioProcessingManager.js';
+import { getMusicFilterManager } from '../utils/musicFilterManager.js';
+import { getPlaybackManager } from '../utils/playbackManager.js';
 import { MAX_DURATION } from '../config.js';
 import { 
   songsPlayedCounter, 
@@ -19,6 +23,9 @@ import { spawn } from 'child_process';
 import getEnv from '../utils/env.js';
 import crypto from 'crypto';
 import { getThumbnailUrl } from '../utils/youtubeMusic.js';
+import logger from '../utils/logger.js';
+import { applyBanPenalty } from '../utils/banManager.js';
+import { optionalAuthMiddleware, authMiddleware } from '../middleware/auth.js';
 
 const env = getEnv();
 
@@ -118,7 +125,7 @@ export function broadcastToClient(client: SSEClient, event: string, data: any) {
   try {
     client.response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\nid: ${Date.now()}\n\n`);
   } catch (error) {
-    console.error(`Error broadcasting to client ${client.id}:`, error);
+    logger.error(`Error broadcasting to client ${client.id}:`, error);
     sseClients.delete(client);
   }
 }
@@ -174,7 +181,7 @@ export function addToHistory(track: any, user: any, isAutoplay: boolean = false)
   }
 }
 
-// Search endpoint
+// Search endpoint - Using YouTubeAPIManager
 router.get('/search', async (req: Request, res: Response) => {
   try {
     const query = req.query.q as string;
@@ -182,10 +189,85 @@ router.get('/search', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Search query is required' });
     }
 
-    const results = await searchYoutube(query);
-    res.json(results);
+    const youtubeAPI = getYouTubeAPIManager();
+    const results = await youtubeAPI.searchVideos(query, {
+      maxResults: 25,
+      order: 'relevance',
+      videoDuration: 'any'
+    });
+    
+    // If no results from basic search, return empty array
+    if (results.length === 0) {
+      return res.json([]);
+    }
+    
+    // Get video IDs for batch info retrieval
+    const videoIds = results.map(result => result.youtubeId);
+    
+    // Temporary fix: Skip getBatchVideoInfo and do direct API call for durations
+    try {
+      // Import YouTube client directly
+      const { google } = await import('googleapis');
+      const youtube = google.youtube('v3');
+      
+      // Use the first API key from the environment
+      const apiKey = process.env.YOUTUBE_API_KEYS?.split(',')[0];
+      if (!apiKey) {
+        throw new Error('No YouTube API key available');
+      }
+      
+      const response = await youtube.videos.list({
+        part: ['contentDetails'],
+        id: videoIds,
+        key: apiKey
+      });
+
+      // Parse durations directly
+      const parseDuration = (duration?: string): number => {
+        if (!duration) return 0;
+        const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+        if (!match) return 0;
+        const hours = parseInt(match[1] || '0');
+        const minutes = parseInt(match[2] || '0');
+        const seconds = parseInt(match[3] || '0');
+        return hours * 3600 + minutes * 60 + seconds;
+      };
+
+      const videoDurationMap = new Map();
+      if (response?.data?.items) {
+        for (const video of response.data.items) {
+          if (video.id && video.contentDetails?.duration) {
+            const duration = parseDuration(video.contentDetails.duration);
+            videoDurationMap.set(video.id, duration);
+            logger.debug(`Video ${video.id}: duration=${video.contentDetails.duration} -> ${duration}s`);
+          }
+        }
+      }
+      
+      logger.info(`Retrieved duration info for ${videoDurationMap.size}/${videoIds.length} videos`);
+      
+      // Merge the search results with duration info
+      const enhancedResults = results.map(result => ({
+        youtubeId: result.youtubeId,
+        title: result.title,
+        thumbnail: result.thumbnail,
+        duration: videoDurationMap.get(result.youtubeId) || 0
+      }));
+      
+      res.json(enhancedResults);
+    } catch (durationError) {
+      logger.warn('Duration fetch failed, returning basic results:', durationError);
+      // Fallback: return basic search results without duration
+      const basicResults = results.map(result => ({
+        youtubeId: result.youtubeId,
+        title: result.title,
+        thumbnail: result.thumbnail,
+        duration: 0
+      }));
+      res.json(basicResults);
+    }
   } catch (error) {
-    console.error('Search failed:', error);
+    logger.error('Search failed:', error);
     res.status(500).json({ error: 'Failed to search' });
   }
 });
@@ -215,7 +297,7 @@ router.get('/search', async (req: Request, res: Response) => {
  *       401:
  *         description: Unauthorized
  */
-router.get('/queue', (req, res) => {
+router.get('/queue', optionalAuthMiddleware, (req, res) => {
   // Implementation will be added later
   res.status(501).json({ message: 'Not implemented' });
 });
@@ -250,7 +332,7 @@ router.get('/queue', (req, res) => {
  *       400:
  *         description: Invalid request
  */
-router.post('/queue', async (req: Request, res: Response) => {
+router.post('/queue', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
     const userId = req.user?.id;
@@ -307,37 +389,44 @@ router.post('/queue', async (req: Request, res: Response) => {
       });
     }
 
-    // Get track info to check duration
-    const trackInfo = await getYoutubeInfo(youtubeIdResult.videoId, youtubeIdResult.isMusicUrl);
-    if (trackInfo.duration > MAX_DURATION) {
+    // Get track info using YouTubeAPIManager
+    const youtubeAPI = getYouTubeAPIManager();
+    const trackInfo = await youtubeAPI.getVideoInfo(youtubeIdResult.videoId);
+    
+    if (!trackInfo) {
+      return res.status(400).json({ error: 'Unable to get video information' });
+    }
+
+    // Use MusicFilterManager for comprehensive validation
+    const musicFilter = getMusicFilterManager();
+    const filterResult = await musicFilter.shouldPlayTrack(trackInfo, {
+      maxDuration: MAX_DURATION,
+      minDuration: 30,
+      allowInstrumental: false
+    });
+
+    if (!filterResult.allowed) {
       return res.status(400).json({ 
-        error: `Track duration exceeds limit of ${Math.floor(MAX_DURATION / 60)} minutes` 
+        error: `Track cannot be played: ${filterResult.reason}` 
       });
     }
 
-    // Add to queue
-    const track = await client.player.play(
-      null, // No voice state for web requests
+    // Use the new immediate queue method instead of the full play method
+    const track = await client.player.queueTrackImmediately(
       youtubeIdResult.videoId,
-      user.id,
-      {
-        username: user.username,
-        discriminator: user.discriminator || '0000',
-        avatar: user.avatar
-      },
-      youtubeIdResult.isMusicUrl
+      user.username
     );
 
-    console.log('\x1b[36m%s\x1b[0m', `[TRACK ADDED] 🎵 "${trackInfo.title}" by ${user.username} (${user.id}) via web_request`);
+    console.log('\x1b[36m%s\x1b[0m', `[TRACK QUEUED] 🎵 "${trackInfo.title}" by ${user.username} (${user.id}) via web_request`);
 
     res.json(track);
   } catch (error) {
-    console.error('Error adding to queue:', error);
+    logger.error('Error adding to queue:', error);
     res.status(500).json({ error: 'Failed to add track to queue' });
   }
 });
 
-router.get('/state', async (req: Request, res: Response) => {
+router.get('/state', optionalAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const client = getDiscordClient();
     if (!client) {
@@ -430,7 +519,7 @@ router.get('/state', async (req: Request, res: Response) => {
           });
         }
       } catch (error) {
-        console.error('Error syncing track:', error);
+        logger.error('Error syncing track:', error);
       }
     }
 
@@ -495,59 +584,11 @@ router.get('/state', async (req: Request, res: Response) => {
       position: client.player.getPosition()
     });
   } catch (error) {
-    console.error('Error getting player state:', error);
+    logger.error('Error getting player state:', error);
     res.status(500).json({ error: 'Failed to get player state' });
   }
 });
 
-/**
- * @swagger
- * /api/music/playback:
- *   post:
- *     summary: Control playback (play/pause)
- *     tags: [Music]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               action:
- *                 type: string
- *                 enum: [play, pause]
- *     responses:
- *       200:
- *         description: Playback state updated
- *       401:
- *         description: Unauthorized
- */
-router.post('/playback', async (req: Request, res: Response) => {
-  try {
-    const { action } = req.body;
-    if (action !== 'play' && action !== 'pause') {
-      return res.status(400).json({ error: 'Invalid action' });
-    }
-
-    const client = getDiscordClient();
-    if (!client) {
-      return res.status(500).json({ error: 'Discord client not available' });
-    }
-
-    if (action === 'play') {
-      client.player.resume();
-    } else {
-      client.player.pause();
-    }
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error controlling playback:', error);
-    res.status(500).json({ error: 'Failed to control playback' });
-  }
-});
 
 /**
  * @swagger
@@ -563,8 +604,24 @@ router.post('/playback', async (req: Request, res: Response) => {
  *       401:
  *         description: Unauthorized
  */
-router.post('/skip', async (req: Request, res: Response) => {
+router.post('/skip', authMiddleware, async (req: Request, res: Response) => {
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Check if user has admin role (for frontend web UI)
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { roles: true }
+    });
+
+    // Only allow admins to use this endpoint
+    if (!user || !user.roles.some(role => role.name === 'admin')) {
+      return res.status(403).json({ error: 'Admin permissions required' });
+    }
+
     const client = getDiscordClient();
     if (!client) {
       return res.status(500).json({ error: 'Discord client not available' });
@@ -573,7 +630,7 @@ router.post('/skip', async (req: Request, res: Response) => {
     await client.player.skip();
     res.json({ success: true });
   } catch (error) {
-    console.error('Error skipping track:', error);
+    logger.error('Error skipping track:', error);
     res.status(500).json({ error: 'Failed to skip track' });
   }
 });
@@ -606,7 +663,7 @@ router.post('/skip', async (req: Request, res: Response) => {
  *       403:
  *         description: Forbidden - Admin permissions required
  */
-router.post('/ban', async (req: Request, res: Response) => {
+router.post('/ban', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = req.user?.id;
     if (!userId) {
@@ -684,6 +741,52 @@ router.post('/ban', async (req: Request, res: Response) => {
       // Add a small delay to ensure database changes are committed
       await new Promise(resolve => setTimeout(resolve, 100));
       
+      // Force an immediate broadcast of the updated state to ensure frontend sync
+      try {
+        const currentTrack = client.player.getCurrentTrack();
+        const updatedQueue = client.player.getQueue();
+        
+        const state = {
+          status: client.player.getStatus(),
+          currentTrack: currentTrack ? {
+            youtubeId: currentTrack.youtubeId,
+            title: currentTrack.title,
+            thumbnail: getThumbnailUrl(currentTrack.youtubeId),
+            duration: currentTrack.duration,
+            requestedBy: {
+              id: currentTrack.requestedBy?.userId || 'unknown',
+              userId: currentTrack.requestedBy?.userId || 'unknown',
+              username: currentTrack.requestedBy?.username || 'Unknown User',
+              avatar: currentTrack.requestedBy?.avatar || null
+            },
+            requestedAt: currentTrack.requestedAt,
+            isAutoplay: currentTrack.isAutoplay,
+            autoplaySource: currentTrack.autoplaySource
+          } : null,
+          queue: updatedQueue.map(track => ({
+            youtubeId: track.youtubeId,
+            title: track.title,
+            thumbnail: getThumbnailUrl(track.youtubeId),
+            duration: track.duration,
+            requestedBy: {
+              id: track.requestedBy?.userId || 'unknown',
+              userId: track.requestedBy?.userId || 'unknown',
+              username: track.requestedBy?.username || 'Unknown User',
+              avatar: track.requestedBy?.avatar || null
+            },
+            requestedAt: track.requestedAt,
+            isAutoplay: track.isAutoplay,
+            autoplaySource: track.autoplaySource
+          })),
+          position: client.player.getPosition()
+        };
+        
+        logger.info(`Broadcasting queue update after ban: ${updatedQueue.length} tracks remaining`);
+        broadcastPlayerState(state);
+      } catch (broadcastError) {
+        logger.error('Error broadcasting state after ban:', broadcastError);
+      }
+      
       res.json({ 
         success: true, 
         message: `Banned song at position ${uiPosition}: ${trackToBan.title}${channelBlockMessage}` 
@@ -731,12 +834,58 @@ router.post('/ban', async (req: Request, res: Response) => {
     // Add a small delay to ensure database changes are committed
     await new Promise(resolve => setTimeout(resolve, 100));
     
+    // Force an immediate broadcast of the updated state to ensure frontend sync
+    try {
+      const newCurrentTrack = client.player.getCurrentTrack();
+      const updatedQueue = client.player.getQueue();
+      
+      const state = {
+        status: client.player.getStatus(),
+        currentTrack: newCurrentTrack ? {
+          youtubeId: newCurrentTrack.youtubeId,
+          title: newCurrentTrack.title,
+          thumbnail: getThumbnailUrl(newCurrentTrack.youtubeId),
+          duration: newCurrentTrack.duration,
+          requestedBy: {
+            id: newCurrentTrack.requestedBy?.userId || 'unknown',
+            userId: newCurrentTrack.requestedBy?.userId || 'unknown',
+            username: newCurrentTrack.requestedBy?.username || 'Unknown User',
+            avatar: newCurrentTrack.requestedBy?.avatar || null
+          },
+          requestedAt: newCurrentTrack.requestedAt,
+          isAutoplay: newCurrentTrack.isAutoplay,
+          autoplaySource: newCurrentTrack.autoplaySource
+        } : null,
+        queue: updatedQueue.map(track => ({
+          youtubeId: track.youtubeId,
+          title: track.title,
+          thumbnail: getThumbnailUrl(track.youtubeId),
+          duration: track.duration,
+          requestedBy: {
+            id: track.requestedBy?.userId || 'unknown',
+            userId: track.requestedBy?.userId || 'unknown',
+            username: track.requestedBy?.username || 'Unknown User',
+            avatar: track.requestedBy?.avatar || null
+          },
+          requestedAt: track.requestedAt,
+          isAutoplay: track.isAutoplay,
+          autoplaySource: track.autoplaySource
+        })),
+        position: client.player.getPosition()
+      };
+      
+      logger.info(`Broadcasting queue update after current track ban: ${updatedQueue.length} tracks remaining`);
+      broadcastPlayerState(state);
+    } catch (broadcastError) {
+      logger.error('Error broadcasting state after current track ban:', broadcastError);
+    }
+    
     res.json({ 
       success: true, 
       message: `Banned and skipped: ${currentTrack.title}${channelBlockMessage}` 
     });
   } catch (error) {
-    console.error('Error banning track:', error);
+    logger.error('Error banning track:', error);
     res.status(500).json({ error: 'Failed to ban track' });
   }
 });
@@ -769,7 +918,7 @@ export async function cleanupBlockedSong(youtubeId: string) {
       try {
         await fs.promises.unlink(audioCache.filePath);
       } catch (error) {
-        console.error(`Failed to delete audio file for ${youtubeId}:`, error);
+        logger.error(`Failed to delete audio file for ${youtubeId}:`, error);
       }
       await prisma.audioCache.delete({
         where: { youtubeId }
@@ -784,7 +933,7 @@ export async function cleanupBlockedSong(youtubeId: string) {
       try {
         await fs.promises.unlink(thumbnailCache.filePath);
       } catch (error) {
-        console.error(`Failed to delete thumbnail file for ${youtubeId}:`, error);
+        logger.error(`Failed to delete thumbnail file for ${youtubeId}:`, error);
       }
       await prisma.thumbnailCache.delete({
         where: { youtubeId }
@@ -816,37 +965,11 @@ export async function cleanupBlockedSong(youtubeId: string) {
 
     // Removed individual song cleanup logging to reduce verbosity
   } catch (error) {
-    console.error('Error cleaning up blocked song:', error);
+    logger.error('Error cleaning up blocked song:', error);
   }
 }
 
-// Helper function to apply a ban penalty to a track
-async function applyBanPenalty(youtubeId: string) {
-  try {
-    // Apply a -10 score penalty to the track
-    await prisma.$transaction([
-      // Update global track stats with a heavy penalty
-      prisma.$executeRaw`
-        UPDATE "Track"
-        SET "globalScore" = "Track"."globalScore" - 10,
-            "status" = 'BLOCKED'
-        WHERE "youtubeId" = ${youtubeId}
-      `,
-      // Also update all user stats for this track with a penalty
-      prisma.$executeRaw`
-        UPDATE "UserTrackStats"
-        SET "personalScore" = "UserTrackStats"."personalScore" - 5
-        WHERE "youtubeId" = ${youtubeId}
-      `
-    ]);
-
-    // Clean up the blocked song from playlists and recommendations
-    await cleanupBlockedSong(youtubeId);
-  } catch (error) {
-    console.error('Error applying ban penalty:', error);
-    throw error;
-  }
-}
+// Ban penalty function is now imported from utils/banManager.js
 
 /**
  * @swagger
@@ -873,7 +996,7 @@ async function applyBanPenalty(youtubeId: string) {
  *       401:
  *         description: Unauthorized
  */
-router.post('/volume', async (req, res) => {
+router.post('/volume', authMiddleware, async (req, res) => {
   try {
     const { volume } = req.body;
     if (typeof volume !== 'number' || volume < 0 || volume > 1) {
@@ -888,7 +1011,7 @@ router.post('/volume', async (req, res) => {
     client.player.setVolume(volume);
     res.json({ success: true });
   } catch (error) {
-    console.error('Error setting volume:', error);
+    logger.error('Error setting volume:', error);
     res.status(500).json({ error: 'Failed to set volume' });
   }
 });
@@ -934,7 +1057,7 @@ router.post('/autoplay', async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error toggling autoplay:', error);
+    logger.error('Error toggling autoplay:', error);
     res.status(500).json({ error: 'Failed to toggle autoplay' });
   }
 });
@@ -1114,7 +1237,7 @@ router.get('/secure-stream/:token', async (req, res) => {
       file.pipe(res);
     }
   } catch (error) {
-    console.error('Secure stream error:', error);
+    logger.error('Secure stream error:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Stream failed' });
     }
@@ -1122,11 +1245,8 @@ router.get('/secure-stream/:token', async (req, res) => {
 });
 
 // Endpoint to get secure stream token for a track
-router.get('/secure-token/:youtubeId', async (req, res) => {
+router.get('/secure-token/:youtubeId', optionalAuthMiddleware, async (req, res) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
 
     const { youtubeId } = req.params;
     
@@ -1152,153 +1272,12 @@ router.get('/secure-token/:youtubeId', async (req, res) => {
     // Return the token
     res.json({ token });
   } catch (error) {
-    console.error('Secure token generation error:', error);
+    logger.error('Secure token generation error:', error);
     res.status(500).json({ error: 'Failed to generate secure token' });
   }
 });
 
-// New streaming endpoint
-router.get('/stream', async (req, res) => {
-  try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const client = getDiscordClient();
-    if (!client) {
-      return res.status(500).json({ error: 'Discord client not available' });
-    }
-
-    const currentTrack = await prisma.request.findFirst({
-      where: { status: RequestStatus.PLAYING },
-      include: { track: true }
-    });
-
-    if (!currentTrack) {
-      return res.status(404).json({ error: 'No track playing' });
-    }
-
-    // Get cached audio file
-    const audioCache = await prisma.audioCache.findUnique({
-      where: { youtubeId: currentTrack.track.youtubeId }
-    });
-
-    if (!audioCache || !fs.existsSync(audioCache.filePath)) {
-      return res.status(404).json({ error: 'Audio not found' });
-    }
-
-    const filePath = audioCache.filePath;
-    const stat = fs.statSync(filePath);
-    const fileSize = stat.size;
-
-    // Handle range requests
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunksize = (end - start) + 1;
-      const file = fs.createReadStream(filePath, { start, end });
-
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': 'audio/mp4',
-        'Content-Disposition': 'inline',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'X-Content-Type-Options': 'nosniff',
-        'X-Initial-Position': client.player.getPosition(),
-        'X-Playback-Start': Date.now(),
-        'X-Track-Id': currentTrack.track.youtubeId,
-        'X-Track-Duration': currentTrack.track.duration,
-        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length, Content-Range'
-      });
-
-      // Track metrics
-      audioStreamRequestsCounter.inc({ type: 'stream' });
-      const startTime = Date.now();
-
-      // Handle client disconnect
-      req.on('close', () => {
-        file.destroy();
-        const latency = (Date.now() - startTime) / 1000;
-        audioStreamLatencyHistogram.observe(latency);
-      });
-
-      file.pipe(res);
-    } else {
-      // No range requested - send entire file
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': 'audio/mp4',
-        'Content-Disposition': 'inline',
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'X-Content-Type-Options': 'nosniff',
-        'X-Initial-Position': client.player.getPosition(),
-        'X-Playback-Start': Date.now(),
-        'X-Track-Id': currentTrack.track.youtubeId,
-        'X-Track-Duration': currentTrack.track.duration,
-        'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length'
-      });
-
-      // Track metrics
-      audioStreamRequestsCounter.inc({ type: 'stream' });
-      const startTime = Date.now();
-
-      // Create read stream with larger buffer for better performance
-      const file = fs.createReadStream(filePath, {
-        highWaterMark: 64 * 1024 // 64KB chunks
-      });
-
-      // Handle client disconnect
-      req.on('close', () => {
-        file.destroy();
-        const latency = (Date.now() - startTime) / 1000;
-        audioStreamLatencyHistogram.observe(latency);
-      });
-
-      file.pipe(res);
-    }
-  } catch (error) {
-    console.error('Stream error:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Stream failed' });
-    }
-  }
-});
-
-// Enhanced position endpoint
-router.get('/position', async (req: Request, res: Response) => {
-  try {
-    const client = getDiscordClient();
-    if (!client) {
-      return res.status(500).json({ error: 'Discord client not available' });
-    }
-    
-    const currentTrack = await prisma.request.findFirst({
-      where: { status: RequestStatus.PLAYING },
-      include: { track: true }
-    });
-
-    res.json({
-      position: client.player.getPosition(),
-      duration: currentTrack?.track.duration || 0,
-      timestamp: Date.now(),
-      trackId: currentTrack?.track.youtubeId,
-      title: currentTrack?.track.title,
-      playbackRate: 1.0
-    });
-  } catch (error) {
-    console.error('Position error:', error);
-    res.status(500).json({ error: 'Failed to get position' });
-  }
-});
+// Streaming endpoints extracted to streaming module
 
 // History endpoint
 router.get('/history', async (_req: Request, res: Response) => {
@@ -1326,7 +1305,7 @@ router.get('/history', async (_req: Request, res: Response) => {
 
     res.json(formattedTracks);
   } catch (error) {
-    console.error('Error getting history:', error);
+    logger.error('Error getting history:', error);
     res.status(500).json({ 
       error: 'Failed to get history',
       details: error instanceof Error ? error.message : 'Unknown error'
@@ -1370,7 +1349,7 @@ function queueItemToRequestWithTrack(item: QueueItem): RequestWithTrack {
 }
 
 // SSE endpoint for live state updates
-router.get('/state/live', (req: Request, res: Response) => {
+router.get('/state/live', optionalAuthMiddleware, (req: Request, res: Response) => {
   const cleanup = (keepAliveInterval?: NodeJS.Timeout) => {
     if (keepAliveInterval) clearInterval(keepAliveInterval);
     if (client) sseClients.delete(client);
@@ -1378,7 +1357,7 @@ router.get('/state/live', (req: Request, res: Response) => {
       try {
         res.end();
       } catch (error) {
-        console.error(`Error ending SSE connection:`, error);
+        logger.error(`Error ending SSE connection:`, error);
       }
     }
   };
@@ -1387,11 +1366,8 @@ router.get('/state/live', (req: Request, res: Response) => {
   let keepAliveInterval: NodeJS.Timeout | undefined;
 
   try {
-    // Check authentication from query parameter or user session
+    // Allow guest access - authentication is optional for SSE
     const token = req.query.token as string;
-    if (!req.user && !token) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
 
     const headers = {
       'Content-Type': 'text/event-stream',
@@ -1421,6 +1397,17 @@ router.get('/state/live', (req: Request, res: Response) => {
 
     const currentTrack = player.getCurrentTrack();
     const queuedTracks = player.getQueue();
+
+    // Debug logging for SSE initial state
+    logger.info(`SSE Client ${clientId}: Sending initial state`, {
+      status: player.getStatus(),
+      currentTrack: currentTrack ? {
+        youtubeId: currentTrack.youtubeId,
+        title: currentTrack.title
+      } : null,
+      queueLength: queuedTracks.length,
+      position: player.getPosition()
+    });
 
     const initialState = {
       status: player.getStatus(),
@@ -1467,12 +1454,12 @@ router.get('/state/live', (req: Request, res: Response) => {
 
     // Handle errors
     res.on('error', (error) => {
-      console.error(`SSE connection error for client ${clientId}:`, error);
+      logger.error(`SSE connection error for client ${clientId}:`, error);
       cleanup(keepAliveInterval);
     });
 
   } catch (error) {
-    console.error('Error in SSE connection:', error);
+    logger.error('Error in SSE connection:', error);
     cleanup(keepAliveInterval);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to establish SSE connection' });
@@ -1529,7 +1516,7 @@ router.get('/hls/:youtubeId/playlist.m3u8', async (req: Request, res: Response) 
     res.setHeader('Cache-Control', 'max-age=3600');
     res.send(playlist);
   } catch (error) {
-    console.error('HLS: Error generating playlist:', error);
+    logger.error('HLS: Error generating playlist:', error);
     res.status(500).json({ error: 'Failed to generate playlist' });
   }
 });
@@ -1565,13 +1552,13 @@ router.get('/hls/:youtubeId/segment_:index.ts', async (req: Request, res: Respon
         segmentStream.destroy();
       });
     } catch (error) {
-      console.error('HLS: Error creating segment stream:', error);
+      logger.error('HLS: Error creating segment stream:', error);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Error creating segment' });
       }
     }
   } catch (error) {
-    console.error('HLS: Error creating segment stream:', error);
+    logger.error('HLS: Error creating segment stream:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Error creating segment' });
     }
@@ -1600,7 +1587,7 @@ async function createSegmentStream(filePath: string, startTime: number, duration
       ffmpeg.stdout.pipe(segmentStream);
 
       ffmpeg.stderr.on('data', (data) => {
-        console.error('FFmpeg stderr:', data.toString());
+        logger.error('FFmpeg stderr:', data.toString());
       });
 
       ffmpeg.on('close', (code) => {
@@ -1616,38 +1603,11 @@ async function createSegmentStream(filePath: string, startTime: number, duration
   });
 }
 
-// Helper function to get audio duration
+// Helper function to get audio duration using AudioProcessingManager
 async function getAudioDuration(filePath: string): Promise<{ duration: number }> {
-  return new Promise((resolve, reject) => {
-    const ffprobe = spawn('ffprobe', [
-      '-v', 'quiet',
-      '-print_format', 'json',
-      '-show_format',
-      filePath
-    ]);
-
-    let output = '';
-    ffprobe.stdout.on('data', (data) => {
-      output += data;
-    });
-
-    ffprobe.stderr.on('data', (data) => {
-      console.error('FFprobe error:', data.toString());
-    });
-
-    ffprobe.on('close', (code) => {
-      if (code === 0) {
-        try {
-          const info = JSON.parse(output);
-          resolve({ duration: parseFloat(info.format.duration) });
-        } catch (error) {
-          reject(new Error('Failed to parse FFprobe output'));
-        }
-      } else {
-        reject(new Error(`FFprobe exited with code ${code}`));
-      }
-    });
-  });
+  const audioProcessor = getAudioProcessingManager();
+  const duration = await audioProcessor.getAudioDuration(filePath);
+  return { duration };
 }
 
 // Public endpoint to get current track state
@@ -1693,7 +1653,7 @@ router.get('/current', async (_req: Request, res: Response) => {
       position: client.player.getPosition()
     });
   } catch (error) {
-    console.error('Error getting current track:', error);
+    logger.error('Error getting current track:', error);
     res.status(500).json({ error: 'Failed to get current track' });
   }
 });
@@ -1759,9 +1719,13 @@ router.post('/block-by-seed', async (req: Request, res: Response) => {
       blockedTracks: youtubeIds
     });
   } catch (error) {
-    console.error('Error blocking tracks by seed:', error);
+    logger.error('Error blocking tracks by seed:', error);
     res.status(500).json({ error: 'Failed to block tracks' });
   }
 });
+
+// Mount streaming router to handle /stream and /position endpoints
+import { streamingRouter } from './music/streaming.js';
+router.use('/', streamingRouter);
 
 export { router as musicRouter };

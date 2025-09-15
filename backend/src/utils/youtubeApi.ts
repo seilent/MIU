@@ -9,7 +9,7 @@ import { youtubeKeyManager } from './YouTubeKeyManager.js';
 export async function executeYoutubeApi<T>(operationType: string, apiCall: (key: string) => Promise<T>): Promise<T> {
   try {
     // Use the youtubeKeyManager instance's executeWithRetry method
-    return await youtubeKeyManager.executeWithRetry(operationType, apiCall);
+    return await youtubeKeyManager.instance.executeWithRetry(operationType, apiCall);
   } catch (error: any) {
     console.error(`YouTube API error for ${operationType}:`, error?.message || 'Unknown error');
     throw error;

@@ -25,7 +25,7 @@ class SSEManager {
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private consecutiveErrors: number = 0;
   private isConnecting: boolean = false;
-  private currentToken: string | null = null;
+  private currentToken: string | null | undefined = null;
   private setupPromise: Promise<void> | null = null;
   private eventHandlers: Map<string, (event: MessageEvent) => void> = new Map();
   private lastEventId: string | null = null;
@@ -44,7 +44,7 @@ class SSEManager {
     return SSEManager.instance;
   }
 
-  async connect(token: string): Promise<void> {
+  async connect(token?: string): Promise<void> {
     if (this.setupPromise) {
       await this.setupPromise;
       return;
@@ -68,7 +68,7 @@ class SSEManager {
     }
   }
 
-  private async setupConnection(token: string): Promise<void> {
+  private async setupConnection(token?: string): Promise<void> {
     if (this.eventSource) {
       this.disconnect();
     }
@@ -78,7 +78,9 @@ class SSEManager {
 
     try {
       const url = new URL(`${env.apiUrl}/api/music/state/live`);
-      url.searchParams.append('token', token);
+      if (token) {
+        url.searchParams.append('token', token);
+      }
       
       console.log('SSE: Connecting to URL', url.toString());
       

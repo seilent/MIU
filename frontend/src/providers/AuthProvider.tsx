@@ -156,8 +156,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
         return;
       }
 
-      // If no token and on protected route, redirect to login
+      // Allow anonymous access to main page for listening, but protect other routes
       if (!token) {
+        // Allow access to the main page for anonymous listening
+        if (pathname === '/') {
+          return; // Allow anonymous users on the main page
+        }
+        // Redirect to login for other protected routes
         setAuthError(null);
         router.replace('/login');
         return;

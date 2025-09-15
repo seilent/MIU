@@ -203,16 +203,10 @@ export default function Home() {
   // Use currentTrack if available, otherwise use previousTrack during transition
   const displayTrack = currentTrack || (isTransitioning ? previousTrack : null);
 
-  // Auth check effect
-  useEffect(() => {
-    if (!token) {
-      router.replace('/login');
-    }
-  }, [token, router]);
 
   // Backend connection check effect
   useEffect(() => {
-    if (!token) return;
+    // Check connection for both authenticated users and guests
     
     // Update connection error state based on isConnected from PlayerProvider
     setConnectionError(!isConnected);
@@ -220,7 +214,7 @@ export default function Home() {
     if (!isConnected && currentTrack) {
       router.replace('/');
     }
-  }, [isConnected, token, currentTrack, router]);
+  }, [isConnected, currentTrack, router]);
 
   // Fetch history effect
   useEffect(() => {
@@ -255,8 +249,8 @@ export default function Home() {
 
   // Audio play/pause effect
   useEffect(() => {
-    // Only run this effect if we're authenticated and have a current track
-    if (!token || !currentTrack) return;
+    // Only run this effect if we have a current track (works for both authenticated users and guests)
+    if (!currentTrack) return;
     
     const audio = document.querySelector('audio');
     if (!audio) return;
@@ -274,7 +268,7 @@ export default function Home() {
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
     };
-  }, [currentTrack, token]); // Re-run when track or auth changes
+  }, [currentTrack]); // Re-run when track changes
 
   // Track change effect
   useEffect(() => {
@@ -312,10 +306,7 @@ export default function Home() {
     }
   };
 
-  // Remove loading check for the entire page
-  if (!token) {
-    return null;
-  }
+  // Allow anonymous users to access the page
 
   // If no track to display, show empty state
   if (displayTrack) {
@@ -436,8 +427,21 @@ export default function Home() {
           </div>
           <h2 className="text-2xl font-bold text-theme-accent mb-4">No music playing</h2>
           <p className="text-theme-accent/70 mb-8 max-w-md">
-            Request a song in Discord to start the music player.
+            {user ? (
+              "Request a song in Discord to start the music player."
+            ) : (
+              "Log in to request songs, or listen to music requested by others."
+            )}
           </p>
+          
+          {!user && (
+            <button
+              onClick={() => router.push('/login')}
+              className="bg-theme-accent hover:bg-theme-accent/90 text-white px-6 py-3 rounded-lg font-medium transition-colors"
+            >
+              Login to Request Songs
+            </button>
+          )}
           
           {connectionError && (
             <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 text-sm text-red-500 mb-4 max-w-md">

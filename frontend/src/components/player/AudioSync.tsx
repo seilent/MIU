@@ -243,31 +243,16 @@ export default function AudioSync() {
       const audio = audioRef.current;
       setStreamError(false);
       
-      // Store the track status at the start of setup
-      const targetStatus = statusRef.current === 'playing' || usePlayerStore.getState().status === 'playing'
-        ? 'playing' : 'paused';
+      // Since pause was removed, always target playing state
+      const targetStatus = 'playing';
       
       console.log('Audio: Stream setup target status:', targetStatus);
       
-      // Prefer direct secure streaming
-      console.log('Audio: Using secure direct streaming for playback');
-      try {
-        // First fetch a secure token
-        const tokenResponse = await fetch(`${env.apiUrl}/api/music/secure-token/${currentTrack.youtubeId}`);
-        if (!tokenResponse.ok) {
-          throw new Error('Failed to obtain secure token');
-        }
-        
-        const { token } = await tokenResponse.json();
-        const streamUrl = `${env.apiUrl}/api/music/secure-stream/${token}`;
-        audio.src = streamUrl;
-        audio.load();
-      } catch (secureStreamError) {
-        console.error('Audio: Secure streaming failed, falling back to direct stream URL:', secureStreamError);
-        const streamUrl = `${env.apiUrl}/api/music/stream?ts=${Date.now()}&track=${currentTrack.youtubeId}`;
-        audio.src = streamUrl;
-        audio.load();
-      }
+      // Use direct streaming - no auth required for listening to music
+      console.log('Audio: Using direct streaming for playback');
+      const streamUrl = `${env.apiUrl}/api/music/stream?ts=${Date.now()}`;
+      audio.src = streamUrl;
+      audio.load();
       
       // Wait for metadata to load
       await Promise.race([
@@ -300,54 +285,35 @@ export default function AudioSync() {
       trackIdRef.current = currentTrack.youtubeId;
       console.log('Audio: Stream setup complete for track', currentTrack.youtubeId);
 
-      // Get the current player status again (it might have changed during setup)
-      const currentStatus = statusRef.current === 'playing' || usePlayerStore.getState().status === 'playing'
-        ? 'playing' : 'paused';
+      // Since pause was removed, always prepare to play
+      console.log('Audio: Preparing to play after stream setup (pause removed)');
+      
+      // Setup one-time handler for canplay event
+      const handleCanPlay = async () => {
+        // Remove the listener first to avoid multiple calls
+        audio.removeEventListener('canplay', handleCanPlay);
+        console.log('Audio: New track can play, attempting to start playback');
         
-      console.log('Audio: Current status after stream setup:', currentStatus);
-
-      // If status is playing, setup auto-play once stream is ready
-      if (currentStatus === 'playing') {
-        console.log('Audio: Current status is playing, preparing to play after stream setup');
-        
-        // Setup one-time handler for canplay event
-        const handleCanPlay = async () => {
-          // Remove the listener first to avoid multiple calls
-          audio.removeEventListener('canplay', handleCanPlay);
-          console.log('Audio: New track can play, attempting to start playback');
-          
-          // Check status again - it might have changed while waiting for canplay
-          if (statusRef.current === 'playing' || usePlayerStore.getState().status === 'playing') {
-            try {
-              // Use the position from the server to ensure sync
-              // Set the lock to prevent duplicate position sync
-              if (!positionSyncInProgressRef.current && !hasInitialSyncRef.current) {
-                await fetchPositionWithLatencyCompensation(audio);
-              } else {
-                console.log('Audio: Position sync already performed, using current position:', audio.currentTime);
-              }
-              
-              // Only play if we're still in a playing state
-              if (statusRef.current === 'playing' || usePlayerStore.getState().status === 'playing') {
-                await audio.play().catch(e => {
-                  console.error('Audio: Failed to play new track after setup:', e);
-                });
-              } else {
-                console.log('Audio: Not starting playback - status changed to', statusRef.current);
-              }
-            } catch (error) {
-              console.error('Audio: Error starting playback for new track after setup:', error);
-            }
+        try {
+          // Use the position from the server to ensure sync
+          // Set the lock to prevent duplicate position sync
+          if (!positionSyncInProgressRef.current && !hasInitialSyncRef.current) {
+            await fetchPositionWithLatencyCompensation(audio);
           } else {
-            console.log('Audio: Track ready but not starting playback - player state is now', statusRef.current);
+            console.log('Audio: Position sync already performed, using current position:', audio.currentTime);
           }
-        };
-        
-        // Register the canplay handler
-        audio.addEventListener('canplay', handleCanPlay, { once: true });
-      } else {
-        console.log('Audio: Current status is not playing, skipping auto-play setup');
-      }
+          
+          // Always play since pause was removed
+          await audio.play().catch(e => {
+            console.error('Audio: Failed to play new track after setup:', e);
+          });
+        } catch (error) {
+          console.error('Audio: Error starting playback for new track after setup:', error);
+        }
+      };
+      
+      // Register the canplay handler
+      audio.addEventListener('canplay', handleCanPlay, { once: true });
     } catch (error) {
       console.error('Audio: Stream setup error:', error);
       setStreamError(true);
@@ -423,7 +389,7 @@ export default function AudioSync() {
     }
   };
 
-  // Status change effect - optimized with rate limiting
+  // Status change effect - modified to always play since pause was removed
   useEffect(() => {
     if (!audioRef.current || !mountedRef.current || !isInitialized) return;
 
@@ -444,7 +410,7 @@ export default function AudioSync() {
     const audio = audioRef.current;
     console.log('Audio: Status change effect triggered', { 
       status, 
-      isPaused: audio.paused,
+      // Remove isPaused since pause functionality was removed
       isInitialized,
       currentTrack: currentTrack?.youtubeId,
       hasInitialSync: hasInitialSyncRef.current
@@ -456,39 +422,34 @@ export default function AudioSync() {
       return;
     }
 
-    // Skip if status and audio state are already aligned
-    if ((status === 'playing' && !audio.paused) || (status === 'paused' && audio.paused)) {
-      console.log('Audio: Status already aligned with desired state');
-      return;
-    }
-
-    const startPlayback = async () => {
-      // When starting playback, reset the buffering compensation flag
-      bufferingCompensationAppliedRef.current = false;
-      
-      try {
-        const audioContext = await initializeAudioContext();
-        if (audioContext.state === 'suspended') {
-          await audioContext.resume();
-        }
-
-        await audio.play().catch(error => {
-          console.error('Audio: Play error in startPlayback:', error);
-          if (error.name !== 'NotAllowedError') {
-            setPlayerState({ status: 'paused' });
-          }
-        });
-      } catch (error) {
-        console.error('Audio: Failed to start playback:', error);
-        setPlayerState({ status: 'paused' });
-      }
-    };
-
+    // Since pause was removed, always try to play when status is playing
+    // Skip pause logic entirely
     if (status === 'playing' && audio.paused) {
+      const startPlayback = async () => {
+        // When starting playback, reset the buffering compensation flag
+        bufferingCompensationAppliedRef.current = false;
+        
+        try {
+          const audioContext = await initializeAudioContext();
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+          }
+
+          await audio.play().catch(error => {
+            console.error('Audio: Play error in startPlayback:', error);
+            // Don't set paused state since pause was removed
+            if (error.name === 'NotAllowedError') {
+              console.log('Audio: Playback requires user interaction');
+            }
+          });
+        } catch (error) {
+          console.error('Audio: Failed to start playback:', error);
+        }
+      };
+
       startPlayback();
-    } else if (status === 'paused' && !audio.paused) {
-      audio.pause();
     }
+    // Remove pause handling since pause functionality was removed
   }, [status, isInitialized, currentTrack, initializeAudioContext]);
 
   // Function to handle track completion
@@ -632,12 +593,13 @@ export default function AudioSync() {
         }
       });
 
-      audio.addEventListener('pause', () => {
-        if (mountedRef.current) {
-          statusRef.current = 'paused';
-          setPlayerState({ status: 'paused' });
-        }
-      });
+      // Remove pause event handler since pause functionality was removed
+      // audio.addEventListener('pause', () => {
+      //   if (mountedRef.current) {
+      //     statusRef.current = 'paused';
+      //     setPlayerState({ status: 'paused' });
+      //   }
+      // });
 
       audio.addEventListener('ended', async () => {
         if (mountedRef.current) {
@@ -681,7 +643,7 @@ export default function AudioSync() {
 
   // Initialize SSE connection - optimized to run only once
   useEffect(() => {
-    if (!token || !mountedRef.current || sseSubscriptionRef.current) return;
+    if (!mountedRef.current || sseSubscriptionRef.current) return;
 
     console.log('Audio: Setting up SSE subscription');
     const sseManager = SSEManager.getInstance();
@@ -792,7 +754,7 @@ export default function AudioSync() {
           ]
         });
         
-        // Set media session action handlers
+        // Set media session action handlers - remove pause since pause was removed
         navigator.mediaSession.setActionHandler('play', () => {
           const audio = document.querySelector('audio');
           if (audio && audio.paused) {
@@ -800,12 +762,13 @@ export default function AudioSync() {
           }
         });
         
-        navigator.mediaSession.setActionHandler('pause', () => {
-          const audio = document.querySelector('audio');
-          if (audio && !audio.paused) {
-            audio.pause();
-          }
-        });
+        // Remove pause handler since pause functionality was removed
+        // navigator.mediaSession.setActionHandler('pause', () => {
+        //   const audio = document.querySelector('audio');
+        //   if (audio && !audio.paused) {
+        //     audio.pause();
+        //   }
+        // });
       };
       
       // Load the image to trigger onload - use the same originalYoutubeId for consistency
@@ -1012,20 +975,22 @@ export default function AudioSync() {
       }
     };
     
-    const handlePause = () => {
-      if (wakeLockAcquired) {
-        releaseWakeLock().then(() => {
-          wakeLockAcquired = false;
-        }).catch(error => {
-        console.warn('Audio: Pause event - Failed to release Wake Lock:', error);
-      });
-      }
-    };
+    // Remove pause handler since pause functionality was removed
+    // const handlePause = () => {
+    //   if (wakeLockAcquired) {
+    //     releaseWakeLock().then(() => {
+    //       wakeLockAcquired = false;
+    //     }).catch(error => {
+    //     console.warn('Audio: Pause event - Failed to release Wake Lock:', error);
+    //   });
+    //   }
+    // };
     
     // Only attach these listeners once
     if (!audio.hasAttribute('wakelock-listeners')) {
     audio.addEventListener('play', handlePlay);
-    audio.addEventListener('pause', handlePause);
+    // Remove pause listener since pause functionality was removed
+    // audio.addEventListener('pause', handlePause);
       audio.setAttribute('wakelock-listeners', 'true');
     
     // Also manage wake lock based on document visibility
@@ -1048,7 +1013,8 @@ export default function AudioSync() {
     
     return () => {
       audio.removeEventListener('play', handlePlay);
-      audio.removeEventListener('pause', handlePause);
+      // Remove pause listener cleanup since pause functionality was removed
+      // audio.removeEventListener('pause', handlePause);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (wakeLockAcquired) {
       releaseWakeLock().catch(console.warn);
@@ -1066,36 +1032,6 @@ export default function AudioSync() {
         console.error('Audio: Element error:', error?.message);
         setStreamError(true);
       }}
-      onLoadStart={() => console.log('Audio: Load started')}
-      onLoadedData={() => {
-        console.log('Audio: Data loaded');
-        
-        // Skip position sync if one is already in progress
-        if (positionSyncInProgressRef.current) {
-          console.log('Audio: Position sync already in progress, skipping sync on data load');
-          return;
-        }
-        
-        // This is the perfect time to sync position - audio data is loaded but playback hasn't started
-        if (audioRef.current && !hasInitialSyncRef.current && statusRef.current === 'playing') {
-          console.log('Audio: First sync - fetching position from server');
-          fetchPositionWithLatencyCompensation(audioRef.current).catch(error => {
-            console.error('Audio: Failed to fetch position:', error);
-          });
-        } else if (audioRef.current && hasInitialSyncRef.current && statusRef.current === 'playing') {
-          // If we already have sync data, use calculated position
-          const calculatedPosition = getCalculatedPosition();
-          console.log('Audio: Using calculated position from prior sync:', calculatedPosition);
-          setPositionWithBufferingCompensation(audioRef.current, calculatedPosition);
-        } else {
-          console.log('Audio: Data loaded but not syncing position - current status:', statusRef.current);
-        }
-      }}
-      onCanPlay={() => console.log('Audio: Can play')}
-      onPlaying={() => console.log('Audio: Playing')}
-      playsInline
-      webkit-playsinline="true"
-      preload="auto"
     />
   );
 }

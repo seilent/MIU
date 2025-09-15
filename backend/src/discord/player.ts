@@ -33,6 +33,9 @@ import { RequestStatus, PlaylistMode, TrackStatus } from '../types/enums.js';
 import { broadcast, broadcastPlayerState } from '../routes/music.js';
 import { cleanupBlockedSong } from '../routes/music.js';
 import { addToHistory } from '../routes/music.js';
+import { upsertTrack, upsertChannel, getTrackWithChannel, updateTrackStats } from '../utils/trackHelpers.js';
+import { upsertThumbnailCache, upsertAudioCache, getThumbnailCache, getAudioCacheWithCheck } from '../utils/cacheHelpers.js';
+import logger from '../utils/logger.js';
 
 // Base types
 interface Track {
@@ -330,12 +333,20 @@ export class Player {
       this.handlePlaybackError();
     });
 
-    // Wait for client to be ready before initializing voice connection
+    // Wait for client to be ready before initializing voice connection and starting autoplay
     if (this.client.isReady()) {
       this.initializeVoiceConnection();
+      // Start initial autoplay after initialization
+      this.startInitialAutoplay().catch(error => {
+        console.error('Failed to start initial autoplay:', error);
+      });
     } else {
       this.client.once('ready', () => {
         this.initializeVoiceConnection();
+        // Start initial autoplay after initialization
+        this.startInitialAutoplay().catch(error => {
+          console.error('Failed to start initial autoplay:', error);
+        });
       });
     }
 
@@ -1035,6 +1046,88 @@ export class Player {
 
     } catch (error) {
       console.error('❌ Error playing track:', error);
+      throw error;
+    }
+  }
+
+  // Method for immediately queuing tracks (used by web interface)
+  async queueTrackImmediately(youtubeId: string, username: string): Promise<any> {
+    try {
+      // Get track info
+      const info = await getYoutubeInfo(youtubeId);
+      
+      // Create track in database first to avoid foreign key constraint violation
+      await prisma.track.upsert({
+        where: { youtubeId },
+        create: {
+          youtubeId,
+          title: info.title,
+          duration: info.duration,
+          isActive: true,
+          status: TrackStatus.QUEUED
+        },
+        update: {
+          title: info.title,
+          duration: info.duration,
+          isActive: true,
+          status: TrackStatus.QUEUED,
+          updatedAt: new Date()
+        }
+      });
+
+      // Create queue item
+      const queueItem: QueueItem = {
+        youtubeId,
+        title: info.title,
+        thumbnail: getThumbnailUrl(youtubeId),
+        duration: info.duration,
+        requestedBy: {
+          userId: 'web-user',
+          username,
+          avatar: undefined
+        },
+        requestedAt: new Date(),
+        isAutoplay: false
+      };
+
+      // Check if player is idle and can start immediately
+      const willPlayImmediately = this.audioPlayer.state.status === AudioPlayerStatus.Idle;
+
+      if (willPlayImmediately) {
+        // If playing immediately, set as current track but don't add to queue
+        this.currentTrack = queueItem;
+        
+        try {
+          const resource = await this.getAudioResource(youtubeId);
+          if (resource) {
+            this.audioPlayer.play(resource);
+          }
+        } catch (error) {
+          console.error('Failed to start immediate playback:', error);
+        }
+      } else {
+        // If not playing immediately, add to queue
+        this.queue.push(queueItem);
+      }
+
+      // Start downloading audio for this track in background (after track is in DB)
+      this.prefetchAudioForTrack(youtubeId, info.title);
+
+      // Update player state
+      await this.updatePlayerState();
+
+      // Return track info for API response
+      return {
+        youtubeId,
+        title: info.title,
+        thumbnail: getThumbnailUrl(youtubeId),
+        duration: info.duration,
+        queuePosition: willPlayImmediately ? 0 : this.queue.length,
+        willPlayNext: willPlayImmediately
+      };
+
+    } catch (error) {
+      console.error('Error in queueTrackImmediately:', error);
       throw error;
     }
   }
@@ -2570,6 +2663,29 @@ export class Player {
       await this.playNext();
     } else {
       console.log('No autoplay tracks available');
+    }
+  }
+
+  // Method to start autoplay when server starts
+  private async startInitialAutoplay(): Promise<void> {
+    try {
+      console.log('Starting initial autoplay...');
+      
+      // Wait a bit for Discord connection to stabilize
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Only start autoplay if player is idle and no tracks are queued
+      if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && 
+          this.queue.length === 0 && 
+          !this.currentTrack) {
+        
+        console.log('Player is idle, starting autoplay...');
+        await this.handleAutoplay();
+      } else {
+        console.log('Player already active or has queued tracks, skipping initial autoplay');
+      }
+    } catch (error) {
+      console.error('Error starting initial autoplay:', error);
     }
   }
 

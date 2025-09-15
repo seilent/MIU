@@ -1,6 +1,6 @@
 import { ChatInputCommandInteraction, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 import { prisma } from '../../db.js';
-import { getYoutubeId, getYoutubeInfo, getPlaylistItems, downloadYoutubeAudio } from '../../utils/youtube.js';
+import { getYoutubeId } from '../../utils/youtube.js';
 import type { Prisma } from '@prisma/client';
 
 // Get API base URL from environment
@@ -272,8 +272,20 @@ async function handleAdd(interaction: ChatInputCommandInteraction) {
       return;
     }
 
-    // Get video IDs from playlist URL
-    const videoIds = await getPlaylistItems(url);
+    // Get video IDs from playlist URL using YouTubeAPIManager
+    const { getYouTubeAPIManager } = await import('../../utils/youtubeApiManager.js');
+    const youtubeAPI = getYouTubeAPIManager();
+    
+    // Extract playlist ID from URL
+    const playlistId = url.match(/[?&]list=([^&]+)/)?.[1];
+    if (!playlistId) {
+      await interaction.reply({ content: 'Invalid playlist URL.', ephemeral: true });
+      return;
+    }
+    
+    const playlistVideos = await youtubeAPI.getPlaylistVideos(playlistId, { maxResults: 200 });
+    const videoIds = playlistVideos.map(video => video.videoId);
+    
     if (!videoIds.length) {
       await interaction.reply({ content: 'No videos found in the playlist.', ephemeral: true });
       return;
