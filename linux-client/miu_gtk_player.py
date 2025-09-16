@@ -56,6 +56,9 @@ class MIUGtkPlayer(Gtk.Application):
             flags=Gio.ApplicationFlags.DEFAULT_FLAGS
         )
 
+        # Icon will be set up when display is available
+        self.icon_name = "audio-x-generic"
+
         self.server_url = server_url.rstrip('/')
         base_url = self.server_url if self.server_url.endswith('/backend') else f"{self.server_url}/backend"
 
@@ -72,6 +75,8 @@ class MIUGtkPlayer(Gtk.Application):
         self.position = 0
         self.volume = 0.8
         self.user_paused = False
+        self.pending_seek_ns = None
+        self.pending_seek_position_us = None
 
         # Settings storage
         config_dir = GLib.get_user_config_dir() if GTK_AVAILABLE else os.path.expanduser('~/.config')
@@ -86,21 +91,63 @@ class MIUGtkPlayer(Gtk.Application):
         # Audio player
         self.gst_player = None
         self.audio_duration = 0
-        self.pending_seek_ns = None
 
         # Background tasks
         self.sse_thread = None
         self.running = False
+
+        # MPRIS interface placeholder
+        self.mpris = None
 
         # Initialize notifications
         if NOTIFY_AVAILABLE:
             Notify.init("MIU Player")
 
         self.connect('activate', self.on_activate)
+        self.init_mpris()
+
+    def setup_custom_icon(self):
+        """Setup custom application icon"""
+        import os
+
+        # Get the icon path
+        icon_path = os.path.join(os.path.dirname(__file__), "miu-icon.svg")
+
+        if os.path.exists(icon_path):
+            try:
+                # Add icon to the default icon theme
+                icon_theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+
+                # Create a custom icon name
+                self.icon_name = "miu-music-player"
+
+                # For GTK4, we need to add the icon directory to the search path
+                icon_dir = os.path.dirname(icon_path)
+                icon_theme.add_search_path(icon_dir)
+
+                # Copy the icon with the expected name
+                custom_icon_path = os.path.join(icon_dir, f"{self.icon_name}.svg")
+                if not os.path.exists(custom_icon_path):
+                    import shutil
+                    shutil.copy2(icon_path, custom_icon_path)
+
+                # Set the application icon
+                self.set_icon_name(self.icon_name)
+
+                print(f"Custom icon loaded: {self.icon_name}")
+
+            except Exception as e:
+                print(f"Failed to setup custom icon: {e}")
+                self.icon_name = "audio-x-generic"
+        else:
+            self.icon_name = "audio-x-generic"
 
     def on_activate(self, app):
         """Called when the application is activated"""
         if not self.window:
+            # Setup custom icon now that display is available
+            self.setup_custom_icon()
+
             self.window = MIUMainWindow(application=self)
             self.player_widget = self.window.player_widget
 
@@ -129,6 +176,13 @@ class MIUGtkPlayer(Gtk.Application):
         # Create audio-only video renderer (no video output)
         config = self.gst_player.get_config()
         self.gst_player.set_config(config)
+
+    def init_mpris(self):
+        """Initialize MPRIS interface for desktop integration"""
+        try:
+            self.mpris = MPRISInterface(self)
+        except Exception:
+            self.mpris = None
 
     def load_settings(self):
         """Load persisted user settings"""
@@ -262,8 +316,6 @@ class MIUGtkPlayer(Gtk.Application):
         if not track_id:
             return
 
-        print(f"Received sync_play for track {track_id}")
-
         current_time_ms = time.time() * 1000
         # Estimate network latency (simplified - could be more sophisticated)
         estimated_latency = 50  # 50ms default
@@ -319,15 +371,20 @@ class MIUGtkPlayer(Gtk.Application):
             title = self.current_track.get('title', 'Unknown Track')
             artist = self.current_track.get('requestedBy', {}).get('username', 'Unknown Artist')
 
+            icon_name = getattr(self, 'icon_name', 'audio-x-generic')
+
             notification = Notify.Notification.new(
                 "Now Playing",
                 f"{title}\nby {artist}",
-                "audio-x-generic"
+                icon_name
             )
             notification.show()
 
         # Load audio stream
         self.load_current_track()
+
+        if self.mpris:
+            self.mpris.notify_metadata()
 
     def sync_and_play(self):
         """Synchronize with server and play from correct position"""
@@ -351,8 +408,10 @@ class MIUGtkPlayer(Gtk.Application):
         # Defer seeking until pipeline reaches PLAYING to ensure it sticks
         if server_pos_seconds > 0:
             self.pending_seek_ns = int(server_pos_seconds * 1000000000)
+            self.pending_seek_position_us = int(server_pos_seconds * 1000000)
         elif server_pos_seconds == 0:
             self.pending_seek_ns = None
+            self.pending_seek_position_us = None
 
         # Start playback
         self.gst_player.play()
@@ -392,10 +451,17 @@ class MIUGtkPlayer(Gtk.Application):
         if state == GstPlayer.PlayerState.PLAYING and self.pending_seek_ns is not None:
             seek_result = self.gst_player.seek(self.pending_seek_ns)
             self.pending_seek_ns = None
+            if self.mpris and seek_result and self.pending_seek_position_us is not None:
+                self.mpris.emit_seeked(self.pending_seek_position_us)
+            self.pending_seek_position_us = None
 
         # Update play/pause icon when state changes
         if self.player_widget:
             GLib.idle_add(self.player_widget.update_play_icon)
+
+        if self.mpris:
+            self.mpris.notify_playback_status()
+            self.mpris.notify_position()
 
     def on_end_of_stream(self, player):
         """Called when track ends"""
@@ -422,6 +488,16 @@ class MIUGtkPlayer(Gtk.Application):
         if self.gst_player:
             self.gst_player.set_volume(self.volume)
         self.save_settings()
+        if self.mpris:
+            self.mpris.notify_volume_changed()
+        if self.player_widget and hasattr(self.player_widget, 'volume_slider'):
+            def _update_slider():
+                current = self.player_widget.volume_slider.get_value()
+                if abs(current - self.volume) > 0.001:
+                    self.player_widget.volume_slider.set_value(self.volume)
+                return False
+
+            GLib.idle_add(_update_slider)
 
     def seek(self, position):
         """Seek to position in seconds"""
@@ -490,6 +566,9 @@ class MIUGtkPlayer(Gtk.Application):
         if NOTIFY_AVAILABLE:
             Notify.uninit()
 
+        if self.mpris:
+            self.mpris.cleanup()
+
         self.quit()
 
 
@@ -504,6 +583,12 @@ class MIUMainWindow(Adw.ApplicationWindow):
         # Window setup
         self.set_title("MIU Music Player")
         self.set_default_size(400, 600)
+
+        # Set window icon from application
+        if hasattr(self.app, 'icon_name'):
+            self.set_icon_name(self.app.icon_name)
+        else:
+            self.set_icon_name("audio-x-generic")
 
         # Create header bar
         self.setup_header_bar()
@@ -556,11 +641,13 @@ class MIUMainWindow(Adw.ApplicationWindow):
 
     def on_about(self, action, param):
         """Show about dialog"""
+        icon_name = getattr(self.app, 'icon_name', 'audio-x-generic')
+
         dialog = Adw.AboutWindow(
             transient_for=self,
             modal=True,
             application_name="MIU Music Player",
-            application_icon="audio-x-generic",
+            application_icon=icon_name,
             version="1.0.0",
             developer_name="MIU Team",
             website="https://github.com/your-org/MIU",
@@ -790,7 +877,8 @@ class PlayerWidget(Gtk.Box):
         self.server_position = position
         self.server_duration = duration
         self.last_sync_time = timestamp
-        print(f"[SYNC] Server sync updated: position={position}s duration={duration}s timestamp={timestamp}")
+        if self.app.mpris:
+            self.app.mpris.notify_position()
 
     def get_synced_position(self):
         """Calculate current server position based on latest sync data"""
@@ -843,6 +931,320 @@ class PlayerWidget(Gtk.Box):
         # Update play/pause icon
         self.update_play_icon()
 
+
+
+class MPRISInterface:
+    """Expose playback controls via the MPRIS D-Bus interface"""
+
+    BUS_NAME = "org.mpris.MediaPlayer2.MIU"
+    OBJECT_PATH = "/org/mpris/MediaPlayer2"
+    MEDIA_IFACE = "org.mpris.MediaPlayer2"
+    PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
+
+    INTROSPECTION_XML = """
+    <node>
+      <interface name="org.mpris.MediaPlayer2">
+        <method name="Raise"/>
+        <method name="Quit"/>
+        <property name="CanQuit" type="b" access="read"/>
+        <property name="CanRaise" type="b" access="read"/>
+        <property name="HasTrackList" type="b" access="read"/>
+        <property name="Identity" type="s" access="read"/>
+        <property name="DesktopEntry" type="s" access="read"/>
+        <property name="SupportedUriSchemes" type="as" access="read"/>
+        <property name="SupportedMimeTypes" type="as" access="read"/>
+      </interface>
+      <interface name="org.mpris.MediaPlayer2.Player">
+        <method name="Next"/>
+        <method name="Previous"/>
+        <method name="Pause"/>
+        <method name="PlayPause"/>
+        <method name="Stop"/>
+        <method name="Play"/>
+        <method name="Seek">
+          <arg name="Offset" type="x" direction="in"/>
+        </method>
+        <method name="SetPosition">
+          <arg name="TrackId" type="o" direction="in"/>
+          <arg name="Position" type="x" direction="in"/>
+        </method>
+        <method name="OpenUri">
+          <arg name="Uri" type="s" direction="in"/>
+        </method>
+        <signal name="Seeked">
+          <arg name="Position" type="x"/>
+        </signal>
+        <property name="PlaybackStatus" type="s" access="read"/>
+        <property name="Metadata" type="a{sv}" access="read"/>
+        <property name="Position" type="x" access="read"/>
+        <property name="Rate" type="d" access="read"/>
+        <property name="MinimumRate" type="d" access="read"/>
+        <property name="MaximumRate" type="d" access="read"/>
+        <property name="Volume" type="d" access="readwrite"/>
+        <property name="CanGoNext" type="b" access="read"/>
+        <property name="CanGoPrevious" type="b" access="read"/>
+        <property name="CanPlay" type="b" access="read"/>
+        <property name="CanPause" type="b" access="read"/>
+        <property name="CanSeek" type="b" access="read"/>
+        <property name="CanControl" type="b" access="read"/>
+        <property name="Shuffle" type="b" access="read"/>
+        <property name="LoopStatus" type="s" access="read"/>
+      </interface>
+    </node>
+    """
+
+    def __init__(self, app: MIUGtkPlayer):
+        self.app = app
+        self.connection: Optional[Gio.DBusConnection] = None
+        self._node_info = Gio.DBusNodeInfo.new_for_xml(self.INTROSPECTION_XML)
+        self._registration_ids = []
+        self._bus_owner_id = Gio.bus_own_name(
+            Gio.BusType.SESSION,
+            self.BUS_NAME,
+            Gio.BusNameOwnerFlags.NONE,
+            self.on_bus_acquired,
+            None,
+            self.on_name_lost
+        )
+
+    def on_bus_acquired(self, connection: Gio.DBusConnection, name: str):
+        self.connection = connection
+        for interface in self._node_info.interfaces:
+            registration_id = connection.register_object(
+                self.OBJECT_PATH,
+                interface,
+                self.handle_method_call,
+                self.handle_get_property,
+                self.handle_set_property
+            )
+            self._registration_ids.append(registration_id)
+        GLib.idle_add(self.publish_initial_state)
+
+    def on_name_lost(self, connection: Optional[Gio.DBusConnection], name: str):
+        self.cleanup()
+
+    def cleanup(self):
+        if self.connection:
+            for registration_id in self._registration_ids:
+                self.connection.unregister_object(registration_id)
+        self._registration_ids = []
+        if hasattr(self, '_bus_owner_id') and self._bus_owner_id is not None:
+            Gio.bus_unown_name(self._bus_owner_id)
+            self._bus_owner_id = None
+        self.connection = None
+
+    def handle_method_call(self, connection, sender, object_path, interface_name, method_name, parameters, invocation):
+        if interface_name == self.MEDIA_IFACE:
+            if method_name == 'Raise':
+                if self.app.window:
+                    GLib.idle_add(self.app.window.present)
+                invocation.return_value(None)
+            elif method_name == 'Quit':
+                GLib.idle_add(self.app.quit_application)
+                invocation.return_value(None)
+            else:
+                invocation.return_error_literal(Gio.DBusError, Gio.DBusError.UNKNOWN_METHOD, 'Unknown method')
+            return
+
+        if interface_name == self.PLAYER_IFACE:
+            if method_name == 'Play':
+                GLib.idle_add(self.ensure_playing)
+                invocation.return_value(None)
+            elif method_name == 'Pause':
+                GLib.idle_add(self.ensure_paused)
+                invocation.return_value(None)
+            elif method_name == 'PlayPause':
+                GLib.idle_add(self.app.play_pause)
+                invocation.return_value(None)
+            elif method_name == 'Stop':
+                GLib.idle_add(self.ensure_stopped)
+                invocation.return_value(None)
+            elif method_name in ('Next', 'Previous', 'Seek', 'SetPosition', 'OpenUri'):
+                invocation.return_error_literal(Gio.DBusError, Gio.DBusError.NOT_SUPPORTED, 'Not supported')
+            else:
+                invocation.return_error_literal(Gio.DBusError, Gio.DBusError.UNKNOWN_METHOD, 'Unknown method')
+
+    def handle_get_property(self, connection, sender, object_path, interface_name, property_name):
+        if interface_name == self.MEDIA_IFACE:
+            return self.get_media_property(property_name)
+        if interface_name == self.PLAYER_IFACE:
+            return self.get_player_property(property_name)
+        raise AttributeError('Unknown property')
+
+    def handle_set_property(self, connection, sender, object_path, interface_name, property_name, value):
+        if interface_name == self.PLAYER_IFACE and property_name == 'Volume':
+            volume = max(0.0, min(1.0, value.get_double()))
+            GLib.idle_add(self.app.set_volume, volume)
+            return True
+        return False
+
+    def ensure_playing(self):
+        if self.app.player_status != "playing":
+            self.app.user_paused = False
+            self.app.sync_and_play()
+
+    def ensure_paused(self):
+        if self.app.player_status == "playing" and self.app.gst_player:
+            self.app.gst_player.pause()
+            self.app.user_paused = True
+
+    def ensure_stopped(self):
+        if self.app.gst_player:
+            self.app.gst_player.stop()
+            self.app.user_paused = True
+
+    def get_media_property(self, name: str):
+        if name == 'CanQuit':
+            return GLib.Variant('b', True)
+        if name == 'CanRaise':
+            return GLib.Variant('b', True)
+        if name == 'HasTrackList':
+            return GLib.Variant('b', False)
+        if name == 'Identity':
+            return GLib.Variant('s', 'MIU Player')
+        if name == 'DesktopEntry':
+            return GLib.Variant('s', 'miu-gtk')
+        if name == 'SupportedUriSchemes':
+            return GLib.Variant('as', [])
+        if name == 'SupportedMimeTypes':
+            return GLib.Variant('as', ['audio/mpeg', 'audio/mp4'])
+        raise AttributeError('Unknown media property')
+
+    def get_player_property(self, name: str):
+        if name == 'PlaybackStatus':
+            return GLib.Variant('s', self.get_playback_status())
+        if name == 'Metadata':
+            return self._dict_to_variant(self.build_metadata())
+        if name == 'Position':
+            return GLib.Variant('x', self.get_position_us())
+        if name == 'Rate':
+            return GLib.Variant('d', 1.0)
+        if name == 'MinimumRate':
+            return GLib.Variant('d', 1.0)
+        if name == 'MaximumRate':
+            return GLib.Variant('d', 1.0)
+        if name == 'Volume':
+            return GLib.Variant('d', float(self.app.volume))
+        if name == 'CanGoNext':
+            return GLib.Variant('b', False)
+        if name == 'CanGoPrevious':
+            return GLib.Variant('b', False)
+        if name == 'CanPlay':
+            return GLib.Variant('b', self.app.current_track is not None)
+        if name == 'CanPause':
+            return GLib.Variant('b', self.app.current_track is not None)
+        if name == 'CanSeek':
+            return GLib.Variant('b', False)
+        if name == 'CanControl':
+            return GLib.Variant('b', True)
+        if name == 'Shuffle':
+            return GLib.Variant('b', False)
+        if name == 'LoopStatus':
+            return GLib.Variant('s', 'None')
+        raise AttributeError('Unknown player property')
+
+    def get_playback_status(self) -> str:
+        status = self.app.player_status
+        if status == 'playing':
+            return 'Playing'
+        if status == 'paused':
+            return 'Paused'
+        return 'Stopped'
+
+    def build_metadata(self) -> Dict[str, GLib.Variant]:
+        metadata: Dict[str, GLib.Variant] = {}
+        track = self.app.current_track
+        if not track:
+            return metadata
+
+        youtube_id = track.get('youtubeId', 'unknown')
+        metadata['mpris:trackid'] = GLib.Variant('o', f"/org/mpris/MediaPlayer2/track/{youtube_id}")
+        metadata['xesam:title'] = GLib.Variant('s', track.get('title', 'Unknown Track'))
+
+        artist = track.get('requestedBy', {}).get('username')
+        if artist:
+            metadata['xesam:artist'] = GLib.Variant('as', [artist])
+        else:
+            metadata['xesam:artist'] = GLib.Variant('as', [])
+
+        duration = track.get('duration', 0)
+        metadata['mpris:length'] = GLib.Variant('x', int(duration * 1000000))
+
+        art_url = f"{self.app.server_url}/backend/api/albumart/{youtube_id}"
+        metadata['mpris:artUrl'] = GLib.Variant('s', art_url)
+
+        return metadata
+
+    def get_position_us(self) -> int:
+        if self.app.player_widget and hasattr(self.app.player_widget, 'get_synced_position'):
+            position = self.app.player_widget.get_synced_position()
+        else:
+            position = getattr(self.app, 'position', 0)
+        return int(position * 1000000)
+
+    def notify_playback_status(self):
+        self.emit_properties_changed(self.PLAYER_IFACE, {
+            'PlaybackStatus': GLib.Variant('s', self.get_playback_status())
+        })
+
+    def notify_metadata(self):
+        self.emit_properties_changed(self.PLAYER_IFACE, {
+            'Metadata': self._dict_to_variant(self.build_metadata())
+        })
+
+    def notify_position(self):
+        self.emit_properties_changed(self.PLAYER_IFACE, {
+            'Position': GLib.Variant('x', self.get_position_us())
+        })
+
+    def notify_volume_changed(self):
+        self.emit_properties_changed(self.PLAYER_IFACE, {
+            'Volume': GLib.Variant('d', float(self.app.volume))
+        })
+
+    def emit_seeked(self, position_us: int):
+        if not self.connection:
+            return
+        self.connection.emit_signal(
+            None,
+            self.OBJECT_PATH,
+            self.PLAYER_IFACE,
+            'Seeked',
+            GLib.Variant('(x)', (int(position_us),))
+        )
+
+    def emit_properties_changed(self, interface_name: str, properties: Dict[str, GLib.Variant]):
+        if not self.connection or not properties:
+            return
+        # Convert to plain dict for GLib.Variant constructor
+        converted = {}
+        for key, value in properties.items():
+            if not isinstance(value, GLib.Variant):
+                value = GLib.Variant('s', str(value))
+            converted[str(key)] = value
+
+        self.connection.emit_signal(
+            None,
+            self.OBJECT_PATH,
+            'org.freedesktop.DBus.Properties',
+            'PropertiesChanged',
+            GLib.Variant('(sa{sv}as)', (interface_name, converted, []))
+        )
+
+    def _dict_to_variant(self, mapping: Dict[str, GLib.Variant]) -> GLib.Variant:
+        converted = {}
+        for key, value in mapping.items():
+            if not isinstance(value, GLib.Variant):
+                value = GLib.Variant('s', str(value))
+            converted[str(key)] = value
+        return GLib.Variant('a{sv}', converted)
+
+    def publish_initial_state(self):
+        self.notify_metadata()
+        self.notify_playback_status()
+        self.notify_volume_changed()
+        self.notify_position()
+        return False
 
 
 
