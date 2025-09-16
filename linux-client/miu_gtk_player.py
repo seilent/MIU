@@ -125,7 +125,6 @@ class MIUGtkPlayer(Gtk.Application):
 
         # Set initial volume
         self.gst_player.set_volume(self.volume)
-        print(f"[INIT] Initial volume set to {self.volume:.2f}")
 
         # Create audio-only video renderer (no video output)
         config = self.gst_player.get_config()
@@ -139,9 +138,8 @@ class MIUGtkPlayer(Gtk.Application):
                     data = json.load(f)
                 saved_volume = float(data.get('volume', self.volume))
                 self.volume = max(0.0, min(1.0, saved_volume))
-                print(f"[SETTINGS] Loaded volume {self.volume:.2f} from {self.settings_path}")
-        except Exception as e:
-            print(f"[SETTINGS] Failed to load settings: {e}")
+        except Exception:
+            pass
 
     def save_settings(self):
         """Persist user settings to disk"""
@@ -152,9 +150,8 @@ class MIUGtkPlayer(Gtk.Application):
             }
             with open(self.settings_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
-            print(f"[SETTINGS] Saved settings to {self.settings_path}")
-        except Exception as e:
-            print(f"[SETTINGS] Failed to save settings: {e}")
+        except Exception:
+            pass
 
     def start_background_tasks(self):
         """Start background tasks for server communication"""
@@ -221,7 +218,6 @@ class MIUGtkPlayer(Gtk.Application):
 
         if 'status' in data:
             self.server_status = data['status']
-            print(f"[STATE] Server status updated to {self.server_status}")
 
         sync_position = data.get('position', None)
         sync_updated = False
@@ -235,15 +231,12 @@ class MIUGtkPlayer(Gtk.Application):
                     self.player_widget.update_server_sync(sync_position, duration, current_time)
                     sync_updated = True
                 self.on_track_changed()
-                if new_track:
-                    print(f"[STATE] Track changed to {new_track.get('title', 'Unknown')} ({new_track.get('youtubeId')})")
 
         if 'queue' in data:
             self.queue = data['queue']
 
         if sync_position is not None:
             self.position = sync_position
-            print(f"[STATE] Server reported position {self.position}s")
 
         # Update server sync data for position calculation
         if self.player_widget and self.current_track and not sync_updated:
@@ -293,14 +286,8 @@ class MIUGtkPlayer(Gtk.Application):
                 elapsed_since_play = max(0, current_time_ms - target_play_time)
                 calculated_position = position + max(0, elapsed_since_play / 1000.0)
                 self.player_widget.update_server_sync(calculated_position, duration, current_time_ms)
-            print("Skipping sync_play because user paused playback")
             return
 
-        print(f"Sync timing calculation:")
-        print(f"  Server buffer: {server_buffer}ms")
-        print(f"  Time since message: {time_passed_since_received}ms")
-        print(f"  Estimated latency: {estimated_latency}ms")
-        print(f"  Time until play: {time_until_play_ms}ms")
 
         # Schedule synchronized playback
         if time_until_play_ms > 0:
@@ -312,7 +299,6 @@ class MIUGtkPlayer(Gtk.Application):
 
     def _sync_play_now(self, track_id: str, position: float):
         """Execute synchronized playback"""
-        print(f"Starting synchronized playback of {track_id} at position {position}")
 
         # Ensure we have the correct track loaded
         if not self.current_track or self.current_track.get('youtubeId') != track_id:
@@ -358,8 +344,6 @@ class MIUGtkPlayer(Gtk.Application):
             else:
                 server_pos_seconds = getattr(self.player_widget, 'current_server_position', 0)
 
-        track_id = self.current_track.get('youtubeId') if self.current_track else 'unknown'
-        print(f"[SYNC] Preparing playback for {track_id} at {server_pos_seconds:.3f}s (paused={self.user_paused})")
 
         # Set the stream URL
         self.gst_player.set_uri(self.stream_url)
@@ -367,14 +351,11 @@ class MIUGtkPlayer(Gtk.Application):
         # Defer seeking until pipeline reaches PLAYING to ensure it sticks
         if server_pos_seconds > 0:
             self.pending_seek_ns = int(server_pos_seconds * 1000000000)
-            print(f"[SYNC] Queued seek to {server_pos_seconds:.3f}s ({self.pending_seek_ns}ns)")
-        else:
+        elif server_pos_seconds == 0:
             self.pending_seek_ns = None
-            print("[SYNC] No seek requested; starting from stream head")
 
         # Start playback
         self.gst_player.play()
-        print("[SYNC] Issued play() command")
 
     def load_current_track(self):
         """Load current track into GStreamer and sync position"""
@@ -409,10 +390,7 @@ class MIUGtkPlayer(Gtk.Application):
             self.player_status = "stopped"
 
         if state == GstPlayer.PlayerState.PLAYING and self.pending_seek_ns is not None:
-            seek_seconds = self.pending_seek_ns / 1000000000
-            print(f"[SYNC] Applying pending seek: {seek_seconds:.3f}s")
             seek_result = self.gst_player.seek(self.pending_seek_ns)
-            print(f"[SYNC] Seek result: {seek_result}")
             self.pending_seek_ns = None
 
         # Update play/pause icon when state changes
@@ -433,11 +411,9 @@ class MIUGtkPlayer(Gtk.Application):
             # Pause audio
             self.gst_player.pause()
             self.user_paused = True
-            print("[CONTROL] User paused playback")
         else:
             # Resume/Play from current server position
             self.user_paused = False
-            print("[CONTROL] User requested play; syncing with server")
             self.sync_and_play()
 
     def set_volume(self, volume):
@@ -446,7 +422,6 @@ class MIUGtkPlayer(Gtk.Application):
         if self.gst_player:
             self.gst_player.set_volume(self.volume)
         self.save_settings()
-        print(f"[CONTROL] Volume set to {self.volume:.2f}")
 
     def seek(self, position):
         """Seek to position in seconds"""
@@ -478,7 +453,6 @@ class MIUGtkPlayer(Gtk.Application):
 
                 # Check if track changed
                 if not self.current_track or self.current_track.get('youtubeId') != track.get('youtubeId'):
-                    print(f"Track changed: {track.get('title', 'Unknown')}")
                     self.current_track = track
                     self.on_track_changed()
 
@@ -632,17 +606,17 @@ class PlayerWidget(Gtk.Box):
         """Create clickable album art section"""
         # Album art overlay button (clickable like frontend)
         self.art_button = Gtk.Button()
-        self.art_button.set_size_request(240, 240)
+        self.art_button.set_size_request(200, 200)
         self.art_button.add_css_class("flat")
         self.art_button.connect("clicked", self.on_album_art_clicked)
 
         # Create overlay for album art + play/pause icon
         overlay = Gtk.Overlay()
-        overlay.set_size_request(240, 240)
+        overlay.set_size_request(200, 200)
 
         # Album art image
         self.album_art = Gtk.Image()
-        self.album_art.set_size_request(240, 240)
+        self.album_art.set_size_request(200, 200)
         self.load_album_art()  # Load from server
         overlay.set_child(self.album_art)
 
@@ -688,7 +662,7 @@ class PlayerWidget(Gtk.Box):
         self.track_title.set_halign(Gtk.Align.START)
         self.track_title.set_wrap(True)
         self.track_title.set_max_width_chars(40)
-        self.track_title.add_css_class("title-1")
+        self.track_title.add_css_class("title-2")
         info_container.append(self.track_title)
 
         # Requested by info
@@ -706,12 +680,6 @@ class PlayerWidget(Gtk.Box):
         volume_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         volume_container.set_valign(Gtk.Align.CENTER)
 
-        # Volume icon
-        volume_icon = Gtk.Image()
-        volume_icon.set_from_icon_name("audio-volume-medium-symbolic")
-        volume_icon.set_halign(Gtk.Align.CENTER)
-        volume_container.append(volume_icon)
-
         # Vertical volume slider
         self.volume_slider = Gtk.Scale.new_with_range(Gtk.Orientation.VERTICAL, 0, 1, 0.01)
         self.volume_slider.set_vexpand(True)
@@ -728,13 +696,13 @@ class PlayerWidget(Gtk.Box):
         """Load album art from server"""
         if not self.app.current_track:
             self.album_art.set_from_icon_name("audio-x-generic")
-            self.album_art.set_pixel_size(240)
+            self.album_art.set_pixel_size(200)
             return
 
         youtube_id = self.app.current_track.get('youtubeId')
         if not youtube_id:
             self.album_art.set_from_icon_name("audio-x-generic")
-            self.album_art.set_pixel_size(240)
+            self.album_art.set_pixel_size(200)
             return
 
         # Load album art from server endpoint (like frontend)
@@ -775,7 +743,7 @@ class PlayerWidget(Gtk.Box):
             pixbuf = loader.get_pixbuf()
             if pixbuf:
                 # Scale to 240x240
-                scaled_pixbuf = pixbuf.scale_simple(240, 240, GdkPixbuf.InterpType.BILINEAR)
+                scaled_pixbuf = pixbuf.scale_simple(200, 200, GdkPixbuf.InterpType.BILINEAR)
 
                 # Convert to Gdk.Texture (modern GTK4 way)
                 texture = Gdk.Texture.new_for_pixbuf(scaled_pixbuf)
@@ -789,7 +757,7 @@ class PlayerWidget(Gtk.Box):
     def set_fallback_album_art(self):
         """Set fallback album art icon"""
         self.album_art.set_from_icon_name("audio-x-generic")
-        self.album_art.set_pixel_size(240)
+        self.album_art.set_pixel_size(200)
 
     def update_play_icon(self):
         """Update play/pause icon based on state"""
@@ -842,7 +810,6 @@ class PlayerWidget(Gtk.Box):
         self.current_server_position = synced_position
         self.server_position = synced_position
         self.last_sync_time = current_time_ms
-        print(f"[SYNC] Calculated synced position {synced_position:.3f}s (elapsed {elapsed_seconds:.3f}s, status={self.app.server_status})")
         return synced_position
 
     def sync_position_timer(self):
