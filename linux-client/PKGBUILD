@@ -1,0 +1,23 @@
+# Maintainer: MIU Team <admin@miu.gacha.boo>
+pkgname=miu-client
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Lightweight Linux client for MIU music streaming"
+arch=('any')
+url="https://miu.gacha.boo"
+license=('MIT')
+depends=('python' 'python-pygame' 'python-pillow' 'tk')
+optdepends=('python-pystray: system tray integration')
+makedepends=('python-setuptools')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    python setup.py build
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    python setup.py install --root="$pkgdir" --optimize=1
+}

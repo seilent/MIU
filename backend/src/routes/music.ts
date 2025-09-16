@@ -1728,4 +1728,8 @@ router.post('/block-by-seed', async (req: Request, res: Response) => {
 import { streamingRouter } from './music/streaming.js';
 router.use('/', streamingRouter);
 
+// Mount minimal streaming router for lightweight clients
+import { minimalStreamRouter } from './music/minimal-stream.js';
+router.use('/', minimalStreamRouter);
+
 export { router as musicRouter };

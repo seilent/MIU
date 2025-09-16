@@ -174,3 +174,4 @@ youtube_cookies.txt
 .codannaignore
 miu.gacha.boo.conf
 backups/
+.claude/settings.local.json

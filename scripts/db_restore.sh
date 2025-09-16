@@ -1,23 +1,38 @@
 #!/bin/bash
-if [ -z "$1" ]; then
+set -euo pipefail
+
+if docker info >/dev/null 2>&1; then
+  DOCKER="docker"
+else
+  DOCKER="sudo docker"
+fi
+
+if [ -z "${1:-}" ]; then
   echo "Usage: $0 <backup_file.dump>"
   exit 1
 fi
 
-BACKUP_FILE="/home/seilent/MIU/backups/$1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP_DIR="${SCRIPT_DIR%/scripts}/backups"
+BACKUP_FILE="$BACKUP_DIR/$1"
+
 if [ ! -f "$BACKUP_FILE" ]; then
   echo "Backup file not found: $BACKUP_FILE"
   exit 1
 fi
 
-read -p "WARNING: This will DROP and RECREATE the database. Continue? [y/N] " confirm
+read -r -p "WARNING: This will DROP and RECREATE the schema. Continue? [y/N] " confirm
 if [[ $confirm != [yY] ]]; then
   echo "Restore cancelled"
   exit 0
 fi
 
+CONTAINER="miu-postgres-1"
+
+echo "Dropping existing schema..."
+$DOCKER exec "$CONTAINER" env PGPASSWORD=miu psql -U miu -d miu -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;"
+
 echo "Restoring database from $BACKUP_FILE..."
-docker exec -i miu_postgres_1 psql -U miu -c "DROP DATABASE IF EXISTS miu;"
-docker exec -i miu_postgres_1 psql -U miu -c "CREATE DATABASE miu;"
-docker exec -i miu_postgres_1 pg_restore -U miu -d miu -Fc < "$BACKUP_FILE"
+$DOCKER exec -i "$CONTAINER" env PGPASSWORD=miu pg_restore --no-owner --no-privileges -U miu -d miu < "$BACKUP_FILE"
+
 echo "Restore complete"

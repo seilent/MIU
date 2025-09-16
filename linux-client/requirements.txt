@@ -1,0 +1,9 @@
+# Core dependencies (minimal)
+pygame>=2.0.0  # Audio playback
+
+# GUI dependencies (optional)
+Pillow>=8.0.0  # Image handling for GUI/tray
+pystray>=0.17.0  # System tray integration
+
+# Note: tkinter is usually included with Python
+# If tkinter is not available, the client will run in console mode
