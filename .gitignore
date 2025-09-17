@@ -175,3 +175,18 @@ youtube_cookies.txt
 miu.gacha.boo.conf
 backups/
 .claude/settings.local.json
+
+# Tauri specific
+target/
+tauri-client/target/
+tauri-client/dist/
+tauri-client/node_modules/
+gen/
+Cargo.lock
+*.deb
+*.rpm
+*.dmg
+*.app
+*.AppImage
+*.msi
+.tauri/

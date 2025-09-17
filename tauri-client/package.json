@@ -1,0 +1,18 @@
+{
+  "name": "miu-player-tauri",
+  "version": "1.0.0",
+  "description": "MIU Music Player - Cross-platform desktop client built with Tauri",
+  "main": "index.js",
+  "scripts": {
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "build-frontend": "cp -r frontend/* dist/",
+    "prepare-dist": "mkdir -p dist && npm run build-frontend"
+  },
+  "keywords": ["music", "player", "tauri", "cross-platform"],
+  "author": "MIU Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.5.0"
+  }
+}

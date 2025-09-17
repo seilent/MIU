@@ -1,197 +1,173 @@
-# MIU Linux Client
+# MIU GTK Music Player
 
-A lightweight audio streaming client for MIU music servers. Perfect for listening to music from MIU Discord bots with minimal resource usage.
+A modern, native GNOME music player for the MIU music bot, built with GTK4 and Libadwaita.
 
-## Features
-
-- 🎵 **Live Audio Streaming** - Real-time audio with embedded metadata
-- ⏯️ **Client-side Controls** - Play/pause without server interaction
-- 🔊 **Volume Control** - Local volume adjustment
-- 🖥️ **System Tray** - Minimize to system tray for background listening
-- 🚀 **Minimal Resources** - Lightweight design for efficient performance
-- 🌐 **No Authentication** - Guest listening without login requirements
-- 💻 **Cross-mode** - GUI and console modes available
+![GTK Player Preview](https://img.shields.io/badge/GTK-4.0-blue) ![Libadwaita](https://img.shields.io/badge/Libadwaita-1.0-green) ![GStreamer](https://img.shields.io/badge/GStreamer-1.0-orange)
 
 ## Quick Start
 
-### Installation
-
-#### Option 1: Simple Install Script
+### Option 1: AppImage (Recommended)
+Download and run the portable version:
 ```bash
-git clone <your-repo>
-cd linux-client
-./install.sh
+chmod +x MyApp.AppImage
+./MyApp.AppImage
 ```
+No installation required! Works on any Linux distribution.
 
-#### Option 2: Manual Installation
+### Option 2: Run from Source
 ```bash
 # Install dependencies
-pip3 install --user pygame Pillow pystray
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+                 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+                 gstreamer1.0-plugins-good gstreamer1.0-libav
 
-# Install the client
-pip3 install --user .
+# Run the player
+python3 miu_gtk_player.py
 ```
 
-#### Option 3: Package Installation
-- **Debian/Ubuntu**: `sudo dpkg -i miu-client_1.0.0-1_all.deb`
-- **Fedora/RHEL**: `sudo rpm -i miu-client-1.0.0-1.noarch.rpm`
-- **Arch**: `pacman -U miu-client-1.0.0-1-any.pkg.tar.xz`
+Default server: `https://miu.gacha.boo` (change with `--server` flag)
 
-### Usage
+## Features
 
-```bash
-# Start with GUI (default)
-miu-client
+### 🎨 Modern GNOME Integration
+- **Native GTK4 + Libadwaita interface** following GNOME HIG
+- **Adaptive UI** that works on different screen sizes
+- **System theme integration** with automatic dark/light mode
+- **Custom icon** with colorful equalizer bars
 
-# Console mode only
-miu-client --console
+### 🎵 Professional Audio
+- **GStreamer backend** for high-quality audio playback
+- **Real-time synchronization** with MIU server
+- **MPRIS media controls** (media keys, desktop notifications)
+- **Volume control** and seeking support
 
-# Connect to specific server (direct)
-miu-client --server http://your-server:3000
+### 🔔 System Integration
+- **Desktop notifications** for track changes
+- **Media keys support** (play/pause/volume)
+- **Desktop entry** for application launcher
+- **System tray integration**
 
-# Connect to MIU through reverse proxy
-miu-client --server https://miu.gacha.boo
-
-# Disable system tray
-miu-client --no-tray
-```
-
-## Endpoints Used
-
-The client connects to these MIU server endpoints:
-
-**Direct connection (localhost:3000):**
-- `GET /api/music/minimal-stream` - Audio stream with embedded metadata
-- `GET /api/music/minimal-status` - Current playback status
-
-**Through reverse proxy (miu.gacha.boo):**
-- `GET /backend/api/music/minimal-stream` - Audio stream with embedded metadata
-- `GET /backend/api/music/minimal-status` - Current playback status
-
-## Protocol
-
-The client uses a custom streaming protocol:
-
-```
-Stream Format:
-[META][4-byte length][JSON metadata]
-[AUDI][4-byte length][audio data]
-```
-
-Metadata includes:
-- Current track information
-- Playback position
-- Server status
-- Requester details
+### 🌐 MIU Backend Integration
+- **Server-Sent Events** for real-time updates
+- **REST API** integration for control commands
+- **Automatic reconnection** on network issues
+- **Queue synchronization** with web interface
 
 ## System Requirements
 
-- **Python**: 3.8 or higher
 - **OS**: Linux (any distribution)
-- **RAM**: ~50MB
-- **Dependencies**:
-  - `pygame` (audio playback)
-  - `Pillow` (GUI/tray icons) - optional
-  - `pystray` (system tray) - optional
-  - `tkinter` (GUI) - usually included with Python
+- **Python**: 3.8+ (for source version)
+- **GTK**: 4.0+ with Libadwaita
+- **GStreamer**: 1.0+ with plugins
+- **RAM**: ~25MB (AppImage includes all dependencies)
 
-## Building Packages
+## Installation Options
 
-To build packages for distribution:
+### AppImage Dependencies (Built-in)
+The AppImage includes everything:
+- Python 3.12 runtime
+- GTK4 and Libadwaita
+- GStreamer and plugins
+- All Python dependencies
 
+### Source Dependencies
+
+#### Ubuntu/Debian
 ```bash
-./build-packages.sh
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+                 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+                 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
 ```
 
-This creates:
-- Debian package (`.deb`)
-- RPM package (`.rpm`)
-- Arch package (`.pkg.tar.xz`)
-- Python wheel (`.whl`)
-- AppImage (if tools available)
-
-## Controls
-
-### GUI Mode
-- **Play/Pause Button**: Toggle playback
-- **Volume Slider**: Adjust volume (0-100%)
-- **System Tray**: Right-click for menu
-
-### Console Mode
-- `p` - Toggle play/pause
-- `v+` - Volume up
-- `v-` - Volume down
-- `q` - Quit
-
-### System Tray Menu
-- Toggle Play/Pause
-- Volume Up/Down
-- Show Window
-- Quit
-
-## Configuration
-
-The client connects to `http://localhost:3000` by default. Change with:
-
+#### Arch Linux
 ```bash
-miu-client --server http://your-miu-server:port
+sudo pacman -S python-gobject gtk4 libadwaita gstreamer \
+               gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
 ```
+
+#### Fedora
+```bash
+sudo dnf install python3-gobject gtk4-devel libadwaita-devel \
+                 gstreamer1-devel gstreamer1-plugins-base-devel \
+                 gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-libav
+```
+
+## Usage
+
+### AppImage
+```bash
+# Default server (https://miu.gacha.boo)
+./MyApp.AppImage
+
+# Custom server
+./MyApp.AppImage --server https://your-server.com
+```
+
+### Source Code
+```bash
+# Default server
+python3 miu_gtk_player.py
+
+# Custom server
+python3 miu_gtk_player.py --server https://your-server.com
+```
+
+## Architecture
+
+```
+MIUGtkPlayer (Gtk.Application)
+├── MIUMainWindow (Adw.ApplicationWindow)
+│   ├── PlayerWidget (playback controls)
+│   ├── QueueWidget (track queue)
+│   └── HeaderBar (menus/actions)
+├── GStreamer Audio Engine
+├── MPRIS D-Bus Integration
+├── SSE Client (real-time updates)
+└── HTTP Client (API calls)
+```
+
+## Server Endpoints
+
+- **Stream**: `/api/music/stream` - Audio data
+- **Status**: `/api/music/minimal-status` - Current state
+- **SSE**: `/api/music/state/live` - Real-time updates
+- **Album Art**: `/backend/api/albumart/{id}` - Track artwork
 
 ## Troubleshooting
 
-### Audio Issues
+### AppImage Issues
 ```bash
-# Check if pygame can access audio
-python3 -c "import pygame; pygame.mixer.init(); print('Audio OK')"
-
-# Check ALSA/PulseAudio
-aplay -l  # List audio devices
+# Extract and run manually if needed
+./MyApp.AppImage --appimage-extract
+./squashfs-root/AppRun
 ```
 
-### Connection Issues
-```bash
-# Test server connectivity
-curl http://your-server:3000/api/music/minimal-status
+### Source Issues
+**"GTK4/Libadwaita not available"**
+- Install system packages (don't use pip for GTK)
+- Check: `python3 -c "import gi; gi.require_version('Gtk', '4.0')"`
 
-# Check if server endpoints are available
-curl http://your-server:3000/api/music/minimal-stream
+**"Cannot connect to server"**
+- Check server URL format: `https://domain.com` (no trailing slash)
+- Test: `curl https://your-server/backend/api/music/minimal-status`
+
+**"No audio output"**
+- Install GStreamer plugins: `gstreamer1.0-plugins-good gstreamer1.0-libav`
+- Test: `gst-launch-1.0 audiotestsrc ! autoaudiosink`
+
+### Debug Mode
+```bash
+export G_MESSAGES_DEBUG=all
+export GST_DEBUG=2
+python3 miu_gtk_player.py --server https://your-server.com
 ```
 
-### GUI Issues
-```bash
-# Check if tkinter is available
-python3 -c "import tkinter; print('GUI OK')"
+## Files
 
-# Run in console mode if GUI fails
-miu-client --console
-```
-
-## Development
-
-### Running from Source
-```bash
-python3 miu_client.py --server http://localhost:3000
-```
-
-### Dependencies for Development
-```bash
-pip3 install pygame Pillow pystray setuptools wheel
-```
+- `MyApp.AppImage` - Portable executable (24.5MB)
+- `miu_gtk_player.py` - Source code
+- `miu-gtk` - Launcher script
 
 ## License
 
 MIT License - see LICENSE file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## Support
-
-- **Issues**: Report bugs on GitHub
-- **Documentation**: Check the MIU project documentation
-- **Community**: Join the MIU Discord server

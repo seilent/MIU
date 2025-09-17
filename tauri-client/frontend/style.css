@@ -1,0 +1,340 @@
+/* Base styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+    color: white;
+    overflow-x: hidden;
+    min-height: 100vh;
+}
+
+.app {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.connection-status {
+    min-height: 24px;
+    font-size: 0.9rem;
+    opacity: 0.85;
+    text-align: center;
+    margin-bottom: 12px;
+    transition: opacity 0.3s ease;
+}
+
+.connection-status.info {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.connection-status.success {
+    color: #86efac;
+}
+
+.connection-status.error {
+    color: #fca5a5;
+}
+
+.player-section {
+    width: 100%;
+    max-width: 600px;
+}
+
+.player-card {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+}
+
+.album-art-container {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    flex-shrink: 0;
+    cursor: pointer;
+    border-radius: 12px;
+    overflow: hidden;
+    transition: transform 0.2s ease;
+}
+
+.album-art-container:hover {
+    transform: scale(1.02);
+}
+
+.album-art-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 12px;
+}
+
+.play-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    border-radius: 12px;
+}
+
+.album-art-container:hover .play-overlay {
+    opacity: 1;
+}
+
+.play-icon {
+    font-size: 48px;
+    color: white;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.track-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.now-playing-label {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.8);
+    margin-bottom: 4px;
+}
+
+.track-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: white;
+    line-height: 1.2;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.track-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.requester-avatar {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    opacity: 0.6;
+}
+
+.volume-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 200px;
+    justify-content: center;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.volume-slider-wrapper {
+    position: relative;
+    height: 180px;
+    width: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vertical-slider {
+    writing-mode: vertical-lr;
+    -webkit-appearance: slider-vertical;
+    appearance: none;
+    width: 4px;
+    height: 180px;
+    background: rgba(255, 255, 255, 0.1);
+    outline: none;
+    cursor: pointer;
+    transform: rotate(180deg);
+    border-radius: 2px;
+}
+
+.vertical-slider::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 4px;
+    background: white;
+    cursor: pointer;
+    border-radius: 0;
+    opacity: 0;
+    transition: opacity 0.3s ease, width 0.2s ease;
+}
+
+.volume-container:hover .vertical-slider::-webkit-slider-thumb {
+    opacity: 1;
+}
+
+.volume-container:hover .vertical-slider::-webkit-slider-thumb:hover {
+    width: 16px;
+}
+
+.vertical-slider::-moz-range-thumb {
+    width: 12px;
+    height: 4px;
+    background: white;
+    cursor: pointer;
+    border: none;
+    border-radius: 0;
+    opacity: 0;
+    transition: opacity 0.3s ease, width 0.2s ease;
+}
+
+.volume-container:hover .vertical-slider::-moz-range-thumb {
+    opacity: 1;
+}
+
+.volume-container:hover .vertical-slider::-moz-range-thumb:hover {
+    width: 16px;
+}
+
+.vertical-slider::-moz-range-track {
+    background: rgba(255, 255, 255, 0.1);
+    width: 4px;
+    border: none;
+    border-radius: 2px;
+}
+
+.volume-indicator {
+    position: absolute;
+    bottom: -24px;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.6);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+}
+
+.volume-container:hover .volume-indicator {
+    opacity: 1;
+}
+
+.no-track-message {
+    width: 100%;
+    max-width: 480px;
+    text-align: center;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    padding: 32px 24px;
+    backdrop-filter: blur(20px);
+    margin-top: 16px;
+}
+
+.no-track-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+}
+
+.default-album-art {
+    width: 200px;
+    height: 200px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.music-note {
+    font-size: 64px;
+    color: rgba(255, 255, 255, 0.3);
+}
+
+.no-track-message h2 {
+    font-size: 1.5rem;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.no-track-message p {
+    color: rgba(255, 255, 255, 0.6);
+    line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+    .player-card {
+        flex-direction: column;
+        gap: 20px;
+        padding: 20px;
+    }
+
+    .album-art-container {
+        width: 160px;
+        height: 160px;
+    }
+
+    .volume-container {
+        height: auto;
+        flex-direction: row;
+        width: 100%;
+        justify-content: center;
+    }
+
+    .volume-slider-wrapper {
+        width: 200px;
+        height: 24px;
+    }
+
+    .vertical-slider {
+        writing-mode: initial;
+        -webkit-appearance: none;
+        width: 200px;
+        height: 4px;
+        transform: none;
+    }
+
+    .volume-indicator {
+        position: static;
+        margin-top: 8px;
+    }
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}

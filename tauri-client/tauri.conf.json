@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "MIU Player",
+  "version": "1.0.0",
+  "identifier": "com.miu.player",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "frontendDist": "./dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "MIU Player",
+        "width": 450,
+        "height": 650,
+        "minWidth": 400,
+        "minHeight": 500,
+        "center": true,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "AudioVideo",
+    "copyright": "© 2024 MIU Team",
+    "shortDescription": "MIU Music Player",
+    "longDescription": "Cross-platform desktop music player for MIU music bot",
+    "targets": "all"
+  },
+  "plugins": {}
+}

@@ -1158,7 +1158,9 @@ class MPRISInterface:
             return metadata
 
         youtube_id = track.get('youtubeId', 'unknown')
-        metadata['mpris:trackid'] = GLib.Variant('o', f"/org/mpris/MediaPlayer2/track/{youtube_id}")
+        # Sanitize youtube_id for D-Bus object path (only alphanumeric and underscores allowed)
+        safe_youtube_id = ''.join(c if c.isalnum() else '_' for c in youtube_id)
+        metadata['mpris:trackid'] = GLib.Variant('o', f"/org/mpris/MediaPlayer2/track/{safe_youtube_id}")
         metadata['xesam:title'] = GLib.Variant('s', track.get('title', 'Unknown Track'))
 
         artist = track.get('requestedBy', {}).get('username')
