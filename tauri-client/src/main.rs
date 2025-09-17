@@ -26,9 +26,15 @@ async fn play_pause(
     let pause_handle = app_handle.clone();
 
     let mut guard = state.lock().await;
-    let currently_playing = guard.player_status == PlaybackStatus::Playing && !guard.user_paused;
 
-    if currently_playing {
+    // Logic: if we're currently playing (and not user-paused), then pause. Otherwise, resume.
+    let should_pause = !guard.user_paused && guard.player_status == PlaybackStatus::Playing;
+
+    println!("play_pause called: player_status={:?}, user_paused={}, should_pause={}",
+             guard.player_status, guard.user_paused, should_pause);
+
+    if should_pause {
+        println!("Taking PAUSE path - stopping playback");
         let position = guard.computed_position();
         guard.set_user_paused(true);
         guard.update_player_status(PlaybackStatus::Paused);
@@ -37,17 +43,22 @@ async fn play_pause(
         let snapshot = guard.snapshot();
         drop(guard);
 
-        audio_arc
-            .lock()
-            .await
-            .pause()
-            .await
-            .map_err(|e| e.to_string())?;
-
+        // Emit state update IMMEDIATELY for instant UI feedback
+        println!("Emitting player_state_updated event with isPlaying={}", snapshot.is_playing);
         pause_handle
             .emit("player_state_updated", snapshot)
             .map_err(|e| e.to_string())?;
+        println!("Event emitted successfully");
+
+        // Audio stop can happen after UI update (pause = stop for streaming)
+        audio_arc
+            .lock()
+            .await
+            .stop()
+            .await
+            .map_err(|e| e.to_string())?;
     } else {
+        println!("Taking RESUME path - calling server");
         guard.set_user_paused(false);
         drop(guard);
 

@@ -5,7 +5,7 @@
   "identifier": "com.miu.player",
   "build": {
     "beforeBuildCommand": "",
-    "beforeDevCommand": "",
+    "beforeDevCommand": "cp frontend/* dist/",
     "frontendDist": "./dist"
   },
   "app": {

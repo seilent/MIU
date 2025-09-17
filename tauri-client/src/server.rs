@@ -234,7 +234,8 @@ impl ServerClient {
 
         if let Some(status) = data.status {
             guard.update_server_status(status.clone());
-            if !guard.user_paused {
+            // Only sync player status if we're already playing, not on initial connection
+            if !guard.user_paused && guard.player_status == PlaybackStatus::Playing {
                 guard.update_player_status(PlaybackStatus::from_str(status));
             }
         }
@@ -434,7 +435,9 @@ impl ServerClient {
 
         let mut guard = state.lock().await;
         guard.update_server_status(&status.status);
-        if !guard.user_paused {
+        // Don't auto-start playback on initial status fetch - keep player stopped until user clicks play
+        // Only sync player status if we're already playing (not on startup)
+        if !guard.user_paused && guard.player_status == PlaybackStatus::Playing {
             guard.update_player_status(PlaybackStatus::from_str(&status.status));
         }
 
@@ -463,6 +466,9 @@ impl ServerClient {
             snapshot.volume
         );
         let _ = app_handle.emit("player_state_updated", snapshot.clone());
+
+        // TODO: Add autoplay logic when server is playing
+
         Ok(())
     }
 

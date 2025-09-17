@@ -186,6 +186,8 @@ function hideConnectionStatusWithDelay(delay = 1500) {
     }, delay);
 }
 
+let lastPlayPauseTime = 0;
+
 async function handlePlayPause() {
     if (!currentTrack) return;
     if (!invoke) {
@@ -193,10 +195,25 @@ async function handlePlayPause() {
         return;
     }
 
+    // Debounce: prevent rapid clicks
+    const now = Date.now();
+    if (now - lastPlayPauseTime < 1000) {  // 1 second debounce
+        console.log('Play/pause debounced - too soon after last click');
+        return;
+    }
+    lastPlayPauseTime = now;
+
+    // INSTANT UI update - don't wait for backend
+    isPlaying = !isPlaying;
+    updatePlayIcon();
+
     try {
-        await invoke('play_pause');
+        invoke('play_pause');
     } catch (error) {
         console.error('Play/pause failed:', error);
+        // Revert on error
+        isPlaying = !isPlaying;
+        updatePlayIcon();
     }
 }
 
