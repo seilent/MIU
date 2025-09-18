@@ -16,9 +16,14 @@ use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
 use std::sync::Arc;
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
+
+// Hold the tray icon handle so Linux tray implementations keep it alive.
+struct TrayHandle {
+    _tray_icon: TrayIcon,
+}
 
 #[tauri::command]
 async fn play_pause(
@@ -219,8 +224,15 @@ fn main() {
 
             server_clone.spawn_background(state_clone, audio_clone, app_handle);
 
-            if let Err(tray_err) = init_tray(app) {
-                println!("Failed to initialize tray icon: {}", tray_err);
+            match init_tray(app) {
+                Ok(tray_icon) => {
+                    app.manage(TrayHandle {
+                        _tray_icon: tray_icon,
+                    });
+                }
+                Err(tray_err) => {
+                    println!("Failed to initialize tray icon: {}", tray_err);
+                }
             }
 
             Ok(())
@@ -229,7 +241,7 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-fn init_tray(app: &mut tauri::App) -> tauri::Result<()> {
+fn init_tray(app: &mut tauri::App) -> tauri::Result<TrayIcon> {
     let show_item = MenuItemBuilder::with_id("show_main", "Show Player").build(app)?;
     let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
@@ -278,6 +290,6 @@ fn init_tray(app: &mut tauri::App) -> tauri::Result<()> {
         tray_builder = tray_builder.icon(icon);
     }
 
-    tray_builder.build(app)?;
-    Ok(())
+    let tray_icon = tray_builder.build(app)?;
+    Ok(tray_icon)
 }

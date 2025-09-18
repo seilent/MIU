@@ -2,6 +2,7 @@ let invoke = null;
 let listen = null;
 let appWindow = null;
 let windowModule = null;
+let webviewWindowModule = null;
 
 function resolveTauriApis() {
     const namespace = window.__TAURI__;
@@ -17,8 +18,11 @@ function resolveTauriApis() {
 
     let currentWindow = null;
     try {
-        const candidate = namespace?.window;
-        if (candidate) {
+        const windowCandidates = [namespace?.window, namespace?.webviewWindow];
+        for (const candidate of windowCandidates) {
+            if (!candidate || currentWindow) {
+                continue;
+            }
             if (typeof candidate.getCurrent === 'function') {
                 currentWindow = candidate.getCurrent();
             } else if (candidate.appWindow) {
@@ -39,6 +43,7 @@ function resolveTauriApis() {
         invoke: resolvedInvoke,
         listen: namespace?.event?.listen || namespace?.tauri?.listen || null,
         windowModule: namespace?.window || null,
+        webviewWindowModule: namespace?.webviewWindow || null,
         appWindow: currentWindow || null,
     };
 }
@@ -118,6 +123,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         invoke = apis.invoke;
         listen = apis.listen;
         windowModule = apis.windowModule;
+        webviewWindowModule = apis.webviewWindowModule;
         appWindow = await resolveAppWindowHandle(apis);
 
         if (appWindow && typeof appWindow.onShow === 'function') {
@@ -165,6 +171,9 @@ async function resolveAppWindowHandle(apis) {
     if (apis.windowModule?.appWindow) {
         candidates.push(apis.windowModule.appWindow);
     }
+    if (apis.webviewWindowModule?.appWindow) {
+        candidates.push(apis.webviewWindowModule.appWindow);
+    }
     if (typeof apis.windowModule?.getCurrent === 'function') {
         candidates.push(apis.windowModule.getCurrent());
     }
@@ -173,6 +182,15 @@ async function resolveAppWindowHandle(apis) {
         typeof apis.windowModule.WebviewWindow.getCurrent === 'function'
     ) {
         candidates.push(apis.windowModule.WebviewWindow.getCurrent());
+    }
+    if (typeof apis.webviewWindowModule?.getCurrent === 'function') {
+        candidates.push(apis.webviewWindowModule.getCurrent());
+    }
+    if (
+        apis.webviewWindowModule?.WebviewWindow &&
+        typeof apis.webviewWindowModule.WebviewWindow.getCurrent === 'function'
+    ) {
+        candidates.push(apis.webviewWindowModule.WebviewWindow.getCurrent());
     }
 
     for (const candidate of candidates) {
@@ -195,15 +213,51 @@ async function resolveAppWindowHandle(apis) {
     return null;
 }
 
+async function ensureAppWindow() {
+    if (appWindow) {
+        return appWindow;
+    }
+
+    try {
+        let apis = resolveTauriApis();
+        if (!apis) {
+            apis = await waitForTauriApis().catch((error) => {
+                console.warn('ensureAppWindow: waitForTauriApis failed', error);
+                return null;
+            });
+        }
+
+        if (!apis) {
+            return null;
+        }
+
+        invoke = apis.invoke || invoke;
+        listen = apis.listen || listen;
+        windowModule = apis.windowModule || windowModule;
+        webviewWindowModule = apis.webviewWindowModule || webviewWindowModule;
+
+        const resolved = await resolveAppWindowHandle(apis);
+        if (resolved) {
+            appWindow = resolved;
+            return resolved;
+        }
+    } catch (error) {
+        console.error('ensureAppWindow: unable to resolve app window', error);
+    }
+
+    return null;
+}
+
 async function handleMinimizeClick(event) {
     event?.stopPropagation?.();
-    if (!appWindow) {
+    const windowHandle = await ensureAppWindow();
+    if (!windowHandle) {
         console.warn('handleMinimizeClick: missing appWindow');
         return;
     }
 
     try {
-        await appWindow.minimize?.();
+        await windowHandle.minimize?.();
     } catch (error) {
         console.error('Failed to minimize window', error);
     }
@@ -211,13 +265,14 @@ async function handleMinimizeClick(event) {
 
 async function handleCloseClick(event) {
     event?.stopPropagation?.();
-    if (!appWindow) {
+    const windowHandle = await ensureAppWindow();
+    if (!windowHandle) {
         console.warn('handleCloseClick: missing appWindow');
         return;
     }
 
     try {
-        await appWindow.close?.();
+        await windowHandle.close?.();
     } catch (error) {
         console.error('Failed to close window', error);
     }
@@ -225,18 +280,23 @@ async function handleCloseClick(event) {
 
 async function handleTrayClick(event) {
     event?.stopPropagation?.();
-    if (!appWindow) {
+    const windowHandle = await ensureAppWindow();
+    if (!windowHandle) {
         console.warn('handleTrayClick: missing appWindow');
         return;
     }
 
     try {
-        await appWindow.hide?.();
-        if (typeof appWindow.setSkipTaskbar === 'function') {
-            await appWindow.setSkipTaskbar(true);
-        }
+        await sendWindowToTray(windowHandle);
     } catch (error) {
         console.error('Failed to send window to tray', error);
+    }
+}
+
+async function sendWindowToTray(windowHandle) {
+    await windowHandle.hide?.();
+    if (typeof windowHandle.setSkipTaskbar === 'function') {
+        await windowHandle.setSkipTaskbar(true);
     }
 }
 
