@@ -20,7 +20,7 @@
         "minWidth": 400,
         "minHeight": 500,
         "center": true,
-        "decorations": true,
+        "decorations": false,
         "alwaysOnTop": false,
         "skipTaskbar": false
       }
@@ -35,7 +35,11 @@
     "copyright": "© 2024 MIU Team",
     "shortDescription": "MIU Music Player",
     "longDescription": "Cross-platform desktop music player for MIU music bot",
-    "targets": ["app"]
+    "targets": ["app"],
+    "icon": [
+      "icons/tray-icon.ico",
+      "icons/icon.png"
+    ]
   },
   "plugins": {}
 }

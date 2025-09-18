@@ -209,9 +209,7 @@ impl ServerClient {
                     .await
             }
             "heartbeat" => Ok(()),
-            _other => {
-                Ok(())
-            }
+            _other => Ok(()),
         }
     }
 
@@ -257,7 +255,6 @@ impl ServerClient {
 
         // If track changed, immediately start playback like the frontend does
         if track_changed {
-
             // Get the backend URL and check if we should start playing
             let should_start_playback = {
                 let guard = state.lock().await;
@@ -271,16 +268,17 @@ impl ServerClient {
                 let app_handle_clone = app_handle.clone();
 
                 tokio::spawn(async move {
-                    match Arc::new(self_clone).sync_play_now(
-                        state_clone.clone(),
-                        audio.clone(),
-                        app_handle_clone,
-                        "".to_string() // We'll get backend_url from state
-                    ).await {
-                        Ok(()) => {
-                        }
-                        Err(_e) => {
-                        }
+                    match Arc::new(self_clone)
+                        .sync_play_now(
+                            state_clone.clone(),
+                            audio.clone(),
+                            app_handle_clone,
+                            "".to_string(), // We'll get backend_url from state
+                        )
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(_e) => {}
                     }
                 });
             } else {
@@ -328,11 +326,11 @@ impl ServerClient {
                 Some(current) if current.youtube_id == track_id => {
                     // Same track - check if we need to restart playback
                     guard.player_status != PlaybackStatus::Playing
-                },
+                }
                 Some(_current) => {
                     // Different track - always restart
                     true
-                },
+                }
                 None => {
                     // No current track - this shouldn't happen with sync_play
                     true
@@ -375,8 +373,7 @@ impl ServerClient {
                             backend_for_spawn,
                         )
                         .await
-                    {
-                    }
+                    {}
                 }
             });
             Ok(())
@@ -400,8 +397,9 @@ impl ServerClient {
             let mut guard = state.lock().await;
 
             // Verify we have track metadata (should be from SSE state event)
-            let current_track = guard.current_track.as_ref()
-                .ok_or_else(|| anyhow!("No current track for sync_play - SSE state event missing?"))?;
+            let current_track = guard.current_track.as_ref().ok_or_else(|| {
+                anyhow!("No current track for sync_play - SSE state event missing?")
+            })?;
 
             // Extract track info before mutable operations to avoid borrowing conflicts
             let track_info = format!("{} - {}", current_track.youtube_id, current_track.title);
@@ -427,65 +425,78 @@ impl ServerClient {
         let ts_suffix = current_time_millis() as u128;
         let full_stream_url = format!("{}?ts={}", stream_url, ts_suffix);
 
-
         {
+            let mut guard = state.lock().await;
+            guard.prepare_sync_preview(playback_position, duration_opt);
+            let snapshot = guard.snapshot();
+            drop(guard);
+            let _ = app_handle.emit("player_state_updated", snapshot);
+        }
+
+        let play_result = {
             let mut audio_manager = audio.lock().await;
 
             // Set up track end callback to handle completion
             let state_for_callback = state.clone();
             let app_handle_for_callback = app_handle.clone();
-            audio_manager.set_track_end_callback(move || {
+            audio_manager
+                .set_track_end_callback(move || {
+                    // Update state to reflect track completion and trigger next track
+                    let state_clone = state_for_callback.clone();
+                    let app_handle_clone = app_handle_for_callback.clone();
 
-                // Update state to reflect track completion and trigger next track
-                let state_clone = state_for_callback.clone();
-                let app_handle_clone = app_handle_for_callback.clone();
+                    tokio::spawn(async move {
+                        let (backend_url, should_continue) = {
+                            let mut guard = state_clone.lock().await;
 
-                tokio::spawn(async move {
-                    let (backend_url, should_continue) = {
-                        let mut guard = state_clone.lock().await;
+                            // Set status to stopped and clear position
+                            guard.update_player_status(PlaybackStatus::Stopped);
+                            guard.clear_sync();
 
-                        // Set status to stopped and clear position
-                        guard.update_player_status(PlaybackStatus::Stopped);
-                        guard.clear_sync();
+                            let snapshot = guard.snapshot();
+                            let backend_url = guard.backend_url();
+                            let should_continue = !guard.user_paused; // Only continue if user hasn't paused
 
-                        let snapshot = guard.snapshot();
-                        let backend_url = guard.backend_url();
-                        let should_continue = !guard.user_paused; // Only continue if user hasn't paused
+                            drop(guard);
 
-                        drop(guard);
+                            // Notify UI of track completion immediately
+                            let _ = app_handle_clone.emit("player_state_updated", snapshot);
 
-                        // Notify UI of track completion immediately
-                        let _ = app_handle_clone.emit("player_state_updated", snapshot);
+                            (backend_url, should_continue)
+                        };
 
-                        (backend_url, should_continue)
-                    };
-
-                    if should_continue {
-                        if let Some(backend_url) = backend_url {
-
-                            // Simulate a play request to trigger next track
-                            let client = reqwest::Client::new();
-                            match client.post(&format!("{}/api/music/play", backend_url))
-                                .send()
-                                .await
-                            {
-                                Ok(response) if response.status().is_success() => {
-                                }
-                                Ok(_response) => {
-                                }
-                                Err(_e) => {
+                        if should_continue {
+                            if let Some(backend_url) = backend_url {
+                                // Simulate a play request to trigger next track
+                                let client = reqwest::Client::new();
+                                match client
+                                    .post(&format!("{}/api/music/play", backend_url))
+                                    .send()
+                                    .await
+                                {
+                                    Ok(response) if response.status().is_success() => {}
+                                    Ok(_response) => {}
+                                    Err(_e) => {}
                                 }
                             }
-                        } else {
                         }
-                    } else {
-                    }
-                });
-            }).await;
+                    });
+                })
+                .await;
 
             audio_manager
                 .play_from(&full_stream_url, playback_position, duration_opt)
-                .await?;
+                .await
+        };
+
+        if let Err(play_err) = play_result {
+            let mut guard = state.lock().await;
+            guard.update_player_status(PlaybackStatus::Stopped);
+            guard.clear_sync();
+            let snapshot = guard.snapshot();
+            drop(guard);
+            let _ = app_handle.emit("player_state_updated", snapshot);
+            return Err(play_err);
         }
 
         {
@@ -493,14 +504,11 @@ impl ServerClient {
             guard.update_player_status(PlaybackStatus::Playing);
             guard.set_user_paused(false);
             guard.update_sync(playback_position, duration_opt);
+            let snapshot = guard.snapshot();
+            drop(guard);
+            let _ = app_handle.emit("player_state_updated", snapshot);
         }
 
-        let snapshot = {
-            let guard = state.lock().await;
-            guard.snapshot()
-        };
-
-        let _ = app_handle.emit("player_state_updated", snapshot);
         Ok(())
     }
 

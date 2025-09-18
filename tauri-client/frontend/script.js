@@ -1,5 +1,7 @@
 let invoke = null;
 let listen = null;
+let appWindow = null;
+let windowModule = null;
 
 function resolveTauriApis() {
     const namespace = window.__TAURI__;
@@ -13,10 +15,31 @@ function resolveTauriApis() {
         return null;
     }
 
+    let currentWindow = null;
+    try {
+        const candidate = namespace?.window;
+        if (candidate) {
+            if (typeof candidate.getCurrent === 'function') {
+                currentWindow = candidate.getCurrent();
+            } else if (candidate.appWindow) {
+                currentWindow = candidate.appWindow;
+            } else if (
+                candidate.WebviewWindow &&
+                typeof candidate.WebviewWindow.getCurrent === 'function'
+            ) {
+                currentWindow = candidate.WebviewWindow.getCurrent();
+            }
+        }
+    } catch (error) {
+        console.warn('resolveTauriApis: failed to resolve current window', error);
+    }
+
     console.debug('resolveTauriApis namespace snapshot', namespace);
     return {
         invoke: resolvedInvoke,
         listen: namespace?.event?.listen || namespace?.tauri?.listen || null,
+        windowModule: namespace?.window || null,
+        appWindow: currentWindow || null,
     };
 }
 
@@ -70,6 +93,9 @@ const requesterAvatar = document.getElementById('requester-avatar');
 
 const volumeSlider = document.getElementById('volume-slider');
 const volumeIndicator = document.getElementById('volume-indicator');
+const minimizeButton = document.getElementById('minimize-button');
+const closeButton = document.getElementById('close-button');
+const trayButton = document.getElementById('tray-button');
 
 const DEFAULT_ALBUM_ART = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><rect fill='%23222222' width='200' height='200'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23555555' font-size='48'>♪</text></svg>";
 const DEFAULT_SERVER_URL = 'https://miu.gacha.boo';
@@ -91,6 +117,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         const apis = await waitForTauriApis();
         invoke = apis.invoke;
         listen = apis.listen;
+        windowModule = apis.windowModule;
+        appWindow = await resolveAppWindowHandle(apis);
+
+        if (appWindow && typeof appWindow.onShow === 'function') {
+            try {
+                await appWindow.onShow(async () => {
+                    if (typeof appWindow.setSkipTaskbar === 'function') {
+                        await appWindow.setSkipTaskbar(false);
+                    }
+                });
+            } catch (error) {
+                console.warn('Failed to attach onShow handler', error);
+            }
+        }
 
         console.debug('Tauri APIs resolved', { hasInvoke: !!invoke, hasListen: !!listen });
 
@@ -110,6 +150,94 @@ function initializeEventListeners() {
     albumArtContainer.addEventListener('click', handlePlayPause);
     volumeSlider.addEventListener('input', handleVolumeChange);
     volumeSlider.addEventListener('mousemove', updateVolumeIndicator);
+    minimizeButton?.addEventListener('click', handleMinimizeClick);
+    closeButton?.addEventListener('click', handleCloseClick);
+    trayButton?.addEventListener('click', handleTrayClick);
+}
+
+async function resolveAppWindowHandle(apis) {
+    if (!apis) return null;
+
+    const candidates = [];
+    if (apis.appWindow) {
+        candidates.push(apis.appWindow);
+    }
+    if (apis.windowModule?.appWindow) {
+        candidates.push(apis.windowModule.appWindow);
+    }
+    if (typeof apis.windowModule?.getCurrent === 'function') {
+        candidates.push(apis.windowModule.getCurrent());
+    }
+    if (
+        apis.windowModule?.WebviewWindow &&
+        typeof apis.windowModule.WebviewWindow.getCurrent === 'function'
+    ) {
+        candidates.push(apis.windowModule.WebviewWindow.getCurrent());
+    }
+
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        if (typeof candidate.then === 'function') {
+            try {
+                const resolved = await candidate;
+                if (resolved) {
+                    return resolved;
+                }
+            } catch (error) {
+                console.warn('resolveAppWindowHandle: async candidate failed', error);
+            }
+            continue;
+        }
+
+        return candidate;
+    }
+
+    return null;
+}
+
+async function handleMinimizeClick(event) {
+    event?.stopPropagation?.();
+    if (!appWindow) {
+        console.warn('handleMinimizeClick: missing appWindow');
+        return;
+    }
+
+    try {
+        await appWindow.minimize?.();
+    } catch (error) {
+        console.error('Failed to minimize window', error);
+    }
+}
+
+async function handleCloseClick(event) {
+    event?.stopPropagation?.();
+    if (!appWindow) {
+        console.warn('handleCloseClick: missing appWindow');
+        return;
+    }
+
+    try {
+        await appWindow.close?.();
+    } catch (error) {
+        console.error('Failed to close window', error);
+    }
+}
+
+async function handleTrayClick(event) {
+    event?.stopPropagation?.();
+    if (!appWindow) {
+        console.warn('handleTrayClick: missing appWindow');
+        return;
+    }
+
+    try {
+        await appWindow.hide?.();
+        if (typeof appWindow.setSkipTaskbar === 'function') {
+            await appWindow.setSkipTaskbar(true);
+        }
+    } catch (error) {
+        console.error('Failed to send window to tray', error);
+    }
 }
 
 function initializeTauriListeners() {

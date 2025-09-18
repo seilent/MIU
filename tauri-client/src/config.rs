@@ -57,5 +57,4 @@ impl AppConfig {
 
         Ok(config_dir.join("miu-player").join("config.json"))
     }
-
 }

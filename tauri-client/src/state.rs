@@ -166,7 +166,6 @@ impl AppState {
         }
     }
 
-
     pub fn backend_url(&self) -> Option<String> {
         self.backend_url.clone()
     }
@@ -247,6 +246,15 @@ impl AppState {
         }
         self.last_sync_instant = Some(Instant::now());
         self.last_sync_wallclock = Some(SystemTime::now());
+    }
+
+    pub fn prepare_sync_preview(&mut self, position: f64, duration: Option<f64>) {
+        self.synced_position = position.max(0.0);
+        if let Some(dur) = duration {
+            self.track_duration = dur.max(0.0);
+        }
+        self.last_sync_instant = None;
+        self.last_sync_wallclock = None;
     }
 
     pub fn clear_sync(&mut self) {

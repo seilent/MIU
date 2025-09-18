@@ -12,37 +12,48 @@
             <div id="connection-status" class="connection-status hidden"></div>
 
             <div class="player-card">
-                <div class="album-art-container" id="album-art-container">
-                    <img id="album-art" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'&gt;&lt;rect fill='%23222222' width='200' height='200'/&gt;&lt;text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23555555' font-size='48'&gt;&#9835;&lt;/text&gt;&lt;/svg&gt;" alt="Album Art" />
-                    <div class="play-overlay" id="play-overlay">
-                        <div class="play-icon" id="play-icon">▶</div>
+                <div class="window-chrome" data-tauri-drag-region>
+                    <div class="window-title">MIU Player</div>
+                    <div class="window-controls" data-tauri-drag-region="false">
+                        <button id="tray-button" class="window-button" data-tauri-drag-region="false" aria-label="Hide to tray">◧</button>
+                        <button id="minimize-button" class="window-button" data-tauri-drag-region="false" aria-label="Minimize">–</button>
+                        <button id="close-button" class="window-button window-button--close" data-tauri-drag-region="false" aria-label="Close">×</button>
                     </div>
                 </div>
 
-                <div class="track-info">
-                    <h2 class="now-playing-label">Now Playing</h2>
-                    <h3 class="track-title" id="track-title">No track playing</h3>
-                    <div class="track-meta">
-                        <span class="requested-by">
-                            Requested by <span id="requester-name">—</span>
-                        </span>
-                        <img id="requester-avatar" class="requester-avatar hidden" alt="Avatar" />
+                <div class="player-body">
+                    <div class="album-art-container" id="album-art-container">
+                        <img id="album-art" src="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'&gt;&lt;rect fill='%23222222' width='200' height='200'/&gt;&lt;text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23555555' font-size='48'&gt;&#9835;&lt;/text&gt;&lt;/svg&gt;" alt="Album Art" />
+                        <div class="play-overlay" id="play-overlay">
+                            <div class="play-icon" id="play-icon">▶</div>
+                        </div>
                     </div>
-                </div>
 
-                <div class="volume-container">
-                    <div class="volume-slider-wrapper">
-                        <input
-                            type="range"
-                            id="volume-slider"
-                            class="volume-slider vertical-slider"
-                            min="0"
-                            max="1"
-                            step="0.01"
-                            value="0.8"
-                        />
+                    <div class="track-info">
+                        <h2 class="now-playing-label">Now Playing</h2>
+                        <h3 class="track-title" id="track-title">No track playing</h3>
+                        <div class="track-meta">
+                            <span class="requested-by">
+                                Requested by <span id="requester-name">—</span>
+                            </span>
+                            <img id="requester-avatar" class="requester-avatar hidden" alt="Avatar" />
+                        </div>
                     </div>
-                    <div class="volume-indicator" id="volume-indicator">80%</div>
+
+                    <div class="volume-container">
+                        <div class="volume-slider-wrapper">
+                            <input
+                                type="range"
+                                id="volume-slider"
+                                class="volume-slider vertical-slider"
+                                min="0"
+                                max="1"
+                                step="0.01"
+                                value="0.8"
+                            />
+                        </div>
+                        <div class="volume-indicator" id="volume-indicator">80%</div>
+                    </div>
                 </div>
             </div>
         </div>

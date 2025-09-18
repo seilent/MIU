@@ -14,7 +14,10 @@ use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
 // use mpris::MprisManager;
 // Removed unused PathBuf import
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::image::Image;
+use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 #[tauri::command]
@@ -216,8 +219,65 @@ fn main() {
 
             server_clone.spawn_background(state_clone, audio_clone, app_handle);
 
+            if let Err(tray_err) = init_tray(app) {
+                println!("Failed to initialize tray icon: {}", tray_err);
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn init_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show_item = MenuItemBuilder::with_id("show_main", "Show Player").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+
+    let tray_menu = MenuBuilder::new(app)
+        .item(&show_item)
+        .separator()
+        .item(&quit_item)
+        .build()?;
+
+    let mut tray_builder = TrayIconBuilder::new()
+        .menu(&tray_menu)
+        .on_menu_event(|app_handle, event: MenuEvent| match event.id().as_ref() {
+            "show_main" => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = window.set_skip_taskbar(false);
+                }
+            }
+            "quit" => {
+                app_handle.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event: TrayIconEvent| match event {
+            TrayIconEvent::Click { button, .. } if button == MouseButton::Left => {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = window.set_skip_taskbar(false);
+                }
+            }
+            TrayIconEvent::DoubleClick { .. } => {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = window.set_skip_taskbar(false);
+                }
+            }
+            _ => {}
+        });
+
+    if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/tray-icon.ico")) {
+        tray_builder = tray_builder.icon(icon);
+    } else if let Some(icon) = app.default_window_icon().cloned() {
+        tray_builder = tray_builder.icon(icon);
+    }
+
+    tray_builder.build(app)?;
+    Ok(())
 }
