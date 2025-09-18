@@ -5,10 +5,42 @@
     box-sizing: border-box;
 }
 
+:root {
+    --miu-background-start: #1a1a1a;
+    --miu-background-end: #2d2d2d;
+    --miu-surface: rgba(255, 255, 255, 0.05);
+    --miu-surface-border: rgba(255, 255, 255, 0.1);
+    --miu-surface-shadow: rgba(0, 0, 0, 0.3);
+    --miu-text-primary: #ffffff;
+    --miu-text-secondary: rgba(255, 255, 255, 0.55);
+    --miu-text-muted: rgba(255, 255, 255, 0.7);
+    --miu-text-dim: rgba(255, 255, 255, 0.6);
+    --miu-placeholder: rgba(255, 255, 255, 0.3);
+    --miu-success: #86efac;
+    --miu-error: #fca5a5;
+    --miu-accent: #86efac;
+    --miu-accent-soft: rgba(255, 255, 255, 0.08);
+    --miu-accent-soft-hover: rgba(255, 255, 255, 0.18);
+    --miu-accent-soft-active: rgba(255, 255, 255, 0.25);
+    --miu-button-foreground: rgba(255, 255, 255, 0.85);
+    --miu-error-soft: rgba(252, 165, 165, 0.4);
+    --miu-error-soft-strong: rgba(252, 165, 165, 0.58);
+    --miu-overlay: rgba(0, 0, 0, 0.6);
+    --miu-scroll-track: rgba(255, 255, 255, 0.05);
+    --miu-scroll-thumb: rgba(255, 255, 255, 0.2);
+    --miu-scroll-thumb-hover: rgba(255, 255, 255, 0.3);
+    --miu-slider-track: rgba(255, 255, 255, 0.1);
+    --miu-slider-thumb: #ffffff;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-    color: white;
+    background: linear-gradient(
+        135deg,
+        var(--miu-background-start) 0%,
+        var(--miu-background-end) 100%
+    );
+    color: var(--miu-text-primary);
     overflow-x: hidden;
     min-height: 100vh;
 }
@@ -35,15 +67,15 @@ body {
 }
 
 .connection-status.info {
-    color: rgba(255, 255, 255, 0.7);
+    color: var(--miu-text-muted);
 }
 
 .connection-status.success {
-    color: #86efac;
+    color: var(--miu-success);
 }
 
 .connection-status.error {
-    color: #fca5a5;
+    color: var(--miu-error);
 }
 
 .player-section {
@@ -55,12 +87,12 @@ body {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--miu-surface);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--miu-surface-border);
     border-radius: 16px;
     padding: 20px;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 20px 40px var(--miu-surface-shadow);
 }
 
 .player-body {
@@ -83,7 +115,7 @@ body {
     font-size: 0.9rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.55);
+    color: var(--miu-text-secondary);
     pointer-events: none;
 }
 
@@ -98,8 +130,8 @@ body {
     height: 22px;
     border: none;
     border-radius: 6px;
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.8);
+    background: var(--miu-accent-soft);
+    color: var(--miu-button-foreground);
     font-size: 0.8rem;
     line-height: 1;
     font-family: inherit;
@@ -112,16 +144,16 @@ body {
 }
 
 .window-button:hover {
-    background: rgba(255, 255, 255, 0.18);
+    background: var(--miu-accent-soft-hover);
 }
 
 .window-button:active {
-    background: rgba(255, 255, 255, 0.25);
+    background: var(--miu-accent-soft-active);
 }
 
 .window-button--close:hover {
-    background: rgba(252, 165, 165, 0.4);
-    color: white;
+    background: var(--miu-error-soft);
+    color: var(--miu-text-primary);
 }
 
 .album-art-container {
@@ -149,7 +181,7 @@ body {
 .play-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--miu-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -164,7 +196,7 @@ body {
 
 .play-icon {
     font-size: 48px;
-    color: white;
+    color: var(--miu-text-primary);
     text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
 
@@ -179,14 +211,14 @@ body {
 .now-playing-label {
     font-size: 1.1rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.8);
+    color: var(--miu-text-muted);
     margin-bottom: 4px;
 }
 
 .track-title {
     font-size: 1.5rem;
     font-weight: 700;
-    color: white;
+    color: var(--miu-text-primary);
     line-height: 1.2;
     margin-bottom: 8px;
     white-space: nowrap;
@@ -199,7 +231,7 @@ body {
     align-items: center;
     gap: 8px;
     font-size: 0.9rem;
-    color: rgba(255, 255, 255, 0.6);
+    color: var(--miu-text-dim);
 }
 
 .requester-avatar {
@@ -233,7 +265,7 @@ body {
     appearance: none;
     width: 180px;
     height: 4px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--miu-slider-track);
     outline: none;
     cursor: pointer;
     border-radius: 2px;
@@ -245,7 +277,7 @@ body {
     appearance: none;
     width: 12px;
     height: 4px;
-    background: white;
+    background: var(--miu-slider-thumb);
     cursor: pointer;
     border-radius: 0;
     opacity: 0;
@@ -263,7 +295,7 @@ body {
 .vertical-slider::-moz-range-thumb {
     width: 12px;
     height: 4px;
-    background: white;
+    background: var(--miu-slider-thumb);
     cursor: pointer;
     border: none;
     border-radius: 0;
@@ -280,7 +312,7 @@ body {
 }
 
 .vertical-slider::-moz-range-track {
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--miu-slider-track);
     width: 4px;
     border: none;
     border-radius: 2px;
@@ -290,7 +322,7 @@ body {
     position: absolute;
     bottom: -24px;
     font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.6);
+    color: var(--miu-text-dim);
     opacity: 0;
     transition: opacity 0.3s ease;
     pointer-events: none;
@@ -304,8 +336,8 @@ body {
     width: 100%;
     max-width: 480px;
     text-align: center;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--miu-surface);
+    border: 1px solid var(--miu-surface-border);
     border-radius: 16px;
     padding: 32px 24px;
     backdrop-filter: blur(20px);
@@ -322,27 +354,80 @@ body {
 .default-album-art {
     width: 200px;
     height: 200px;
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--miu-surface);
     border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--miu-surface-border);
 }
 
 .music-note {
     font-size: 64px;
-    color: rgba(255, 255, 255, 0.3);
+    color: var(--miu-placeholder);
 }
 
 .no-track-message h2 {
     font-size: 1.5rem;
-    color: rgba(255, 255, 255, 0.85);
+    color: var(--miu-text-muted);
 }
 
 .no-track-message p {
-    color: rgba(255, 255, 255, 0.6);
+    color: var(--miu-text-dim);
     line-height: 1.5;
+}
+
+:root.hyprland {
+    --miu-surface-shadow: rgba(0, 0, 0, 0.22);
+}
+
+:root.hyprland .app {
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+:root.hyprland .player-section {
+    width: 100%;
+    max-width: 760px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+:root.hyprland .player-card {
+    width: 100%;
+    max-height: 720px;
+    margin: 0 auto;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    background: none;
+    padding: 0;
+    gap: 24px;
+}
+
+:root.hyprland .player-body {
+    padding: 0;
+    flex: 1;
+}
+
+:root.hyprland .connection-status {
+    margin: 0 0 16px 0;
+}
+
+:root.hyprland .window-controls {
+    display: none;
+}
+
+:root.hyprland .window-chrome {
+    justify-content: flex-start;
+    padding: 0;
+}
+
+:root.hyprland .window-title {
+    display: none;
 }
 
 @media (max-width: 640px) {
@@ -414,19 +499,25 @@ body {
     }
 }
 
+@media (min-aspect-ratio: 4/3) and (min-width: 800px) {
+    .app {
+        align-items: center;
+    }
+}
+
 ::-webkit-scrollbar {
     width: 8px;
 }
 
 ::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--miu-scroll-track);
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
+    background: var(--miu-scroll-thumb);
     border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
+    background: var(--miu-scroll-thumb-hover);
 }

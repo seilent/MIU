@@ -5,16 +5,26 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "AppConfig::default_volume")]
     pub volume: f32,
+    #[serde(default)]
+    pub theme_css_path: Option<String>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { volume: 0.8 }
+        Self {
+            volume: Self::default_volume(),
+            theme_css_path: None,
+        }
     }
 }
 
 impl AppConfig {
+    const fn default_volume() -> f32 {
+        0.8
+    }
+
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
 

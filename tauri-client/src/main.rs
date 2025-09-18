@@ -3,14 +3,17 @@
 
 mod audio;
 mod config;
+mod hyprland;
 mod server;
 mod state;
+mod theme;
 // mod mpris;
 
 use audio::AudioManager;
 use config::AppConfig;
 use server::ServerClient;
 use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
+use theme::ThemeOverrides;
 // use mpris::MprisManager;
 // Removed unused PathBuf import
 use std::sync::Arc;
@@ -169,6 +172,19 @@ async fn connect_to_server(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_hyprland_theme() -> Result<Option<hyprland::HyprlandTheme>, String> {
+    Ok(hyprland::detect_theme())
+}
+
+#[tauri::command]
+async fn get_theme_overrides(
+    config: State<'_, Arc<Mutex<AppConfig>>>,
+) -> Result<Option<ThemeOverrides>, String> {
+    let config_clone = config.lock().await.clone();
+    Ok(theme::load_theme_overrides(&config_clone))
+}
+
 // FFmpeg-related commands removed - using HTTP streaming instead
 
 fn main() {
@@ -202,13 +218,34 @@ fn main() {
             set_volume,
             get_current_track,
             get_player_state,
-            connect_to_server
+            connect_to_server,
+            get_hyprland_theme,
+            get_theme_overrides
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let state_clone = app_state.clone();
             let audio_clone = audio_manager.clone();
             let server_clone = server_client.clone();
+
+            let hypr_theme = hyprland::detect_theme();
+
+            if let Some(theme) = hypr_theme.clone() {
+                println!("Hyprland detected; applying theme overrides: {:?}", theme);
+                if let Err(err) = app.emit("hyprland_theme", &theme) {
+                    println!("Failed to emit hyprland_theme event: {}", err);
+                }
+            }
+
+            if let Some(theme_overrides) = theme::load_theme_overrides(&config) {
+                println!(
+                    "Loaded CSS theme overrides from {}",
+                    theme_overrides.source.as_str()
+                );
+                if let Err(err) = app.emit("theme_overrides", &theme_overrides) {
+                    println!("Failed to emit theme_overrides event: {}", err);
+                }
+            }
 
             // Initialize volume from config in the async context
             let volume = config.volume;
@@ -224,15 +261,19 @@ fn main() {
 
             server_clone.spawn_background(state_clone, audio_clone, app_handle);
 
-            match init_tray(app) {
-                Ok(tray_icon) => {
-                    app.manage(TrayHandle {
-                        _tray_icon: tray_icon,
-                    });
+            if hypr_theme.is_none() {
+                match init_tray(app) {
+                    Ok(tray_icon) => {
+                        app.manage(TrayHandle {
+                            _tray_icon: tray_icon,
+                        });
+                    }
+                    Err(tray_err) => {
+                        println!("Failed to initialize tray icon: {}", tray_err);
+                    }
                 }
-                Err(tray_err) => {
-                    println!("Failed to initialize tray icon: {}", tray_err);
-                }
+            } else {
+                println!("Hyprland detected; skipping tray initialization");
             }
 
             Ok(())

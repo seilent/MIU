@@ -113,6 +113,149 @@ let isConnected = false;
 let playerStateInterval = null;
 let reconnectTimeout = null;
 
+function setCssVariable(name, value) {
+    if (!name || typeof value === 'undefined' || value === null) {
+        return;
+    }
+    document.documentElement.style.setProperty(name, value);
+}
+
+function normalizeHexColor(input) {
+    if (typeof input !== 'string') {
+        return null;
+    }
+
+    let hex = input.trim().toLowerCase();
+    if (!hex) {
+        return null;
+    }
+
+    if (hex.startsWith('0x')) {
+        hex = hex.slice(2);
+    }
+
+    if (hex.startsWith('#')) {
+        hex = hex.slice(1);
+    }
+
+    if (hex.length === 3) {
+        hex = hex.split('').map((char) => char + char).join('');
+    }
+
+    if (hex.length !== 6) {
+        return null;
+    }
+
+    return `#${hex}`;
+}
+
+function hexToRgba(hex, alpha = 1) {
+    const normalized = normalizeHexColor(hex);
+    if (!normalized) {
+        return null;
+    }
+
+    const r = parseInt(normalized.slice(1, 3), 16);
+    const g = parseInt(normalized.slice(3, 5), 16);
+    const b = parseInt(normalized.slice(5, 7), 16);
+
+    const clampedAlpha = Math.min(Math.max(alpha, 0), 1);
+    return `rgba(${r}, ${g}, ${b}, ${clampedAlpha})`;
+}
+
+function applyThemeOverrides(theme) {
+    if (!theme || !theme.variables) {
+        return;
+    }
+
+    if (theme.source) {
+        console.debug('Applying theme overrides from', theme.source);
+    }
+
+    Object.entries(theme.variables).forEach(([name, value]) => {
+        setCssVariable(name, value);
+    });
+}
+
+function applyHyprlandTheme(theme) {
+    if (!theme || !theme.is_hyprland) {
+        return;
+    }
+
+    const root = document.documentElement;
+    root.classList.add('hyprland');
+
+    if (theme.prefers_tiling) {
+        root.classList.add('hyprland-prefers-tiling');
+    }
+
+    if (theme.accent_color) {
+        const accent = normalizeHexColor(theme.accent_color);
+        if (accent) {
+            setCssVariable('--miu-accent', accent);
+            setCssVariable('--miu-success', accent);
+            setCssVariable('--miu-slider-thumb', accent);
+            const softBase = hexToRgba(accent, 0.18);
+            const softHover = hexToRgba(accent, 0.28);
+            const softActive = hexToRgba(accent, 0.38);
+            const borderColor = hexToRgba(accent, 0.4);
+            const scrollThumb = hexToRgba(accent, 0.27);
+            const scrollThumbHover = hexToRgba(accent, 0.42);
+            const placeholder = hexToRgba(accent, 0.3);
+
+            if (softBase) setCssVariable('--miu-accent-soft', softBase);
+            if (softHover) setCssVariable('--miu-accent-soft-hover', softHover);
+            if (softActive) setCssVariable('--miu-accent-soft-active', softActive);
+            if (borderColor) setCssVariable('--miu-surface-border', borderColor);
+            if (scrollThumb) setCssVariable('--miu-scroll-thumb', scrollThumb);
+            if (scrollThumbHover) setCssVariable('--miu-scroll-thumb-hover', scrollThumbHover);
+            if (placeholder) setCssVariable('--miu-placeholder', placeholder);
+        }
+    }
+
+    if (theme.inactive_color) {
+        const inactive = normalizeHexColor(theme.inactive_color);
+        if (inactive) {
+            const secondary = hexToRgba(inactive, 0.7);
+            const muted = hexToRgba(inactive, 0.75);
+            const dim = hexToRgba(inactive, 0.65);
+            if (secondary) setCssVariable('--miu-text-secondary', secondary);
+            if (muted) setCssVariable('--miu-text-muted', muted);
+            if (dim) setCssVariable('--miu-text-dim', dim);
+        }
+    }
+}
+
+async function hydrateHyprlandTheme() {
+    if (!invoke) {
+        return;
+    }
+
+    try {
+        const theme = await invoke('get_hyprland_theme');
+        if (theme) {
+            applyHyprlandTheme(theme);
+        }
+    } catch (error) {
+        console.debug('Hyprland theme unavailable', error);
+    }
+}
+
+async function hydrateThemeOverrides() {
+    if (!invoke) {
+        return;
+    }
+
+    try {
+        const theme = await invoke('get_theme_overrides');
+        if (theme) {
+            applyThemeOverrides(theme);
+        }
+    } catch (error) {
+        console.debug('Theme overrides unavailable', error);
+    }
+}
+
 // Initialize application
 document.addEventListener('DOMContentLoaded', async () => {
     initializeEventListeners();
@@ -145,6 +288,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         initializeTauriListeners();
+        await hydrateThemeOverrides();
+        await hydrateHyprlandTheme();
         connectToServer();
     } catch (error) {
         console.error('Failed to acquire Tauri APIs', error);
@@ -309,6 +454,24 @@ function initializeTauriListeners() {
         if (event && event.payload) {
             updatePlayerState(event.payload);
         }
+    }).catch((error) => {
+        console.error('Failed to register player_state_updated listener', error);
+    });
+
+    listen('hyprland_theme', (event) => {
+        if (event && event.payload) {
+            applyHyprlandTheme(event.payload);
+        }
+    }).catch((error) => {
+        console.error('Failed to register hyprland_theme listener', error);
+    });
+
+    listen('theme_overrides', (event) => {
+        if (event && event.payload) {
+            applyThemeOverrides(event.payload);
+        }
+    }).catch((error) => {
+        console.error('Failed to register theme_overrides listener', error);
     });
 }
 
@@ -318,7 +481,7 @@ async function connectToServer(serverUrl = DEFAULT_SERVER_URL) {
         reconnectTimeout = null;
     }
 
-    setConnectionStatus(`Connecting to ${serverUrl}…`, 'info');
+    setConnectionStatus('');
 
     try {
         if (!invoke) {
@@ -328,8 +491,7 @@ async function connectToServer(serverUrl = DEFAULT_SERVER_URL) {
         await invoke('connect_to_server', { serverUrl });
 
         isConnected = true;
-        setConnectionStatus('Connected', 'success');
-        hideConnectionStatusWithDelay();
+        setConnectionStatus('');
 
         await refreshPlayerState();
         startPlayerStatePolling();
@@ -365,13 +527,6 @@ function setConnectionStatus(message, type = 'info') {
     connectionStatus.textContent = message;
     connectionStatus.className = `connection-status ${type}`;
     connectionStatus.classList.remove('hidden');
-}
-
-function hideConnectionStatusWithDelay(delay = 1500) {
-    if (!connectionStatus) return;
-    setTimeout(() => {
-        setConnectionStatus('');
-    }, delay);
 }
 
 

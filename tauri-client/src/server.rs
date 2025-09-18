@@ -258,7 +258,11 @@ impl ServerClient {
             // Get the backend URL and check if we should start playing
             let should_start_playback = {
                 let guard = state.lock().await;
-                guard.current_track.is_some() && !guard.user_paused
+                // Only resume automatically if we were actively playing and the user
+                // hasn't manually paused the client.
+                guard.current_track.is_some()
+                    && guard.player_status == PlaybackStatus::Playing
+                    && !guard.user_paused
             };
 
             if should_start_playback {
