@@ -285,11 +285,18 @@ body {
 }
 
 @media (max-width: 640px) {
+    .app {
+        padding: 12px;
+        align-items: flex-start;
+        justify-content: flex-start;
+    }
+
     .player-card {
         flex-direction: column;
         gap: 20px;
         padding: 20px;
         align-items: center;
+        width: 100%;
     }
 
     .album-art-container {
@@ -302,13 +309,24 @@ body {
         text-align: center;
     }
 
+    .track-meta {
+        justify-content: center;
+    }
+
     .track-title {
         max-width: 100%;
     }
 
+    .player-section {
+        max-width: none;
+        width: 100%;
+    }
+
     .volume-container {
         height: auto;
-        flex-direction: row;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
         width: 100%;
         justify-content: center;
     }
@@ -328,7 +346,7 @@ body {
 
     .volume-indicator {
         position: static;
-        margin-top: 8px;
+        margin-top: 0;
     }
 }
 
@@ -348,4 +366,3 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.3);
 }
-
