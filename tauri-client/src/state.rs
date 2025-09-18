@@ -144,6 +144,10 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::new_with_volume(0.8) // Default volume if config loading fails
+    }
+
+    pub fn new_with_volume(volume: f32) -> Self {
         Self {
             server_url: None,
             stream_url: None,
@@ -151,7 +155,7 @@ impl AppState {
             queue: Vec::new(),
             server_status: PlaybackStatus::Stopped,
             player_status: PlaybackStatus::Stopped,
-            volume: 0.8,
+            volume: volume.clamp(0.0, 1.0),
             user_paused: false,
             synced_position: 0.0,
             track_duration: 0.0,

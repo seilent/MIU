@@ -2,14 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod config;
 mod server;
 mod state;
 // mod mpris;
 
 use audio::AudioManager;
+use config::AppConfig;
 use server::ServerClient;
 use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
 // use mpris::MprisManager;
+// Removed unused PathBuf import
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -96,6 +99,17 @@ async fn set_volume(
         .emit("player_state_updated", snapshot)
         .map_err(|e| e.to_string())?;
 
+    // Save the new volume to config for persistence
+    // Note: We should update the config through the state management system
+    // For now, create a minimal config just for volume saving
+    // TODO: Properly integrate with config state management
+    let mut temp_config = AppConfig::default();
+    temp_config.volume = volume;
+    if let Err(e) = temp_config.save() {
+        println!("Failed to save volume to config: {}", e);
+        // Don't fail the command just because config save failed
+    }
+
     Ok(())
 }
 
@@ -142,20 +156,34 @@ async fn connect_to_server(
         .map_err(|e| e.to_string())
 }
 
+// FFmpeg-related commands removed - using HTTP streaming instead
+
 fn main() {
-    let app_state = Arc::new(Mutex::new(AppState::new()));
+    // Load configuration
+    let config = AppConfig::load().unwrap_or_else(|e| {
+        println!("Failed to load config, using defaults: {}", e);
+        AppConfig::default()
+    });
+
+    let app_state = Arc::new(Mutex::new(AppState::new_with_volume(config.volume)));
+    let config_arc = Arc::new(Mutex::new(config.clone()));
+
+    // Initialize audio manager with HTTP streaming
     let audio_manager = Arc::new(Mutex::new(
-        AudioManager::new().expect("Failed to initialize audio"),
+        AudioManager::new().expect("Failed to initialize audio")
     ));
+
     let server_client = Arc::new(ServerClient::new());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state.clone())
         .manage(audio_manager.clone())
         .manage(server_client.clone())
+        .manage(config_arc.clone())
         .invoke_handler(tauri::generate_handler![
             play_pause,
             set_volume,
@@ -168,6 +196,18 @@ fn main() {
             let state_clone = app_state.clone();
             let audio_clone = audio_manager.clone();
             let server_clone = server_client.clone();
+
+            // Initialize volume from config in the async context
+            let volume = config.volume;
+            let audio_clone_for_init = audio_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut audio_guard = audio_clone_for_init.lock().await;
+                if let Err(e) = audio_guard.set_volume(volume) {
+                    println!("Failed to set initial volume: {}", e);
+                } else {
+                    println!("Set initial volume to: {}", volume);
+                }
+            });
 
             server_clone.spawn_background(state_clone, audio_clone, app_handle);
 

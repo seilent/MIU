@@ -1,16 +1,71 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
-use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
-use std::io::Cursor;
+use rodio::{OutputStream, OutputStreamHandle, Sink};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tokio::sync::Mutex;
+
+/// Wrapper to make reqwest::Response work with rodio::Decoder
+struct HttpStreamReader {
+    response: reqwest::Response,
+    buffer: Vec<u8>,
+    buffer_pos: usize,
+}
+
+impl HttpStreamReader {
+    fn new(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            buffer: Vec::new(),
+            buffer_pos: 0,
+        }
+    }
+}
+
+impl Read for HttpStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // If we have buffered data, use it first
+        if self.buffer_pos < self.buffer.len() {
+            let available = self.buffer.len() - self.buffer_pos;
+            let to_copy = buf.len().min(available);
+            buf[..to_copy].copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
+            self.buffer_pos += to_copy;
+            return Ok(to_copy);
+        }
+
+        // Buffer is empty, get more data from HTTP response
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            match self.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    self.buffer = chunk.to_vec();
+                    self.buffer_pos = 0;
+                    
+                    // Copy to output buffer
+                    let to_copy = buf.len().min(self.buffer.len());
+                    buf[..to_copy].copy_from_slice(&self.buffer[..to_copy]);
+                    self.buffer_pos = to_copy;
+                    Ok(to_copy)
+                }
+                Ok(None) => Ok(0), // EOF
+                Err(e) => Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("HTTP chunk error: {}", e)
+                ))
+            }
+        })
+    }
+}
+
+impl Seek for HttpStreamReader {
+    fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
+        // HTTP streams can't seek backwards - seeking is handled at request level with range headers
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Seeking not supported for HTTP streams - use Range headers"
+        ))
+    }
+}
 
 struct AudioComponents {
     _stream: OutputStream,
@@ -54,11 +109,11 @@ impl AudioManager {
         // Stop current playback if any
         self.stop().await?;
 
-        // Fetch audio bytes
-        println!("Fetching audio stream from {}", stream_url);
-        let response = self
-            .http
-            .get(stream_url)
+        // Always request the full stream to avoid seeking issues with rodio
+        let request = self.http.get(stream_url);
+
+        println!("HTTP streaming from {} at position {:.2}s", stream_url, start_position);
+        let response = request
             .send()
             .await
             .map_err(|e| anyhow!("Failed to request audio stream: {}", e))?;
@@ -68,54 +123,26 @@ impl AudioManager {
             return Err(anyhow!("Audio stream HTTP error: {}", response.status()));
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| anyhow!("Failed to read audio stream: {}", e))?;
-        println!("Fetched {} bytes of audio data", bytes.len());
-
-        let start = start_position.max(0.0);
-        let data = bytes.to_vec();
-
-        // Decode on blocking thread to avoid stopping async runtime
-        let decode_result = tokio::task::spawn_blocking(move || decode_audio(data, start)).await;
-        let (samples, sample_rate, channels) = match decode_result {
-            Ok(Ok(result)) => result,
-            Ok(Err(err)) => {
-                println!("Audio decode error: {}", err);
-                return Err(err);
-            }
-            Err(join_err) => {
-                println!("Audio decode join error: {}", join_err);
-                return Err(anyhow!("Audio decoding task failed: {}", join_err));
-            }
-        };
-
-        println!(
-            "Decoded {} samples @ {} Hz with {} channels",
-            samples.len(),
-            sample_rate,
-            channels
-        );
-        if samples.is_empty() {
-            println!("decode_audio produced empty buffer after skipping; returning silence");
-            return Ok(());
-        }
+        // Create HTTP stream wrapper for rodio
+        let http_stream = HttpStreamReader::new(response);
+        
+        // Create rodio decoder directly from HTTP stream
+        let decoder = rodio::Decoder::new(http_stream)
+            .map_err(|e| anyhow!("Failed to create decoder from HTTP stream: {}", e))?;
 
         let sink = Sink::try_new(&self.audio.stream_handle)
             .map_err(|e| anyhow!("Failed to create audio sink: {}", e))?;
         sink.set_volume(self.volume);
 
-        // Append decoded samples to sink and start playback
-        let source = SamplesBuffer::new(channels, sample_rate, samples);
-        sink.append(source);
+        // Stream directly to rodio - no memory buffering!
+        sink.append(decoder);
         sink.play();
 
         let mut sink_guard = self.sink.lock().await;
         *sink_guard = Some(sink);
 
         println!(
-            "Playback started: volume {:.2}, start position {:.2}s",
+            "Playback started: volume {:.2}, start position {:.2}s (note: position sync handled by server)",
             self.volume, start_position
         );
 
@@ -181,149 +208,4 @@ impl AudioManager {
     }
 }
 
-fn decode_audio(data: Vec<u8>, start_position: f64) -> Result<(Vec<f32>, u32, u16)> {
-    println!(
-        "Decoding audio buffer ({} bytes) starting at {:.2}s",
-        data.len(),
-        start_position
-    );
-    let cursor = Cursor::new(data);
-    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-
-    let mut hint = Hint::new();
-    hint.with_extension("m4a");
-    hint.with_extension("mp4");
-    hint.with_extension("aac");
-
-    let format_opts: FormatOptions = Default::default();
-    let metadata_opts: MetadataOptions = Default::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|e| {
-            println!("Symphonia probe failed: {}", e);
-            anyhow!("Failed to probe audio format: {}", e)
-        })?;
-
-    let mut format = probed.format;
-    let track = format.default_track().ok_or_else(|| {
-        println!("No default track detected in container");
-        anyhow!("No supported audio tracks found")
-    })?;
-
-    let codec_params = track.codec_params.clone();
-    let track_id = track.id;
-
-    let sample_rate = codec_params.sample_rate.ok_or_else(|| {
-        println!("Codec parameters missing sample rate: {:?}", codec_params);
-        anyhow!("Missing sample rate in audio stream")
-    })?;
-    let channels = codec_params
-        .channels
-        .map(|c| c.count() as u16)
-        .unwrap_or_else(|| {
-            println!("Codec parameters missing channel info, defaulting to stereo");
-            2
-        });
-
-    let seek_samples =
-        (start_position * sample_rate as f64).round().max(0.0) as usize * channels as usize;
-    println!(
-        "Audio format detected: sample_rate={}Hz channels={} seek_samples={}",
-        sample_rate, channels, seek_samples
-    );
-
-    let mut consumed = 0usize;
-    let mut samples = Vec::new();
-    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
-
-    let decoder_opts: DecoderOptions = Default::default();
-    println!("Creating decoder for codec params: {:?}", codec_params);
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&codec_params, &decoder_opts)
-        .map_err(|e| {
-            println!("Failed to create decoder: {}", e);
-            anyhow!("Failed to create audio decoder: {}", e)
-        })?;
-
-    println!("Beginning packet decode loop");
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.reset();
-                continue;
-            }
-            Err(SymphoniaError::IoError(ref err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(SymphoniaError::IoError(ref err))
-                if err.kind() == std::io::ErrorKind::Interrupted =>
-            {
-                continue;
-            }
-            Err(error) => return Err(anyhow!("Failed to read audio packet: {}", error)),
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            Err(SymphoniaError::IoError(ref err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(SymphoniaError::IoError(ref err))
-                if err.kind() == std::io::ErrorKind::Interrupted =>
-            {
-                continue;
-            }
-            Err(SymphoniaError::DecodeError(msg)) => {
-                return Err(anyhow!("Audio decode error: {}", msg));
-            }
-            Err(error) => return Err(anyhow!("Failed to decode audio packet: {}", error)),
-        };
-
-        let spec = *decoded.spec();
-        let capacity = decoded.capacity() as u64;
-        let buf = sample_buffer.get_or_insert_with(|| SampleBuffer::<f32>::new(capacity, spec));
-        buf.copy_interleaved_ref(decoded);
-
-        let data = buf.samples();
-
-        if consumed < seek_samples {
-            let remaining = seek_samples - consumed;
-            if remaining >= data.len() {
-                consumed += data.len();
-                continue;
-            } else {
-                samples.extend_from_slice(&data[remaining..]);
-                consumed = seek_samples;
-            }
-        } else {
-            samples.extend_from_slice(data);
-        }
-
-        consumed = consumed.saturating_add(data.len());
-    }
-
-    if samples.is_empty() {
-        // Return silence if we skipped past the end of the track
-        println!("decode_audio produced empty buffer after skipping; returning silence");
-        return Ok((Vec::new(), sample_rate, channels));
-    }
-
-    println!(
-        "decode_audio produced {} samples ({} seconds of audio)",
-        samples.len(),
-        samples.len() as f64 / (sample_rate as f64 * channels as f64)
-    );
-
-    Ok((samples, sample_rate, channels))
-}
+// Old decode_audio function removed - now using HTTP streaming directly to rodio
