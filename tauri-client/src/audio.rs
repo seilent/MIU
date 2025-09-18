@@ -69,7 +69,10 @@ impl HttpStreamReader {
             if offset > total {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Cannot reopen stream at offset {} beyond file size {}", offset, total),
+                    format!(
+                        "Cannot reopen stream at offset {} beyond file size {}",
+                        offset, total
+                    ),
                 ));
             }
             if offset == total {
@@ -96,7 +99,6 @@ impl HttpStreamReader {
                     format!("HTTP stream error: {}", e),
                 )
             })?;
-
 
         if !(response.status() == StatusCode::PARTIAL_CONTENT || response.status().is_success()) {
             return Err(std::io::Error::new(
@@ -163,11 +165,12 @@ impl HttpStreamReader {
 
         let runtime = self.runtime.clone();
         let chunk_result = if let Some(ref mut response) = self.response {
-            runtime.block_on(async move {
-                response.chunk().await
-            })
+            runtime.block_on(async move { response.chunk().await })
         } else {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Response missing"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Response missing",
+            ));
         };
         if let Some(ref response) = self.response {
             if let Some(total) = total_length_from_response(response) {
@@ -203,10 +206,8 @@ impl HttpStreamReader {
                 Ok(())
             }
             Err(e) => {
-
                 // If it's a timeout, try to reconnect and continue from current position
                 if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
-
                     // Clear the current response to force a reconnection
                     self.response = None;
                     self.buffer = Bytes::new();
@@ -217,13 +218,11 @@ impl HttpStreamReader {
                         Ok(()) => {
                             // Try to load the next chunk after reconnecting
                             self.load_next_chunk()
-                        },
-                        Err(reconnect_err) => {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("HTTP timeout and reconnection failed: {}", e),
-                            ))
                         }
+                        Err(reconnect_err) => Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("HTTP timeout and reconnection failed: {}", e),
+                        )),
                     }
                 } else {
                     Err(std::io::Error::new(
@@ -255,8 +254,7 @@ impl Read for HttpStreamReader {
             std::io::Error::new(std::io::ErrorKind::Other, "Stream position overflow")
         })?;
 
-        if old_position % 100000 == 0 || to_copy == 0 {
-        }
+        if old_position % 100000 == 0 || to_copy == 0 {}
 
         Ok(to_copy)
     }
@@ -264,14 +262,9 @@ impl Read for HttpStreamReader {
 
 impl Seek for HttpStreamReader {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-
         let target: i128 = match pos {
-            SeekFrom::Start(offset) => {
-                offset as i128
-            }
-            SeekFrom::Current(delta) => {
-                self.position as i128 + delta as i128
-            }
+            SeekFrom::Start(offset) => offset as i128,
+            SeekFrom::Current(delta) => self.position as i128 + delta as i128,
             SeekFrom::End(delta) => {
                 self.ensure_total_length()?;
                 let total = self.total_length.ok_or_else(|| {
@@ -297,7 +290,10 @@ impl Seek for HttpStreamReader {
             if target > total {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Seek beyond end of stream: target={}, total={}", target, total),
+                    format!(
+                        "Seek beyond end of stream: target={}, total={}",
+                        target, total
+                    ),
                 ));
             }
             // Allow seeking to EOF (target == total)
@@ -354,7 +350,6 @@ struct StreamMetadata {
 
 impl StreamMetadata {
     fn estimate_offset(&self, start_position: f64, explicit_duration: Option<f64>) -> Option<u64> {
-
         if start_position <= 0.1 {
             return Some(0);
         }
@@ -467,9 +462,13 @@ impl AudioManager {
             .await
             .map_err(|e| anyhow!("Failed to request audio stream: {}", e))?;
 
-
-        if !response.status().is_success() && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(anyhow!("HTTP request failed with status: {}", response.status()));
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        {
+            return Err(anyhow!(
+                "HTTP request failed with status: {}",
+                response.status()
+            ));
         }
 
         Ok(response)
@@ -490,37 +489,68 @@ impl AudioManager {
         &mut self,
         stream_url: &str,
         start_position: f64,
-        _track_duration: Option<f64>,
+        track_duration: Option<f64>,
     ) -> Result<()> {
         // Stop current playback if any
         self.stop().await?;
 
         // Fetch current position from server (like frontend does)
-        let server_position = self.fetch_server_position(stream_url).await
-            .unwrap_or(0.0);
+        let server_position = self.fetch_server_position(stream_url).await.unwrap_or(0.0);
 
+        // Determine which position we'll target for buffering/seek
+        let target_position = if server_position > 0.1 {
+            server_position
+        } else {
+            start_position
+        };
 
-        // Create stream reader and decoder - always start from offset 0
+        // Pull basic stream metadata so we can request a ranged HTTP chunk near the target
+        let stream_metadata = self.fetch_stream_metadata(stream_url).await.ok();
+        let (request_offset, approx_stream_start) = match stream_metadata.as_ref() {
+            Some(meta) => {
+                if let (Some(total_bytes), Some(duration)) = (
+                    meta.content_length,
+                    track_duration.or(meta.track_duration).filter(|d| *d > 0.0),
+                ) {
+                    let clamped_target = target_position.clamp(0.0, duration);
+                    let ratio = (clamped_target / duration).clamp(0.0, 1.0);
+                    let offset = (ratio * total_bytes as f64) as u64;
+                    (offset, ratio * duration)
+                } else {
+                    (0, 0.0)
+                }
+            }
+            None => (0, 0.0),
+        };
+
+        // Skip whatever gap remains between the requested byte offset and the target playback time
+        let residual_skip = (target_position - approx_stream_start).max(0.0);
+
+        // Create stream reader and decoder using the computed byte offset
         let runtime_handle = tokio::runtime::Handle::current();
         let http_client = self.http.clone();
         let audio_components = self.audio.clone();
         let stream_url_owned = stream_url.to_string();
         let volume = self.volume;
+        let effective_offset = request_offset;
+        let skip_seconds = residual_skip;
 
         let sink = tokio::task::spawn_blocking(move || -> Result<Sink> {
-
             // Follow frontend pattern: stream full track, then seek
-            let stream_url_with_ts = format!("{}?ts={}", stream_url_owned,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis());
-
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let stream_url_with_ts = if stream_url_owned.contains('?') {
+                format!("{}&ts={}", stream_url_owned, timestamp)
+            } else {
+                format!("{}?ts={}", stream_url_owned, timestamp)
+            };
 
             let response = runtime_handle.block_on(Self::send_stream_request(
                 http_client.clone(),
-                stream_url_with_ts,
-                0,
+                stream_url_with_ts.clone(),
+                effective_offset,
             ))?;
 
             // Since rodio doesn't support seeking like HTML audio currentTime,
@@ -531,9 +561,9 @@ impl AudioManager {
 
             let reader = HttpStreamReader::new(
                 http_client.clone(),
-                stream_url_owned.clone(),
+                stream_url_with_ts,
                 response,
-                0,
+                effective_offset,
                 runtime_handle.clone(),
                 total_length,
             );
@@ -543,8 +573,8 @@ impl AudioManager {
                 .map_err(|e| anyhow!("Failed to create decoder: {}", e))?;
 
             // Use skip_duration to seek to the server position (like frontend's audio.currentTime)
-            let final_source: Box<dyn rodio::Source<Item = i16> + Send> = if server_position > 0.1 {
-                Box::new(decoder.skip_duration(std::time::Duration::from_secs_f64(server_position)))
+            let final_source: Box<dyn rodio::Source<Item = i16> + Send> = if skip_seconds > 0.1 {
+                Box::new(decoder.skip_duration(std::time::Duration::from_secs_f64(skip_seconds)))
             } else {
                 Box::new(decoder)
             };
@@ -555,7 +585,6 @@ impl AudioManager {
             sink.set_volume(volume);
             sink.append(final_source);
             sink.play();
-
 
             Ok(sink)
         })
@@ -570,7 +599,7 @@ impl AudioManager {
         // );
 
         // Start monitoring track completion in the background
-        let track_duration = _track_duration;
+        let track_duration_for_monitor = track_duration;
         let audio_manager = {
             // Create a lightweight clone for monitoring
             AudioManager {
@@ -593,7 +622,9 @@ impl AudioManager {
                     // Only consider it truly completed after 3 consecutive checks (6 seconds)
                     // This prevents triggering on temporary network issues or brief interruptions
                     if consecutive_stopped_checks >= 3 {
-                        audio_manager.check_track_completion(track_duration).await;
+                        audio_manager
+                            .check_track_completion(track_duration_for_monitor)
+                            .await;
                         break;
                     }
                 } else {

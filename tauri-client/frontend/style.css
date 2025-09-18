@@ -289,11 +289,21 @@ body {
         flex-direction: column;
         gap: 20px;
         padding: 20px;
+        align-items: center;
     }
 
     .album-art-container {
         width: 160px;
         height: 160px;
+    }
+
+    .track-info {
+        width: 100%;
+        text-align: center;
+    }
+
+    .track-title {
+        max-width: 100%;
     }
 
     .volume-container {

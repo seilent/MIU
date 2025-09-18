@@ -186,7 +186,6 @@ function hideConnectionStatusWithDelay(delay = 1500) {
     }, delay);
 }
 
-let lastPlayPauseTime = 0;
 
 async function handlePlayPause() {
     if (!currentTrack) return;
@@ -195,13 +194,7 @@ async function handlePlayPause() {
         return;
     }
 
-    // Debounce: prevent rapid clicks
-    const now = Date.now();
-    if (now - lastPlayPauseTime < 1000) {  // 1 second debounce
-        console.log('Play/pause debounced - too soon after last click');
-        return;
-    }
-    lastPlayPauseTime = now;
+    // Removed debounce timeout - redundant failsafe
 
     // INSTANT UI update - don't wait for backend
     isPlaying = !isPlaying;
