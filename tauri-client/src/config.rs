@@ -10,9 +10,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            volume: 0.8,
-        }
+        Self { volume: 0.8 }
     }
 }
 
@@ -39,7 +37,7 @@ impl AppConfig {
 
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_file_path()?;
-        
+
         // Ensure parent directory exists
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
@@ -57,9 +55,9 @@ impl AppConfig {
     }
 
     fn config_file_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow!("Could not determine config directory"))?;
-        
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow!("Could not determine config directory"))?;
+
         Ok(config_dir.join("miu-player").join("config.json"))
     }
 

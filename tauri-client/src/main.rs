@@ -33,8 +33,10 @@ async fn play_pause(
     // Logic: if we're currently playing (and not user-paused), then pause. Otherwise, resume.
     let should_pause = !guard.user_paused && guard.player_status == PlaybackStatus::Playing;
 
-    println!("play_pause called: player_status={:?}, user_paused={}, should_pause={}",
-             guard.player_status, guard.user_paused, should_pause);
+    println!(
+        "play_pause called: player_status={:?}, user_paused={}, should_pause={}",
+        guard.player_status, guard.user_paused, should_pause
+    );
 
     if should_pause {
         println!("Taking PAUSE path - stopping playback");
@@ -47,7 +49,10 @@ async fn play_pause(
         drop(guard);
 
         // Emit state update IMMEDIATELY for instant UI feedback
-        println!("Emitting player_state_updated event with isPlaying={}", snapshot.is_playing);
+        println!(
+            "Emitting player_state_updated event with isPlaying={}",
+            snapshot.is_playing
+        );
         pause_handle
             .emit("player_state_updated", snapshot)
             .map_err(|e| e.to_string())?;
@@ -170,7 +175,7 @@ fn main() {
 
     // Initialize audio manager with HTTP streaming
     let audio_manager = Arc::new(Mutex::new(
-        AudioManager::new().expect("Failed to initialize audio")
+        AudioManager::new().expect("Failed to initialize audio"),
     ));
 
     let server_client = Arc::new(ServerClient::new());

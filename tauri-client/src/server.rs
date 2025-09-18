@@ -26,7 +26,6 @@ impl ServerClient {
 
     pub async fn get_status(&self, backend_url: &str) -> Result<Value> {
         let url = format!("{}/api/music/minimal-status", backend_url);
-        println!("Requesting minimal status from {}", url);
         let response = self
             .client
             .get(&url)
@@ -35,7 +34,6 @@ impl ServerClient {
             .map_err(|e| anyhow!("Failed to fetch status: {}", e))?;
 
         if !response.status().is_success() {
-            println!("Status request failed with HTTP {}", response.status());
             return Err(anyhow!("Status request failed with {}", response.status()));
         }
 
@@ -43,7 +41,6 @@ impl ServerClient {
             .json::<Value>()
             .await
             .map_err(|e| anyhow!("Failed to parse status JSON: {}", e))?;
-        println!("Received minimal status payload: {}", data);
 
         Ok(data)
     }
@@ -83,7 +80,6 @@ impl ServerClient {
                     .await;
 
                 if let Err(err) = result {
-                    eprintln!("SSE connection error: {}", err);
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             } else {
@@ -101,7 +97,6 @@ impl ServerClient {
     ) -> Result<()> {
         let sse_url = format!("{}/api/music/state/live", backend_url);
 
-        println!("Opening SSE connection to {}", sse_url);
         let response = self
             .client
             .get(&sse_url)
@@ -110,7 +105,6 @@ impl ServerClient {
             .await
             .map_err(|e| anyhow!("Failed to start SSE connection: {}", e))?;
 
-        println!("SSE response status: {}", response.status());
         if !response.status().is_success() {
             return Err(anyhow!("SSE connection failed with {}", response.status()));
         }
@@ -196,13 +190,11 @@ impl ServerClient {
     ) -> Result<()> {
         match event.as_str() {
             "state" => {
-                println!("SSE event: state");
                 let data: StateEventPayload = serde_json::from_str(payload)
                     .map_err(|e| anyhow!("Failed to parse state event: {}", e))?;
-                self.apply_state_event(data, state, app_handle).await
+                self.apply_state_event(data, state, audio, app_handle).await
             }
             "sync_play" => {
-                println!("SSE event: sync_play -> payload {}", payload);
                 let data: SyncPlayEventPayload = serde_json::from_str(payload)
                     .map_err(|e| anyhow!("Failed to parse sync_play event: {}", e))?;
                 self.clone()
@@ -218,7 +210,6 @@ impl ServerClient {
             }
             "heartbeat" => Ok(()),
             other => {
-                eprintln!("Unhandled SSE event: {}", other);
                 Ok(())
             }
         }
@@ -228,6 +219,7 @@ impl ServerClient {
         &self,
         data: StateEventPayload,
         state: Arc<Mutex<AppState>>,
+        audio: Arc<Mutex<AudioManager>>,
         app_handle: AppHandle,
     ) -> Result<()> {
         let mut guard = state.lock().await;
@@ -240,12 +232,16 @@ impl ServerClient {
             }
         }
 
-        if let Some(track) = data.current_track {
-            guard.update_current_track(Some(track));
+        // Track change detection and handling
+        let track_changed = if let Some(track) = data.current_track {
+            guard.update_current_track(Some(track))
         } else if guard.current_track.is_some() {
             guard.update_current_track(None);
             guard.clear_sync();
-        }
+            true
+        } else {
+            false
+        };
 
         guard.update_queue(data.queue);
 
@@ -258,6 +254,39 @@ impl ServerClient {
         drop(guard);
 
         let _ = app_handle.emit("player_state_updated", snapshot);
+
+        // If track changed, immediately start playback like the frontend does
+        if track_changed {
+
+            // Get the backend URL and check if we should start playing
+            let should_start_playback = {
+                let guard = state.lock().await;
+                guard.current_track.is_some() && !guard.user_paused
+            };
+
+            if should_start_playback {
+                // Start playback immediately like the frontend does
+                let self_clone = self.clone();
+                let state_clone = state.clone();
+                let app_handle_clone = app_handle.clone();
+
+                tokio::spawn(async move {
+                    match Arc::new(self_clone).sync_play_now(
+                        state_clone.clone(),
+                        audio.clone(),
+                        app_handle_clone,
+                        "".to_string() // We'll get backend_url from state
+                    ).await {
+                        Ok(()) => {
+                        }
+                        Err(e) => {
+                        }
+                    }
+                });
+            } else {
+            }
+        }
+
         Ok(())
     }
 
@@ -292,18 +321,27 @@ impl ServerClient {
             return Ok(());
         }
 
-        // Ensure we have the correct track cached
-        if {
+        // Track change validation - SSE state events are authoritative for metadata
+        let needs_restart = {
             let guard = state.lock().await;
-            guard
-                .current_track
-                .as_ref()
-                .map(|track| track.youtube_id != track_id)
-                .unwrap_or(true)
-        } {
-            self.fetch_and_apply_status(&backend_url, state.clone(), app_handle.clone())
-                .await
-                .ok();
+            match &guard.current_track {
+                Some(current) if current.youtube_id == track_id => {
+                    // Same track - check if we need to restart playback
+                    guard.player_status != PlaybackStatus::Playing
+                },
+                Some(current) => {
+                    // Different track - always restart
+                    true
+                },
+                None => {
+                    // No current track - this shouldn't happen with sync_play
+                    true
+                }
+            }
+        };
+
+        if !needs_restart {
+            return Ok(());
         }
 
         let current_time = current_time_millis();
@@ -338,7 +376,6 @@ impl ServerClient {
                         )
                         .await
                     {
-                        eprintln!("Synchronized playback failed: {}", err);
                     }
                 }
             });
@@ -351,36 +388,103 @@ impl ServerClient {
         state: Arc<Mutex<AppState>>,
         audio: Arc<Mutex<AudioManager>>,
         app_handle: AppHandle,
-        backend_url: String,
+        _backend_url: String,
     ) -> Result<()> {
-        // Make sure current track metadata is present
-        self.ensure_track_metadata(&backend_url, state.clone(), app_handle.clone())
-            .await
-            .ok();
+        // Always stop current playback first to ensure clean restart
+        {
+            let audio_manager = audio.lock().await;
+            audio_manager.stop().await.ok(); // Ignore errors from stopping
+        }
 
-        let (stream_url, playback_position, duration) = {
+        let (stream_url, playback_position, duration_opt, track_info) = {
             let mut guard = state.lock().await;
+
+            // Verify we have track metadata (should be from SSE state event)
+            let current_track = guard.current_track.as_ref()
+                .ok_or_else(|| anyhow!("No current track for sync_play - SSE state event missing?"))?;
+
+            // Extract track info before mutable operations to avoid borrowing conflicts
+            let track_info = format!("{} - {}", current_track.youtube_id, current_track.title);
+
             let stream_url = guard
                 .stream_url()
                 .ok_or_else(|| anyhow!("Server stream URL not configured"))?;
             let position = guard.computed_position();
             let duration = guard.duration();
+
             guard.update_player_status(PlaybackStatus::Playing);
             guard.set_user_paused(false);
-            (stream_url, position, duration)
+
+            let duration_opt = if duration.is_finite() && duration > 0.0 {
+                Some(duration)
+            } else {
+                None
+            };
+            (stream_url, position, duration_opt, track_info)
         };
 
+        // Generate fresh stream URL with timestamp to bypass caching
         let ts_suffix = current_time_millis() as u128;
         let full_stream_url = format!("{}?ts={}", stream_url, ts_suffix);
-        println!(
-            "Starting playback from {} at position {:.2}s (duration {:.2}s)",
-            full_stream_url, playback_position, duration
-        );
+
 
         {
             let mut audio_manager = audio.lock().await;
+
+            // Set up track end callback to handle completion
+            let state_for_callback = state.clone();
+            let app_handle_for_callback = app_handle.clone();
+            audio_manager.set_track_end_callback(move || {
+
+                // Update state to reflect track completion and trigger next track
+                let state_clone = state_for_callback.clone();
+                let app_handle_clone = app_handle_for_callback.clone();
+
+                tokio::spawn(async move {
+                    let (backend_url, should_continue) = {
+                        let mut guard = state_clone.lock().await;
+
+                        // Set status to stopped and clear position
+                        guard.update_player_status(PlaybackStatus::Stopped);
+                        guard.clear_sync();
+
+                        let snapshot = guard.snapshot();
+                        let backend_url = guard.backend_url();
+                        let should_continue = !guard.user_paused; // Only continue if user hasn't paused
+
+                        drop(guard);
+
+                        // Notify UI of track completion immediately
+                        let _ = app_handle_clone.emit("player_state_updated", snapshot);
+
+                        (backend_url, should_continue)
+                    };
+
+                    if should_continue {
+                        if let Some(backend_url) = backend_url {
+
+                            // Simulate a play request to trigger next track
+                            let client = reqwest::Client::new();
+                            match client.post(&format!("{}/api/music/play", backend_url))
+                                .send()
+                                .await
+                            {
+                                Ok(response) if response.status().is_success() => {
+                                }
+                                Ok(response) => {
+                                }
+                                Err(e) => {
+                                }
+                            }
+                        } else {
+                        }
+                    } else {
+                    }
+                });
+            }).await;
+
             audio_manager
-                .play_from(&full_stream_url, playback_position)
+                .play_from(&full_stream_url, playback_position, duration_opt)
                 .await?;
         }
 
@@ -388,7 +492,7 @@ impl ServerClient {
             let mut guard = state.lock().await;
             guard.update_player_status(PlaybackStatus::Playing);
             guard.set_user_paused(false);
-            guard.update_sync(playback_position, Some(duration));
+            guard.update_sync(playback_position, duration_opt);
         }
 
         let snapshot = {
@@ -426,12 +530,6 @@ impl ServerClient {
     ) -> Result<()> {
         let payload = self.get_status(backend_url).await?;
         let status: MinimalStatus = serde_json::from_value(payload)?;
-        println!(
-            "Fetched status from {}: status={}, track_present={}",
-            backend_url,
-            status.status,
-            status.track.is_some()
-        );
 
         let mut guard = state.lock().await;
         guard.update_server_status(&status.status);
@@ -472,24 +570,7 @@ impl ServerClient {
         Ok(())
     }
 
-    async fn ensure_track_metadata(
-        &self,
-        backend_url: &str,
-        state: Arc<Mutex<AppState>>,
-        app_handle: AppHandle,
-    ) -> Result<()> {
-        let needs_refresh = {
-            let guard = state.lock().await;
-            guard.current_track.is_none()
-        };
-
-        if needs_refresh {
-            self.fetch_and_apply_status(backend_url, state, app_handle)
-                .await?
-        }
-
-        Ok(())
-    }
+    // Removed ensure_track_metadata - SSE state events provide complete metadata
 }
 
 #[derive(Debug, Deserialize)]
