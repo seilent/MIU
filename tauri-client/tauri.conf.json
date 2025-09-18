@@ -31,11 +31,11 @@
   },
   "bundle": {
     "active": true,
-    "category": "AudioVideo",
+    "category": "Music",
     "copyright": "© 2024 MIU Team",
     "shortDescription": "MIU Music Player",
     "longDescription": "Cross-platform desktop music player for MIU music bot",
-    "targets": "all"
+    "targets": ["app"]
   },
   "plugins": {}
 }

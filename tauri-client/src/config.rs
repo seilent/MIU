@@ -19,7 +19,6 @@ impl AppConfig {
         let config_path = Self::config_file_path()?;
 
         if !config_path.exists() {
-            println!("Config file doesn't exist, creating default");
             let config = Self::default();
             config.save()?;
             return Ok(config);
@@ -31,7 +30,6 @@ impl AppConfig {
         let config: Self = serde_json::from_str(&contents)
             .map_err(|e| anyhow!("Failed to parse config file: {}", e))?;
 
-        println!("Loaded config: volume={}", config.volume);
         Ok(config)
     }
 
@@ -50,7 +48,6 @@ impl AppConfig {
         fs::write(&config_path, contents)
             .map_err(|e| anyhow!("Failed to write config file: {}", e))?;
 
-        println!("Saved config: volume={}", self.volume);
         Ok(())
     }
 
