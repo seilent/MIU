@@ -58,11 +58,4 @@ impl AppConfig {
         Ok(config_dir.join("miu-player").join("config.json"))
     }
 
-    pub fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
-    }
-
-    pub fn get_volume(&self) -> f32 {
-        self.volume
-    }
 }

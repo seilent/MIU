@@ -79,7 +79,7 @@ impl ServerClient {
                     )
                     .await;
 
-                if let Err(err) = result {
+                if let Err(_err) = result {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             } else {
@@ -209,7 +209,7 @@ impl ServerClient {
                     .await
             }
             "heartbeat" => Ok(()),
-            other => {
+            _other => {
                 Ok(())
             }
         }
@@ -279,7 +279,7 @@ impl ServerClient {
                     ).await {
                         Ok(()) => {
                         }
-                        Err(e) => {
+                        Err(_e) => {
                         }
                     }
                 });
@@ -329,7 +329,7 @@ impl ServerClient {
                     // Same track - check if we need to restart playback
                     guard.player_status != PlaybackStatus::Playing
                 },
-                Some(current) => {
+                Some(_current) => {
                     // Different track - always restart
                     true
                 },
@@ -367,7 +367,7 @@ impl ServerClient {
                 let app_handle_clone = app_handle.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(time_until_play as u64)).await;
-                    if let Err(err) = client
+                    if let Err(_err) = client
                         .sync_play_now(
                             state_clone,
                             audio_clone,
@@ -396,7 +396,7 @@ impl ServerClient {
             audio_manager.stop().await.ok(); // Ignore errors from stopping
         }
 
-        let (stream_url, playback_position, duration_opt, track_info) = {
+        let (stream_url, playback_position, duration_opt, _track_info) = {
             let mut guard = state.lock().await;
 
             // Verify we have track metadata (should be from SSE state event)
@@ -471,9 +471,9 @@ impl ServerClient {
                             {
                                 Ok(response) if response.status().is_success() => {
                                 }
-                                Ok(response) => {
+                                Ok(_response) => {
                                 }
-                                Err(e) => {
+                                Err(_e) => {
                                 }
                             }
                         } else {

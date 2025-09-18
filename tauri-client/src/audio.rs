@@ -19,8 +19,6 @@ struct HttpStreamReader {
     eof: bool,
     runtime: Handle,
     total_length: Option<u64>,
-    // Add position offset to maintain correct playback position
-    position_offset: u64,
 }
 
 impl HttpStreamReader {
@@ -42,7 +40,6 @@ impl HttpStreamReader {
             eof: false,
             runtime,
             total_length,
-            position_offset: 0,
         };
 
         if let Some(ref response) = reader.response {
@@ -191,7 +188,7 @@ impl HttpStreamReader {
                 self.buffer_pos = 0;
                 // Only log every 100KB to reduce spam
                 if self.position % 100000 < self.buffer.len() as u64 {
-                    let progress = if let Some(total) = self.total_length {
+                    let _progress = if let Some(total) = self.total_length {
                         format!(" ({:.1}%)", (self.position as f64 / total as f64) * 100.0)
                     } else {
                         String::new()
@@ -219,7 +216,7 @@ impl HttpStreamReader {
                             // Try to load the next chunk after reconnecting
                             self.load_next_chunk()
                         }
-                        Err(reconnect_err) => Err(std::io::Error::new(
+                        Err(_reconnect_err) => Err(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("HTTP timeout and reconnection failed: {}", e),
                         )),
@@ -349,21 +346,6 @@ struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    fn estimate_offset(&self, start_position: f64, explicit_duration: Option<f64>) -> Option<u64> {
-        if start_position <= 0.1 {
-            return Some(0);
-        }
-
-        let duration = explicit_duration
-            .or(self.track_duration)
-            .filter(|d| *d > 0.0)?;
-
-        let total_bytes = self.content_length?;
-
-        let ratio = (start_position / duration).clamp(0.0, 1.0);
-        let offset = (ratio * total_bytes as f64) as u64;
-        Some(offset)
-    }
 }
 
 impl AudioManager {
@@ -412,7 +394,7 @@ impl AudioManager {
             Ok(res) => {
                 anyhow::bail!("HEAD request failed with status {}", res.status());
             }
-            Err(err) => {
+            Err(_err) => {
                 // HEAD not supported or failed - fallback to ranged GET below.
             }
         }
@@ -640,24 +622,6 @@ impl AudioManager {
         Ok(())
     }
 
-    pub async fn pause(&self) -> Result<()> {
-        let sink_guard = self.sink.lock().await;
-        if let Some(ref sink) = *sink_guard {
-            sink.pause();
-        } else {
-        }
-        Ok(())
-    }
-
-    pub async fn resume(&self) -> Result<()> {
-        let sink_guard = self.sink.lock().await;
-        if let Some(ref sink) = *sink_guard {
-            sink.play();
-        } else {
-        }
-        Ok(())
-    }
-
     pub async fn stop(&self) -> Result<()> {
         let mut sink_guard = self.sink.lock().await;
         if let Some(sink) = sink_guard.take() {
@@ -679,10 +643,6 @@ impl AudioManager {
         });
 
         Ok(())
-    }
-
-    pub fn get_volume(&self) -> f32 {
-        self.volume
     }
 
     pub async fn is_playing(&self) -> bool {

@@ -166,9 +166,6 @@ impl AppState {
         }
     }
 
-    pub fn server_url(&self) -> Option<String> {
-        self.server_url.clone()
-    }
 
     pub fn backend_url(&self) -> Option<String> {
         self.backend_url.clone()
