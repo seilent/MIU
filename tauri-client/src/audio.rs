@@ -339,15 +339,6 @@ pub struct AudioManager {
     track_end_callback: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
 }
 
-#[derive(Debug, Clone)]
-struct StreamMetadata {
-    content_length: Option<u64>,
-    track_duration: Option<f64>,
-}
-
-impl StreamMetadata {
-}
-
 impl AudioManager {
     pub fn new() -> Result<Self> {
         let (_stream, stream_handle) = OutputStream::try_default()
@@ -374,58 +365,6 @@ impl AudioManager {
             volume: 0.8,
             http,
             track_end_callback: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    async fn fetch_stream_metadata(&self, stream_url: &str) -> Result<StreamMetadata> {
-        let mut duration: Option<f64> = None;
-        let mut content_length: Option<u64> = None;
-
-        let response = self.http.head(stream_url).send().await;
-
-        match response {
-            Ok(res) if res.status().is_success() => {
-                duration = parse_duration_header(res.headers().get("X-Track-Duration"));
-                content_length = res.content_length();
-            }
-            Ok(res) if res.status() == StatusCode::METHOD_NOT_ALLOWED => {
-                // Some servers don't support HEAD - fallback to ranged GET below.
-            }
-            Ok(res) => {
-                anyhow::bail!("HEAD request failed with status {}", res.status());
-            }
-            Err(_err) => {
-                // HEAD not supported or failed - fallback to ranged GET below.
-            }
-        }
-
-        if content_length.is_none() {
-            let mut request = self.http.get(stream_url);
-            request = request.header(RANGE, "bytes=0-0");
-            let res = request
-                .send()
-                .await
-                .map_err(|e| anyhow!("Ranged metadata request failed: {}", e))?;
-
-            if !res.status().is_success() {
-                anyhow::bail!(
-                    "Ranged metadata request failed with status {}",
-                    res.status()
-                );
-            }
-
-            duration =
-                duration.or_else(|| parse_duration_header(res.headers().get("X-Track-Duration")));
-            if let Some(total) = parse_content_range(res.headers().get(CONTENT_RANGE)) {
-                content_length = Some(total);
-            } else {
-                content_length = content_length.or_else(|| res.content_length());
-            }
-        }
-
-        Ok(StreamMetadata {
-            content_length,
-            track_duration: duration,
         })
     }
 
@@ -456,15 +395,25 @@ impl AudioManager {
         Ok(response)
     }
     // Add method to fetch current position from server
-    async fn fetch_server_position(&self, base_url: &str) -> Result<f64> {
-        // Extract base URL from stream URL
-        let position_url = base_url.replace("/api/music/stream", "/api/music/position");
+    async fn fetch_server_position(&self, stream_url: &str) -> Result<f64> {
+        let position_url = if stream_url.contains("/api/music/stream") {
+            stream_url.replace("/api/music/stream", "/api/music/position")
+        } else {
+            // Fallback: assume we can find the base URL
+            let base = stream_url.split("/api/").next().unwrap_or(stream_url);
+            format!("{}/api/music/position", base.trim_end_matches('/'))
+        };
 
-        let response = self.http.get(&position_url).send().await?;
-        let data: serde_json::Value = response.json().await?;
+        // Remove any query parameters for position request
+        let position_url = position_url.split('?').next().unwrap_or(&position_url);
 
-        let position = data["position"].as_f64().unwrap_or(0.0);
-        Ok(position)
+        match self.http.get(position_url).send().await {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(data) => Ok(data["position"].as_f64().unwrap_or(0.0)),
+                Err(_e) => Ok(0.0),
+            },
+            Err(_e) => Ok(0.0),
+        }
     }
 
     pub async fn play_from(
@@ -486,27 +435,8 @@ impl AudioManager {
             start_position
         };
 
-        // Pull basic stream metadata so we can request a ranged HTTP chunk near the target
-        let stream_metadata = self.fetch_stream_metadata(stream_url).await.ok();
-        let (request_offset, approx_stream_start) = match stream_metadata.as_ref() {
-            Some(meta) => {
-                if let (Some(total_bytes), Some(duration)) = (
-                    meta.content_length,
-                    track_duration.or(meta.track_duration).filter(|d| *d > 0.0),
-                ) {
-                    let clamped_target = target_position.clamp(0.0, duration);
-                    let ratio = (clamped_target / duration).clamp(0.0, 1.0);
-                    let offset = (ratio * total_bytes as f64) as u64;
-                    (offset, ratio * duration)
-                } else {
-                    (0, 0.0)
-                }
-            }
-            None => (0, 0.0),
-        };
-
-        // Skip whatever gap remains between the requested byte offset and the target playback time
-        let residual_skip = (target_position - approx_stream_start).max(0.0);
+        let request_offset = 0u64;
+        let residual_skip = target_position.max(0.0);
 
         // Create stream reader and decoder using the computed byte offset
         let runtime_handle = tokio::runtime::Handle::current();
@@ -679,13 +609,6 @@ impl AudioManager {
             }
         }
     }
-}
-
-fn parse_duration_header(header: Option<&HeaderValue>) -> Option<f64> {
-    header
-        .and_then(|value| value.to_str().ok())
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|duration| duration.is_finite() && *duration > 0.0)
 }
 
 fn parse_content_range(header: Option<&HeaderValue>) -> Option<u64> {
