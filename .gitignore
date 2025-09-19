@@ -190,3 +190,4 @@ Cargo.lock
 *.AppImage
 *.msi
 .tauri/
+CLAUDE.md

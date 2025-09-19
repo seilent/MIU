@@ -385,24 +385,23 @@ impl PlayerInterface for MprisPlayer {
     }
 }
 
-// Stub implementations for non-Linux platforms
+// No-op implementations for non-Linux platforms
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub struct MprisManager;
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 impl MprisManager {
-    pub async fn new(_state: Arc<Mutex<AppState>>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(_state: std::sync::Arc<tokio::sync::Mutex<crate::state::AppState>>) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self)
     }
 
-    pub async fn update_metadata(&self, _track: &Track) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn update_metadata(&self, _track: &crate::state::Track) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 
-    pub async fn update_playback_status(
-        &self,
-        _is_playing: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn update_playback_status(&self, _is_playing: bool) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 

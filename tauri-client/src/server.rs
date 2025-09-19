@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -563,7 +563,7 @@ impl ServerClient {
             guard.set_user_paused(false);
             guard.update_sync(playback_position, duration_opt);
             let snapshot = guard.snapshot();
-            let backend_url = guard.backend_url();
+            let _backend_url = guard.backend_url();
             drop(guard);
             let _ = app_handle.emit("player_state_updated", snapshot.clone());
 

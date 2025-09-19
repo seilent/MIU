@@ -35,11 +35,16 @@
     "copyright": "© 2024 MIU Team",
     "shortDescription": "MIU Music Player",
     "longDescription": "Cross-platform desktop music player for MIU music bot",
-    "targets": ["appimage"],
+    "targets": [],
     "icon": [
       "icons/tray-icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
   },
   "plugins": {}
 }

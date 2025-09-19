@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
+    "build:linux": "cargo tauri build --target x86_64-unknown-linux-gnu",
+    "build:windows": "cargo tauri build --target x86_64-pc-windows-gnu",
+    "build:macos": "cargo tauri build --target x86_64-apple-darwin",
     "build-frontend": "cp -r frontend/* dist/",
     "prepare-dist": "mkdir -p dist && npm run build-frontend"
   },
