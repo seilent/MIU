@@ -8,11 +8,12 @@ mod mpris;
 mod server;
 mod state;
 mod theme;
-mod webview2;
 
 use audio::AudioManager;
 use config::AppConfig;
 use server::ServerClient;
+#[cfg(target_os = "linux")]
+use mpris::MprisManager;
 use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
 use theme::ThemeOverrides;
 // Removed unused PathBuf import
@@ -21,6 +22,8 @@ use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+#[cfg(target_os = "linux")]
+use tauri::Listener;
 use tokio::sync::Mutex;
 
 // Hold the tray icon handle so Linux tray implementations keep it alive.
@@ -244,15 +247,6 @@ fn main() {
             let audio_clone = audio_manager.clone();
             let server_clone = server_client.clone();
 
-            // Check WebView2 availability early in the setup process
-            let webview2_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = webview2::ensure_webview2_available(&webview2_handle).await {
-                    println!("WebView2 check failed: {}", e);
-                    // Note: We continue anyway as Tauri might work with system WebView2
-                    // In a production app, you might want to show an error dialog or exit
-                }
-            });
 
             let hypr_theme = hyprland::detect_theme();
 

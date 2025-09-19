@@ -37,35 +37,52 @@ if [ "$TARGET" = "windows" ]; then
     cargo tauri build --target x86_64-pc-windows-gnu
 
     if [ -f "target/x86_64-pc-windows-gnu/release/miu.exe" ]; then
+        echo "📤 Creating Windows package..."
+
+        # Create temporary directory for packaging
+        TEMP_DIR=$(mktemp -d)
+        PACKAGE_NAME="miu-player-windows"
+        PACKAGE_DIR="$TEMP_DIR/$PACKAGE_NAME"
+        mkdir -p "$PACKAGE_DIR"
+
+        # Copy only essential files to package directory
+        cp target/x86_64-pc-windows-gnu/release/miu.exe "$PACKAGE_DIR/"
+        cp target/x86_64-pc-windows-gnu/release/WebView2Loader.dll "$PACKAGE_DIR/"
+
+        # Create ZIP file
+        cd "$TEMP_DIR"
+        ZIP_FILE="miu.zip"
+        zip -r "$ZIP_FILE" "$PACKAGE_NAME/"
+
+        # Deploy to server
         echo "📤 Deploying to download server..."
-        sudo cp target/x86_64-pc-windows-gnu/release/miu.exe /srv/http/miu.gacha.boo/dl/
+        sudo cp "$ZIP_FILE" /srv/http/miu.gacha.boo/dl/
 
-        # WebView2Loader.dll is now optional - only copy if it exists
-        if [ -f "target/x86_64-pc-windows-gnu/release/WebView2Loader.dll" ]; then
-            sudo cp target/x86_64-pc-windows-gnu/release/WebView2Loader.dll /srv/http/miu.gacha.boo/dl/
-            WEBVIEW2_STATUS="✅ WebView2Loader.dll included (legacy support)"
-        else
-            WEBVIEW2_STATUS="⚡ WebView2Loader.dll not included (will prompt for download)"
-        fi
+        # Clean up old individual Windows files from dl folder
+        echo "🧹 Cleaning up old Windows files..."
+        sudo rm -f /srv/http/miu.gacha.boo/dl/miu.exe
+        sudo rm -f /srv/http/miu.gacha.boo/dl/WebView2Loader.dll
+        sudo rm -f /srv/http/miu.gacha.boo/dl/miu.ico
+        sudo rm -f /srv/http/miu.gacha.boo/dl/miu-player-windows.zip
 
-        sudo cp icons/tray-icon.ico /srv/http/miu.gacha.boo/dl/miu.ico
-        echo "✅ Windows executable deployed to https://miu.gacha.boo/dl/"
+        # Get file sizes
+        EXE_SIZE=$(ls -lh "$PACKAGE_DIR/miu.exe" | awk '{print $5}')
+        ZIP_SIZE=$(ls -lh "$ZIP_FILE" | awk '{print $5}')
+
+        # Cleanup
+        cd - > /dev/null
+        rm -rf "$TEMP_DIR"
+
+        echo "✅ Windows package deployed to https://miu.gacha.boo/dl/"
 
         echo ""
         echo "✅ Windows build complete!"
         echo "📱 Local executable: target/x86_64-pc-windows-gnu/release/miu.exe"
-        echo "🌐 Download URLs:"
-        echo "   📱 Executable: https://miu.gacha.boo/dl/miu.exe"
-
-        if [ -f "target/x86_64-pc-windows-gnu/release/WebView2Loader.dll" ]; then
-            echo "   📦 WebView2 DLL: https://miu.gacha.boo/dl/WebView2Loader.dll"
-        fi
-
-        echo "   🖼️ Icon: https://miu.gacha.boo/dl/miu.ico"
+        echo "🌐 Download URL:"
+        echo "   📦 Windows Package: https://miu.gacha.boo/dl/$ZIP_FILE"
         echo ""
-        echo "📋 Usage: Download miu.exe and run - WebView2 will be downloaded automatically if needed"
-        echo "📊 Size: $(ls -lh target/x86_64-pc-windows-gnu/release/miu.exe | awk '{print $5}') (exe)"
-        echo "$WEBVIEW2_STATUS"
+        echo "📋 Usage: Download ZIP, extract and run miu.exe"
+        echo "📊 Package size: $ZIP_SIZE (contains $EXE_SIZE exe + 159KB dll)"
     fi
 
 elif [ "$TARGET" = "linux" ] || [ -z "$TARGET" ]; then
@@ -109,5 +126,5 @@ echo "   npm run dev"
 echo ""
 echo "📥 Download URLs:"
 echo "   🐧 Linux: https://miu.gacha.boo/dl/miu"
-echo "   🪟 Windows: https://miu.gacha.boo/dl/miu.exe (WebView2 auto-downloaded if needed)"
-echo "   🖼️ Icons: https://miu.gacha.boo/dl/miu.png (Linux) | https://miu.gacha.boo/dl/miu.ico (Windows)"
+echo "   🪟 Windows: https://miu.gacha.boo/dl/miu.zip"
+echo "   🖼️ Icon: https://miu.gacha.boo/dl/miu.png (Linux)"
