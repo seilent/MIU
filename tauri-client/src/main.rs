@@ -25,6 +25,9 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 #[cfg(target_os = "linux")]
 use tauri::Listener;
 use tokio::sync::Mutex;
+use notify::{Watcher, RecommendedWatcher, RecursiveMode, Event, EventKind};
+use std::sync::mpsc;
+use std::path::Path;
 
 // Hold the tray icon handle so Linux tray implementations keep it alive.
 struct TrayHandle {
@@ -196,6 +199,116 @@ fn get_hyprland_theme() -> Result<Option<hyprland::HyprlandTheme>, String> {
     Ok(hyprland::detect_theme())
 }
 
+#[cfg(target_os = "linux")]
+fn setup_matugen_watcher(app_handle: AppHandle) {
+    use std::env;
+
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let colors_path = format!("{}/.local/state/quickshell/user/generated/colors.json", home);
+    let colors_dir = format!("{}/.local/state/quickshell/user/generated", home);
+
+    if !Path::new(&colors_path).exists() {
+        println!("Matugen colors file not found at: {}", colors_path);
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher: RecommendedWatcher = match Watcher::new(tx, notify::Config::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                println!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(Path::new(&colors_dir), RecursiveMode::NonRecursive) {
+            println!("Failed to watch matugen colors directory: {}", e);
+            return;
+        }
+
+        println!("Watching matugen colors at: {}", colors_path);
+
+        // Store the last seen background color to detect actual changes
+        let mut last_background = String::new();
+        if let Ok(content) = std::fs::read_to_string(&colors_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(bg) = json.get("background").and_then(|v| v.as_str()) {
+                    last_background = bg.to_string();
+                    println!("Initial background color: {}", last_background);
+                }
+            }
+        }
+
+        for res in rx {
+            match res {
+                Ok(Event { kind: EventKind::Modify(_), paths, .. }) => {
+                    if paths.iter().any(|p| p.to_string_lossy().ends_with("colors.json")) {
+                        println!("Matugen colors file changed, waiting for write completion...");
+
+                        // Wait longer and verify file is readable
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                        // Try to read and verify the file is valid JSON
+                        let colors_path = format!("{}/.local/state/quickshell/user/generated/colors.json",
+                            std::env::var("HOME").unwrap_or_default());
+
+                        // Retry mechanism to handle partial writes
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(200 * attempt)).await;
+
+                            match std::fs::read_to_string(&colors_path) {
+                                Ok(content) => {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                        if let Some(bg) = json.get("background").and_then(|v| v.as_str()) {
+                                            let current_background = bg.to_string();
+
+                                            if current_background != last_background {
+                                                println!("🎨 Background color changed: {} -> {}",
+                                                        last_background, current_background);
+                                                last_background = current_background;
+
+                                                if let Some(theme) = hyprland::detect_theme() {
+                                                    if let Err(err) = app_handle.emit("hyprland_theme", &theme) {
+                                                        println!("Failed to emit updated hyprland_theme event: {}", err);
+                                                    } else {
+                                                        println!("✅ Successfully emitted updated Material You colors");
+                                                    }
+                                                }
+                                                break;
+                                            } else {
+                                                println!("Background color unchanged ({}), ignoring event", current_background);
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        println!("Colors file contains invalid JSON, retrying (attempt {})...", attempt);
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("Failed to read colors file (attempt {}): {}", attempt, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {} // Ignore other events
+                Err(e) => println!("Watch error: {}", e),
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn setup_matugen_watcher(_app_handle: AppHandle) {
+    // No-op on non-Linux platforms
+}
+
 #[tauri::command]
 async fn get_theme_overrides(
     config: State<'_, Arc<Mutex<AppConfig>>>,
@@ -256,6 +369,9 @@ fn main() {
                     println!("Failed to emit hyprland_theme event: {}", err);
                 }
             }
+
+            // Setup file watcher for matugen color changes
+            setup_matugen_watcher(app_handle.clone());
 
             if let Some(theme_overrides) = theme::load_theme_overrides(&config) {
                 println!(

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-const PREFETCH_CHANNEL_SIZE: usize = 4;
+const PREFETCH_CHANNEL_SIZE: usize = 1;
 
 enum FetchMessage {
     Chunk(Bytes),
