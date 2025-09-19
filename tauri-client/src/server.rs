@@ -1,7 +1,7 @@
 use crate::audio::AudioManager;
-use crate::state::{AppState, PlaybackStatus, Track};
 #[cfg(target_os = "linux")]
 use crate::mpris::MprisManager;
+use crate::state::{AppState, PlaybackStatus, Track};
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -312,6 +312,57 @@ impl ServerClient {
         let server_time = data.server_time.unwrap_or(received_time_ms);
         let play_at = data.play_at.unwrap_or(received_time_ms);
 
+        // Ensure we have fresh metadata for the announced track before we resume playback.
+        let metadata_ready = {
+            let guard = state.lock().await;
+            guard
+                .current_track
+                .as_ref()
+                .map(|track| track.youtube_id == track_id)
+                .unwrap_or(false)
+        };
+
+        if !metadata_ready {
+            if let Err(err) = self
+                .fetch_and_apply_status(&backend_url, state.clone(), app_handle.clone())
+                .await
+            {
+                println!(
+                    "Failed to refresh player status before sync_play for {}: {}",
+                    track_id, err
+                );
+            }
+        }
+
+        let metadata_ready = {
+            let guard = state.lock().await;
+            guard
+                .current_track
+                .as_ref()
+                .map(|track| track.youtube_id == track_id)
+                .unwrap_or(false)
+        };
+
+        if !metadata_ready {
+            let mut guard = state.lock().await;
+            let placeholder_track = Track {
+                youtube_id: track_id.clone(),
+                title: "Loading track".to_string(),
+                duration: 0.0,
+                thumbnail: None,
+                requested_by: None,
+                channel_title: None,
+                requested_at: None,
+                is_autoplay: None,
+            };
+
+            guard.update_current_track(Some(placeholder_track));
+            guard.clear_sync();
+            let snapshot = guard.snapshot();
+            drop(guard);
+            let _ = app_handle.emit("player_state_updated", snapshot);
+        }
+
         {
             let mut guard = state.lock().await;
             let duration = guard.current_track.as_ref().map(|t| t.duration);
@@ -437,7 +488,6 @@ impl ServerClient {
             let snapshot = guard.snapshot();
             drop(guard);
             let _ = app_handle.emit("player_state_updated", snapshot);
-
         }
 
         let play_result = {
@@ -468,7 +518,6 @@ impl ServerClient {
 
                             // Notify UI of track completion immediately
                             let _ = app_handle_clone.emit("player_state_updated", snapshot);
-
 
                             (backend_url, should_continue)
                         };
@@ -505,7 +554,6 @@ impl ServerClient {
             drop(guard);
             let _ = app_handle.emit("player_state_updated", snapshot);
 
-
             return Err(play_err);
         }
 
@@ -536,7 +584,10 @@ impl ServerClient {
                         requested_at: track.requested_at.clone(),
                         is_autoplay: Some(track.is_autoplay),
                     };
-                    if let Err(e) = mpris.update_metadata(&track_data, backend_url.as_deref()).await {
+                    if let Err(e) = mpris
+                        .update_metadata(&track_data, backend_url.as_deref())
+                        .await
+                    {
                         println!("Failed to update MPRIS metadata: {}", e);
                     }
                 }
@@ -544,7 +595,6 @@ impl ServerClient {
                     println!("Failed to update MPRIS position: {}", e);
                 }
             }
-
         }
 
         Ok(())

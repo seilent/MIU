@@ -219,7 +219,6 @@ impl AppState {
         self.volume = volume.clamp(0.0, 1.0);
     }
 
-
     pub fn update_current_track(&mut self, track: Option<Track>) -> bool {
         let changed = match (&self.current_track, &track) {
             (Some(current), Some(next)) => current.youtube_id != next.youtube_id,

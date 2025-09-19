@@ -1,18 +1,18 @@
 #[cfg(target_os = "linux")]
 use crate::state::{AppState, PlaybackStatus as AppPlaybackStatus};
 #[cfg(target_os = "linux")]
-use mpris_server::{
-    PlayerInterface, RootInterface, Server, Metadata,
-    PlaybackStatus, Time, LoopStatus, Volume, TrackId, Property, Signal
-};
-#[cfg(target_os = "linux")]
 use mpris_server::zbus::fdo;
+#[cfg(target_os = "linux")]
+use mpris_server::{
+    LoopStatus, Metadata, PlaybackStatus, PlayerInterface, Property, RootInterface, Server, Signal,
+    Time, TrackId, Volume,
+};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use tokio::sync::Mutex;
-#[cfg(target_os = "linux")]
 use tauri::{AppHandle, Emitter};
+#[cfg(target_os = "linux")]
+use tokio::sync::Mutex;
 
 #[cfg(target_os = "linux")]
 pub struct MprisManager {
@@ -33,14 +33,19 @@ impl MprisManager {
             app_handle,
         };
 
-        let server = Server::new("org.mpris.MediaPlayer2.MIU", mpris_player).await
+        let server = Server::new("org.mpris.MediaPlayer2.MIU", mpris_player)
+            .await
             .map_err(|e| format!("Failed to create MPRIS server: {}", e))?;
         // Server runs automatically in the background
 
         Ok(Self { server })
     }
 
-    pub async fn update_metadata(&self, track: &crate::state::Track, backend_url: Option<&str>) -> Result<(), String> {
+    pub async fn update_metadata(
+        &self,
+        track: &crate::state::Track,
+        backend_url: Option<&str>,
+    ) -> Result<(), String> {
         let mut metadata = Metadata::builder();
 
         metadata = metadata.title(&track.title);
@@ -58,38 +63,57 @@ impl MprisManager {
         if !track.youtube_id.is_empty() {
             if let Some(backend_url) = backend_url {
                 // Use backend API with square parameter for reliable album art, matching frontend approach
-                metadata = metadata.art_url(format!("{}/api/albumart/{}?square=1", backend_url, track.youtube_id));
+                metadata = metadata.art_url(format!(
+                    "{}/api/albumart/{}?square=1",
+                    backend_url, track.youtube_id
+                ));
             } else {
                 // Fallback to YouTube thumbnail if no backend URL
-                metadata = metadata.art_url(format!("https://img.youtube.com/vi/{}/maxresdefault.jpg", track.youtube_id));
+                metadata = metadata.art_url(format!(
+                    "https://img.youtube.com/vi/{}/maxresdefault.jpg",
+                    track.youtube_id
+                ));
             }
         }
 
         let metadata = metadata.build();
 
-        self.server.properties_changed([Property::Metadata(metadata)]).await
+        self.server
+            .properties_changed([Property::Metadata(metadata)])
+            .await
             .map_err(|e| format!("Failed to update MPRIS metadata: {}", e))
     }
 
-    pub async fn update_playback_status(&self, app_status: AppPlaybackStatus) -> Result<(), String> {
+    pub async fn update_playback_status(
+        &self,
+        app_status: AppPlaybackStatus,
+    ) -> Result<(), String> {
         let status = match app_status {
             AppPlaybackStatus::Playing => PlaybackStatus::Playing,
             AppPlaybackStatus::Paused => PlaybackStatus::Paused,
             AppPlaybackStatus::Stopped => PlaybackStatus::Stopped,
         };
 
-        self.server.properties_changed([Property::PlaybackStatus(status)]).await
+        self.server
+            .properties_changed([Property::PlaybackStatus(status)])
+            .await
             .map_err(|e| format!("Failed to update MPRIS playback status: {}", e))
     }
 
     pub async fn update_position(&self, position: f64) -> Result<(), String> {
         let position_time = Time::from_micros((position * 1_000_000.0) as i64);
-        self.server.emit(Signal::Seeked { position: position_time }).await
+        self.server
+            .emit(Signal::Seeked {
+                position: position_time,
+            })
+            .await
             .map_err(|e| format!("Failed to update MPRIS position: {}", e))
     }
 
     pub async fn update_volume(&self, volume: f32) -> Result<(), String> {
-        self.server.properties_changed([Property::Volume(volume as Volume)]).await
+        self.server
+            .properties_changed([Property::Volume(volume as Volume)])
+            .await
             .map_err(|e| format!("Failed to update MPRIS volume: {}", e))
     }
 }
@@ -203,7 +227,9 @@ impl PlayerInterface for MprisPlayer {
 
     async fn position(&self) -> fdo::Result<Time> {
         let state = self.state.lock().await;
-        Ok(Time::from_micros((state.computed_position() * 1_000_000.0) as i64))
+        Ok(Time::from_micros(
+            (state.computed_position() * 1_000_000.0) as i64,
+        ))
     }
 
     async fn minimum_rate(&self) -> fdo::Result<f64> {
@@ -238,10 +264,16 @@ impl PlayerInterface for MprisPlayer {
             if !track.youtube_id.is_empty() {
                 if let Some(backend_url) = state.backend_url() {
                     // Use backend API with square parameter for reliable album art, matching frontend approach
-                    metadata = metadata.art_url(format!("{}/api/albumart/{}?square=1", backend_url, track.youtube_id));
+                    metadata = metadata.art_url(format!(
+                        "{}/api/albumart/{}?square=1",
+                        backend_url, track.youtube_id
+                    ));
                 } else {
                     // Fallback to YouTube thumbnail if no backend URL
-                    metadata = metadata.art_url(format!("https://img.youtube.com/vi/{}/maxresdefault.jpg", track.youtube_id));
+                    metadata = metadata.art_url(format!(
+                        "https://img.youtube.com/vi/{}/maxresdefault.jpg",
+                        track.youtube_id
+                    ));
                 }
             }
 
@@ -309,7 +341,10 @@ impl PlayerInterface for MprisPlayer {
     }
 
     async fn set_position(&self, _track_id: TrackId, position: Time) -> fdo::Result<()> {
-        println!("MPRIS: Set position requested: {} microseconds", position.as_micros());
+        println!(
+            "MPRIS: Set position requested: {} microseconds",
+            position.as_micros()
+        );
         let mut state = self.state.lock().await;
         let duration = state.duration();
         state.update_sync(position.as_micros() as f64 / 1_000_000.0, Some(duration));
@@ -364,7 +399,10 @@ impl MprisManager {
         Ok(())
     }
 
-    pub async fn update_playback_status(&self, _is_playing: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn update_playback_status(
+        &self,
+        _is_playing: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 

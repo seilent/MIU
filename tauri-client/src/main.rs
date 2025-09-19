@@ -77,7 +77,6 @@ async fn play_pause(
             }
         }
 
-
         // Audio stop can happen after UI update (pause = stop for streaming)
         audio_arc
             .lock()
@@ -131,7 +130,6 @@ async fn set_volume(
             println!("Failed to update MPRIS volume: {}", e);
         }
     }
-
 
     // Save the new volume to config for persistence
     // Note: We should update the config through the state management system
@@ -291,7 +289,14 @@ fn main() {
                         let server_handle = handle.state::<Arc<ServerClient>>();
                         let handle_for_call = handle.clone();
 
-                        if let Err(e) = crate::play_pause(handle_for_call, state_handle, audio_handle, server_handle).await {
+                        if let Err(e) = crate::play_pause(
+                            handle_for_call,
+                            state_handle,
+                            audio_handle,
+                            server_handle,
+                        )
+                        .await
+                        {
                             println!("MPRIS play_pause error: {}", e);
                         }
                     });
@@ -308,7 +313,14 @@ fn main() {
                             let audio_handle = handle.state::<Arc<Mutex<AudioManager>>>();
                             let handle_for_call = handle.clone();
 
-                            if let Err(e) = crate::set_volume(handle_for_call, state_handle, audio_handle, volume).await {
+                            if let Err(e) = crate::set_volume(
+                                handle_for_call,
+                                state_handle,
+                                audio_handle,
+                                volume,
+                            )
+                            .await
+                            {
                                 println!("MPRIS volume change error: {}", e);
                             }
                         });
@@ -317,7 +329,11 @@ fn main() {
             }
 
             // Spawn background server task after MPRIS setup
-            server_clone.spawn_background(state_clone.clone(), audio_clone.clone(), app_handle.clone());
+            server_clone.spawn_background(
+                state_clone.clone(),
+                audio_clone.clone(),
+                app_handle.clone(),
+            );
 
             // Initialize MPRIS on Linux
             #[cfg(target_os = "linux")]
