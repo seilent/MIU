@@ -35,22 +35,21 @@
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(
-        135deg,
-        var(--miu-background-start) 0%,
-        var(--miu-background-end) 100%
-    );
+    background: var(--miu-background-start);
     color: var(--miu-text-primary);
     overflow-x: hidden;
     min-height: 100vh;
+    margin: 0;
+    padding: 0;
 }
 
 .app {
     min-height: 100vh;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 16px;
+    display: grid;
+    place-items: center;
+    place-content: center;
+    padding: 0;
+    height: 100vh;
 }
 
 .hidden {
@@ -62,7 +61,8 @@ body {
     font-size: 0.9rem;
     opacity: 0.85;
     text-align: center;
-    margin-bottom: 12px;
+    margin: 0;
+    align-self: center;
     transition: opacity 0.3s ease;
 }
 
@@ -79,82 +79,38 @@ body {
 }
 
 .player-section {
-    width: 100%;
-    max-width: 600px;
-}
-
-.player-card {
+    width: min(95vw, 720px);
+    max-height: 100vh;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    background: var(--miu-surface);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--miu-surface-border);
-    border-radius: 16px;
-    padding: 20px;
-    box-shadow: 0 20px 40px var(--miu-surface-shadow);
-}
-
-.player-body {
-    display: flex;
-    align-items: center;
-    gap: 24px;
-    width: 100%;
-}
-
-.window-chrome {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    -webkit-app-region: drag;
-}
-
-.window-title {
-    font-size: 0.9rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--miu-text-secondary);
-    pointer-events: none;
-}
-
-.window-controls {
-    display: flex;
-    gap: 8px;
-    -webkit-app-region: no-drag;
-}
-
-.window-button {
-    width: 28px;
-    height: 22px;
-    border: none;
-    border-radius: 6px;
-    background: var(--miu-accent-soft);
-    color: var(--miu-button-foreground);
-    font-size: 0.8rem;
-    line-height: 1;
-    font-family: inherit;
-    display: flex;
+    gap: clamp(12px, 4vh, 28px);
     align-items: center;
     justify-content: center;
     padding: 0;
-    cursor: pointer;
-    transition: background 0.2s ease, color 0.2s ease;
 }
 
-.window-button:hover {
-    background: var(--miu-accent-soft-hover);
+.player-card {
+    width: 100%;
+    max-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(12px, 3vh, 28px);
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
 }
 
-.window-button:active {
-    background: var(--miu-accent-soft-active);
+.player-body {
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    gap: 24px;
 }
 
-.window-button--close:hover {
-    background: var(--miu-error-soft);
-    color: var(--miu-text-primary);
-}
 
 .album-art-container {
     position: relative;
@@ -219,11 +175,16 @@ body {
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--miu-text-primary);
-    line-height: 1.2;
+    line-height: 1.3;
     margin-bottom: 8px;
-    white-space: nowrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    hyphens: auto;
+    max-height: 3.9rem; /* ~3 lines */
     overflow: hidden;
-    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
 }
 
 .track-meta {
@@ -381,76 +342,18 @@ body {
     --miu-surface-shadow: rgba(0, 0, 0, 0.22);
 }
 
-
-:root.hyprland .app {
-    display: grid;
-    place-items: center;
-    place-content: center;
-    padding: 0;
-    min-height: 100vh;
-    height: 100vh;
-}
-
-:root.hyprland .player-section {
-    width: min(95vw, 720px);
-    max-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    gap: clamp(12px, 4vh, 28px);
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-}
-
-:root.hyprland .player-card {
-    width: 100%;
-    max-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    gap: clamp(12px, 3vh, 28px);
-    border-radius: 0;
-    border: none;
-    box-shadow: none;
-    background: transparent;
-    padding: 0;
-}
-
-:root.hyprland .player-body {
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-}
-
-:root.hyprland .connection-status {
-    margin: 0;
-    text-align: center;
-    align-self: center;
-}
-
-:root.hyprland .window-controls {
-    display: none;
-}
-
-:root.hyprland .window-chrome {
-    display: none;
-}
-
-:root.hyprland .connection-status.hidden {
+.connection-status.hidden {
     display: none !important;
 }
 
 @media (max-width: 640px) {
     .app {
         padding: 12px;
-        align-items: flex-start;
-        justify-content: flex-start;
+        min-height: 100vh;
     }
 
     .player-card {
-        gap: 12px;
-        padding: 16px;
+        gap: clamp(12px, 4vh, 28px);
     }
 
     .player-body {
@@ -474,7 +377,9 @@ body {
     }
 
     .track-title {
-        max-width: 100%;
+        font-size: 1.3rem;
+        max-height: 5.2rem; /* ~4 lines on mobile */
+        -webkit-line-clamp: 4;
     }
 
     .player-section {
@@ -509,22 +414,10 @@ body {
         margin-top: 0;
     }
 
-    :root.hyprland .app {
-        min-height: 100vh;
-    }
-
-    :root.hyprland .player-card {
-        gap: clamp(12px, 4vh, 28px);
-    }
 }
 
 @media (min-aspect-ratio: 4/3) and (min-width: 800px) {
     .app {
-        align-items: center;
-        justify-content: center;
-    }
-
-    :root.hyprland .app {
         padding-top: 0;
         padding-bottom: 0;
     }

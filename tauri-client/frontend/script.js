@@ -98,9 +98,6 @@ const requesterAvatar = document.getElementById('requester-avatar');
 
 const volumeSlider = document.getElementById('volume-slider');
 const volumeIndicator = document.getElementById('volume-indicator');
-const minimizeButton = document.getElementById('minimize-button');
-const closeButton = document.getElementById('close-button');
-const trayButton = document.getElementById('tray-button');
 
 const DEFAULT_ALBUM_ART = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><rect fill='%23222222' width='200' height='200'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23555555' font-size='48'>♪</text></svg>";
 const DEFAULT_SERVER_URL = 'https://miu.gacha.boo';
@@ -301,9 +298,6 @@ function initializeEventListeners() {
     albumArtContainer.addEventListener('click', handlePlayPause);
     volumeSlider.addEventListener('input', handleVolumeChange);
     volumeSlider.addEventListener('mousemove', updateVolumeIndicator);
-    minimizeButton?.addEventListener('click', handleMinimizeClick);
-    closeButton?.addEventListener('click', handleCloseClick);
-    trayButton?.addEventListener('click', handleTrayClick);
 }
 
 async function resolveAppWindowHandle(apis) {
@@ -393,57 +387,6 @@ async function ensureAppWindow() {
     return null;
 }
 
-async function handleMinimizeClick(event) {
-    event?.stopPropagation?.();
-    const windowHandle = await ensureAppWindow();
-    if (!windowHandle) {
-        console.warn('handleMinimizeClick: missing appWindow');
-        return;
-    }
-
-    try {
-        await windowHandle.minimize?.();
-    } catch (error) {
-        console.error('Failed to minimize window', error);
-    }
-}
-
-async function handleCloseClick(event) {
-    event?.stopPropagation?.();
-    const windowHandle = await ensureAppWindow();
-    if (!windowHandle) {
-        console.warn('handleCloseClick: missing appWindow');
-        return;
-    }
-
-    try {
-        await windowHandle.close?.();
-    } catch (error) {
-        console.error('Failed to close window', error);
-    }
-}
-
-async function handleTrayClick(event) {
-    event?.stopPropagation?.();
-    const windowHandle = await ensureAppWindow();
-    if (!windowHandle) {
-        console.warn('handleTrayClick: missing appWindow');
-        return;
-    }
-
-    try {
-        await sendWindowToTray(windowHandle);
-    } catch (error) {
-        console.error('Failed to send window to tray', error);
-    }
-}
-
-async function sendWindowToTray(windowHandle) {
-    await windowHandle.hide?.();
-    if (typeof windowHandle.setSkipTaskbar === 'function') {
-        await windowHandle.setSkipTaskbar(true);
-    }
-}
 
 function initializeTauriListeners() {
     if (!listen) {

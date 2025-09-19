@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State, WindowEvent};
 use tokio::sync::Mutex;
 
 // Hold the tray icon handle so Linux tray implementations keep it alive.
@@ -339,19 +339,34 @@ fn main() {
                 });
             }
 
-            if hypr_theme.is_none() {
-                match init_tray(app) {
-                    Ok(tray_icon) => {
-                        app.manage(TrayHandle {
-                            _tray_icon: tray_icon,
-                        });
-                    }
-                    Err(tray_err) => {
-                        println!("Failed to initialize tray icon: {}", tray_err);
-                    }
+            // Always initialize tray for close-to-tray functionality
+            match init_tray(app) {
+                Ok(tray_icon) => {
+                    app.manage(TrayHandle {
+                        _tray_icon: tray_icon,
+                    });
                 }
-            } else {
-                println!("Hyprland detected; skipping tray initialization");
+                Err(tray_err) => {
+                    println!("Failed to initialize tray icon: {}", tray_err);
+                }
+            }
+
+            // Set up window event handler for close-to-tray
+            let main_window = app.get_webview_window("main");
+            if let Some(window) = main_window {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        // Prevent the default close behavior
+                        api.prevent_close();
+
+                        // Hide the window instead
+                        let _ = window_clone.hide();
+                        let _ = window_clone.set_skip_taskbar(true);
+
+                        println!("Window hidden to tray instead of closing");
+                    }
+                });
             }
 
             Ok(())
