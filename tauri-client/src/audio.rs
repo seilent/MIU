@@ -3,103 +3,95 @@ use bytes::Bytes;
 use reqwest::header::{HeaderValue, CONTENT_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode};
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use std::io::{Error as IoError, ErrorKind};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+const PREFETCH_CHANNEL_SIZE: usize = 4;
+
+enum FetchMessage {
+    Chunk(Bytes),
+    Eof,
+    Error(IoError),
+}
 
 /// Wrapper to make reqwest::Response work with rodio::Decoder
 struct HttpStreamReader {
     client: Client,
     url: String,
-    response: Option<Response>,
     buffer: Bytes,
     buffer_pos: usize,
     position: u64,
     eof: bool,
     runtime: Handle,
     total_length: Option<u64>,
+    chunk_rx: Option<mpsc::Receiver<FetchMessage>>,
+    fetch_task: Option<JoinHandle<()>>,
 }
 
 impl HttpStreamReader {
-    fn new(
-        client: Client,
-        url: String,
-        response: Response,
-        start_offset: u64,
-        runtime: Handle,
-        total_length: Option<u64>,
-    ) -> Self {
+    fn new(client: Client, url: String, start_offset: u64, runtime: Handle) -> Result<Self> {
         let mut reader = Self {
             client,
             url,
-            response: Some(response),
             buffer: Bytes::new(),
             buffer_pos: 0,
             position: start_offset,
             eof: false,
             runtime,
-            total_length,
+            total_length: None,
+            chunk_rx: None,
+            fetch_task: None,
         };
 
-        if let Some(ref response) = reader.response {
-            if let Some(total) = total_length_from_response(response) {
-                if reader.total_length.is_none() || reader.total_length == Some(0) {
-                    reader.total_length = Some(total);
-                }
-            }
-        }
-
         reader
+            .start_stream(start_offset)
+            .map_err(|e| anyhow!("Failed to start audio stream: {}", e))?;
+
+        Ok(reader)
     }
 
     fn buffer_start(&self) -> u64 {
         self.position.saturating_sub(self.buffer_pos as u64)
     }
 
-    fn reopen_stream(&mut self, offset: u64) -> std::io::Result<()> {
-        let client = self.client.clone();
-        let url = self.url.clone();
-
-        // Validate offset before making request
+    fn start_stream(&mut self, offset: u64) -> std::io::Result<()> {
         if let Some(total) = self.total_length {
             if offset > total {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(IoError::new(
+                    ErrorKind::InvalidInput,
                     format!(
-                        "Cannot reopen stream at offset {} beyond file size {}",
+                        "Cannot open stream at offset {} beyond file size {}",
                         offset, total
                     ),
                 ));
             }
+
             if offset == total {
-                // Don't make HTTP request for EOF position
+                self.abort_fetcher();
                 self.position = offset;
                 self.eof = true;
-                self.buffer = bytes::Bytes::new();
+                self.buffer = Bytes::new();
                 self.buffer_pos = 0;
+                self.chunk_rx = None;
                 return Ok(());
             }
         }
 
-        let request = client
-            .get(&url)
-            .header(RANGE, format!("bytes={}-", offset))
-            .timeout(std::time::Duration::from_secs(30));
-
+        let request = build_stream_request(&self.client, &self.url, offset);
         let response = self
             .runtime
             .block_on(async { request.send().await })
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("HTTP stream error: {}", e),
-                )
-            })?;
+            .map_err(|e| IoError::new(ErrorKind::Other, format!("HTTP stream error: {}", e)))?;
 
         if !(response.status() == StatusCode::PARTIAL_CONTENT || response.status().is_success()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(IoError::new(
+                ErrorKind::Other,
                 format!("HTTP stream responded with status {}", response.status()),
             ));
         }
@@ -108,13 +100,80 @@ impl HttpStreamReader {
             if self.total_length.is_none() || self.total_length == Some(0) {
                 self.total_length = Some(total);
             }
+        } else if self.total_length.is_none() {
+            self.total_length = response.content_length();
         }
-        self.response = Some(response);
+
+        self.position = offset;
         self.buffer = Bytes::new();
         self.buffer_pos = 0;
-        self.position = offset;
         self.eof = false;
+
+        self.abort_fetcher();
+
+        let (tx, rx) = mpsc::channel::<FetchMessage>(PREFETCH_CHANNEL_SIZE);
+        self.chunk_rx = Some(rx);
+
+        let client = self.client.clone();
+        let url = self.url.clone();
+
+        let fetch_task = self.runtime.spawn(async move {
+            let sender = tx;
+            let mut current_response = response;
+            let mut current_offset = offset;
+
+            loop {
+                match current_response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+
+                        current_offset = current_offset.saturating_add(chunk.len() as u64);
+
+                        if sender.send(FetchMessage::Chunk(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = sender.send(FetchMessage::Eof).await;
+                        break;
+                    }
+                    Err(err) => {
+                        if err.is_timeout() {
+                            match request_stream_async(client.clone(), url.clone(), current_offset)
+                                .await
+                            {
+                                Ok(new_response) => {
+                                    current_response = new_response;
+                                    continue;
+                                }
+                                Err(io_err) => {
+                                    let _ = sender.send(FetchMessage::Error(io_err)).await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            let _ = sender
+                                .send(FetchMessage::Error(IoError::new(
+                                    ErrorKind::Other,
+                                    format!("HTTP chunk error: {}", err),
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        self.fetch_task = Some(fetch_task);
+
         Ok(())
+    }
+
+    fn reopen_stream(&mut self, offset: u64) -> std::io::Result<()> {
+        self.start_stream(offset)
     }
 
     fn ensure_total_length(&mut self) -> std::io::Result<()> {
@@ -156,78 +215,40 @@ impl HttpStreamReader {
             return Ok(());
         }
 
-        if self.response.is_none() {
-            self.reopen_stream(self.position)?;
-        }
+        let rx = self
+            .chunk_rx
+            .as_mut()
+            .ok_or_else(|| IoError::new(ErrorKind::UnexpectedEof, "Chunk receiver missing"))?;
 
-        let runtime = self.runtime.clone();
-        let chunk_result = if let Some(ref mut response) = self.response {
-            runtime.block_on(async move { response.chunk().await })
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Response missing",
-            ));
-        };
-        if let Some(ref response) = self.response {
-            if let Some(total) = total_length_from_response(response) {
-                if self.total_length.is_none() || self.total_length == Some(0) {
-                    self.total_length = Some(total);
-                }
-            }
-        }
-
-        match chunk_result {
-            Ok(Some(chunk)) => {
-                if chunk.is_empty() {
-                    self.eof = true;
-                    self.buffer = Bytes::new();
-                } else {
+        loop {
+            match rx.blocking_recv() {
+                Some(FetchMessage::Chunk(chunk)) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
                     self.buffer = chunk;
+                    self.buffer_pos = 0;
+                    return Ok(());
                 }
-                self.buffer_pos = 0;
-                // Only log every 100KB to reduce spam
-                if self.position % 100000 < self.buffer.len() as u64 {
-                    let _progress = if let Some(total) = self.total_length {
-                        format!(" ({:.1}%)", (self.position as f64 / total as f64) * 100.0)
-                    } else {
-                        String::new()
-                    };
-                }
-                Ok(())
-            }
-            Ok(None) => {
-                self.buffer = Bytes::new();
-                self.buffer_pos = 0;
-                self.eof = true;
-                Ok(())
-            }
-            Err(e) => {
-                // If it's a timeout, try to reconnect and continue from current position
-                if e.to_string().contains("timed out") || e.to_string().contains("timeout") {
-                    // Clear the current response to force a reconnection
-                    self.response = None;
+                Some(FetchMessage::Eof) | None => {
                     self.buffer = Bytes::new();
                     self.buffer_pos = 0;
-
-                    // Try to reconnect
-                    match self.reopen_stream(self.position) {
-                        Ok(()) => {
-                            // Try to load the next chunk after reconnecting
-                            self.load_next_chunk()
-                        }
-                        Err(_reconnect_err) => Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("HTTP timeout and reconnection failed: {}", e),
-                        )),
-                    }
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("HTTP chunk error: {}", e),
-                    ))
+                    self.eof = true;
+                    return Ok(());
+                }
+                Some(FetchMessage::Error(err)) => {
+                    self.buffer = Bytes::new();
+                    self.buffer_pos = 0;
+                    self.eof = true;
+                    return Err(err);
                 }
             }
+        }
+    }
+
+    fn abort_fetcher(&mut self) {
+        if let Some(handle) = self.fetch_task.take() {
+            handle.abort();
         }
     }
 }
@@ -255,6 +276,42 @@ impl Read for HttpStreamReader {
 
         Ok(to_copy)
     }
+}
+
+impl Drop for HttpStreamReader {
+    fn drop(&mut self) {
+        self.abort_fetcher();
+    }
+}
+
+fn build_stream_request(client: &Client, url: &str, offset: u64) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .header(RANGE, format!("bytes={}-", offset))
+        .timeout(Duration::from_secs(30))
+}
+
+async fn request_stream_async(
+    client: Client,
+    url: String,
+    offset: u64,
+) -> std::io::Result<Response> {
+    let response = client
+        .get(&url)
+        .header(RANGE, format!("bytes={}-", offset))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| IoError::new(ErrorKind::Other, format!("HTTP stream error: {}", e)))?;
+
+    if !(response.status() == StatusCode::PARTIAL_CONTENT || response.status().is_success()) {
+        return Err(IoError::new(
+            ErrorKind::Other,
+            format!("HTTP stream responded with status {}", response.status()),
+        ));
+    }
+
+    Ok(response)
 }
 
 impl Seek for HttpStreamReader {
@@ -297,7 +354,7 @@ impl Seek for HttpStreamReader {
             if target == total {
                 self.position = target;
                 self.eof = true;
-                self.buffer = bytes::Bytes::new();
+                self.buffer = Bytes::new();
                 self.buffer_pos = 0;
                 return Ok(self.position);
             }
@@ -368,32 +425,6 @@ impl AudioManager {
         })
     }
 
-    async fn send_stream_request(
-        client: Client,
-        stream_url: String,
-        offset: u64,
-    ) -> Result<Response> {
-        let request = client
-            .get(&stream_url)
-            .header(RANGE, format!("bytes={}-", offset))
-            .timeout(std::time::Duration::from_secs(30));
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to request audio stream: {}", e))?;
-
-        if !response.status().is_success()
-            && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-        {
-            return Err(anyhow!(
-                "HTTP request failed with status: {}",
-                response.status()
-            ));
-        }
-
-        Ok(response)
-    }
     // Add method to fetch current position from server
     async fn fetch_server_position(&self, stream_url: &str) -> Result<f64> {
         let position_url = if stream_url.contains("/api/music/stream") {
@@ -459,26 +490,15 @@ impl AudioManager {
                 format!("{}?ts={}", stream_url_owned, timestamp)
             };
 
-            let response = runtime_handle.block_on(Self::send_stream_request(
-                http_client.clone(),
-                stream_url_with_ts.clone(),
-                effective_offset,
-            ))?;
-
             // Since rodio doesn't support seeking like HTML audio currentTime,
             // we use skip_duration to skip the audio samples to the right position
-
-            let total_length = parse_content_range(response.headers().get(CONTENT_RANGE))
-                .or(response.content_length());
 
             let reader = HttpStreamReader::new(
                 http_client.clone(),
                 stream_url_with_ts,
-                response,
                 effective_offset,
                 runtime_handle.clone(),
-                total_length,
-            );
+            )?;
 
             // Create decoder
             let decoder = rodio::Decoder::new(reader)
