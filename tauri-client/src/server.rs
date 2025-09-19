@@ -23,6 +23,7 @@ impl ServerClient {
         Self {
             client: reqwest::Client::builder()
                 .user_agent("MIU Player Tauri")
+                .http1_only() // Force HTTP/1.1 for better SSE compatibility
                 .build()
                 .expect("Failed to create reqwest client"),
         }
@@ -66,6 +67,10 @@ impl ServerClient {
         audio: Arc<Mutex<AudioManager>>,
         app_handle: AppHandle,
     ) {
+        let mut reconnect_attempts = 0;
+        const MAX_RECONNECT_DELAY: u64 = 30; // Maximum delay of 30 seconds
+        const INITIAL_RECONNECT_DELAY: u64 = 1; // Start with 1 second
+
         loop {
             let maybe_backend_url = {
                 let guard = state.lock().await;
@@ -73,6 +78,8 @@ impl ServerClient {
             };
 
             if let Some(backend_url) = maybe_backend_url {
+                println!("SSE: Connection attempt {} to {}", reconnect_attempts + 1, backend_url);
+
                 let result = self
                     .clone()
                     .establish_sse(
@@ -83,10 +90,27 @@ impl ServerClient {
                     )
                     .await;
 
-                if let Err(_err) = result {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                match result {
+                    Ok(_) => {
+                        println!("SSE: Connection closed normally, will reconnect");
+                        reconnect_attempts = 0; // Reset on successful connection
+                    },
+                    Err(err) => {
+                        reconnect_attempts += 1;
+                        println!("SSE: Connection error (attempt {}): {}", reconnect_attempts, err);
+                    }
                 }
+
+                // Exponential backoff with maximum delay
+                let delay = std::cmp::min(
+                    INITIAL_RECONNECT_DELAY * 2_u64.pow(reconnect_attempts.min(5)), // Cap at 2^5 = 32
+                    MAX_RECONNECT_DELAY
+                );
+
+                println!("SSE: Reconnecting in {}s...", delay);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
             } else {
+                // No backend URL configured, check again shortly
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
@@ -100,32 +124,53 @@ impl ServerClient {
         app_handle: AppHandle,
     ) -> Result<()> {
         let sse_url = format!("{}/api/music/state/live", backend_url);
+        println!("SSE: Connecting to {}", sse_url);
 
         let response = self
             .client
             .get(&sse_url)
             .header("Accept", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("Connection", "keep-alive")
             .send()
             .await
             .map_err(|e| anyhow!("Failed to start SSE connection: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(anyhow!("SSE connection failed with {}", response.status()));
+            return Err(anyhow!("SSE connection failed with status {}: {}",
+                response.status().as_u16(),
+                response.status().canonical_reason().unwrap_or("Unknown error")));
         }
+
+        println!("SSE: Connection established successfully (status {})", response.status());
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
+        println!("SSE: Starting to read event stream...");
+        let mut event_count = 0;
+
         while let Some(chunk) = stream.next().await {
-            let data = chunk.map_err(|e| anyhow!("SSE chunk error: {}", e))?;
+            let data = chunk.map_err(|e| {
+                println!("SSE: Chunk error: {}", e);
+                anyhow!("SSE chunk error: {}", e)
+            })?;
+
             let text = String::from_utf8_lossy(&data);
             buffer.push_str(&text.replace('\r', ""));
 
             while let Some(idx) = buffer.find("\n\n") {
                 let event_block = buffer[..idx].to_string();
                 buffer.drain(..idx + 2);
+                event_count += 1;
+
+                // Reduced verbosity - only log significant events
+                if event_count % 10 == 1 || event_block.contains("currentTrack") {
+                    println!("SSE: Processing event #{}", event_count);
+                }
+
                 let received_time = current_time_millis();
-                self.clone()
+                if let Err(e) = self.clone()
                     .process_sse_block(
                         &event_block,
                         state.clone(),
@@ -134,10 +179,13 @@ impl ServerClient {
                         &backend_url,
                         received_time,
                     )
-                    .await?;
+                    .await {
+                    println!("SSE: Error processing event: {}", e);
+                }
             }
         }
 
+        println!("SSE: Stream ended after {} events", event_count);
         Err(anyhow!("SSE connection closed"))
     }
 
@@ -166,10 +214,21 @@ impl ServerClient {
         }
 
         let Some(event) = event_type else {
+            println!("SSE: Received block without event type: {}", block);
             return Ok(());
         };
 
         let payload = data_lines.join("\n");
+
+        // Log important events only
+        match event.as_str() {
+            "state" if payload.contains("currentTrack") => println!("SSE: Received state event with track data"),
+            "sync_play" => println!("SSE: Received sync_play event"),
+            "heartbeat" => {}, // Suppress heartbeat spam
+            other if other != "state" => println!("SSE: Received '{}' event", other),
+            _ => {}, // Suppress regular state events without track changes
+        }
+
         self.handle_event(
             event,
             &payload,
@@ -196,6 +255,7 @@ impl ServerClient {
             "state" => {
                 let data: StateEventPayload = serde_json::from_str(payload)
                     .map_err(|e| anyhow!("Failed to parse state event: {}", e))?;
+
                 self.apply_state_event(data, state, audio, app_handle).await
             }
             "sync_play" => {
@@ -236,8 +296,18 @@ impl ServerClient {
 
         // Track change detection and handling
         let track_changed = if let Some(track) = data.current_track {
-            guard.update_current_track(Some(track))
+            let previous_track_id = guard.current_track.as_ref().map(|t| t.youtube_id.clone());
+            let new_track_id = track.youtube_id.clone();
+            let changed = guard.update_current_track(Some(track));
+
+            if changed {
+                println!("🎵 Track changed: {} → {}",
+                    previous_track_id.as_deref().unwrap_or("None"),
+                    new_track_id);
+            }
+            changed
         } else if guard.current_track.is_some() {
+            println!("SSE: Track cleared (no current track)");
             guard.update_current_track(None);
             guard.clear_sync();
             true
@@ -495,53 +565,9 @@ impl ServerClient {
         let play_result = {
             let mut audio_manager = audio.lock().await;
 
-            // Set up track end callback to handle completion
-            let state_for_callback = state.clone();
-            let app_handle_for_callback = app_handle.clone();
-            audio_manager
-                .set_track_end_callback(move || {
-                    // Update state to reflect track completion and trigger next track
-                    let state_clone = state_for_callback.clone();
-                    let app_handle_clone = app_handle_for_callback.clone();
-
-                    tokio::spawn(async move {
-                        let (backend_url, should_continue) = {
-                            let mut guard = state_clone.lock().await;
-
-                            // Set status to stopped and clear position
-                            guard.update_player_status(PlaybackStatus::Stopped);
-                            guard.clear_sync();
-
-                            let snapshot = guard.snapshot();
-                            let backend_url = guard.backend_url();
-                            let should_continue = !guard.user_paused; // Only continue if user hasn't paused
-
-                            drop(guard);
-
-                            // Notify UI of track completion immediately
-                            let _ = app_handle_clone.emit("player_state_updated", snapshot);
-
-                            (backend_url, should_continue)
-                        };
-
-                        if should_continue {
-                            if let Some(backend_url) = backend_url {
-                                // Simulate a play request to trigger next track
-                                let client = reqwest::Client::new();
-                                match client
-                                    .post(&format!("{}/api/music/play", backend_url))
-                                    .send()
-                                    .await
-                                {
-                                    Ok(response) if response.status().is_success() => {}
-                                    Ok(_response) => {}
-                                    Err(_e) => {}
-                                }
-                            }
-                        }
-                    });
-                })
-                .await;
+            // Removed track end callback - track advancement is handled entirely by SSE events
+            // The backend manages track timing and automatically broadcasts state changes
+            println!("Audio: Track end handling delegated to SSE events from backend");
 
             audio_manager
                 .play_from(&full_stream_url, playback_position, duration_opt)

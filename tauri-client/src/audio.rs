@@ -394,7 +394,6 @@ pub struct AudioManager {
     sink: Arc<Mutex<Option<Sink>>>,
     volume: f32,
     http: Client,
-    track_end_callback: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
 }
 
 impl AudioManager {
@@ -422,7 +421,6 @@ impl AudioManager {
             sink: Arc::new(Mutex::new(None)),
             volume: 0.8,
             http,
-            track_end_callback: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -531,44 +529,9 @@ impl AudioManager {
         //     self.volume, start_position
         // );
 
-        // Start monitoring track completion in the background
-        let track_duration_for_monitor = track_duration;
-        let audio_manager = {
-            // Create a lightweight clone for monitoring
-            AudioManager {
-                audio: self.audio.clone(),
-                sink: self.sink.clone(),
-                volume: self.volume,
-                http: self.http.clone(),
-                track_end_callback: self.track_end_callback.clone(),
-            }
-        };
-
-        tokio::spawn(async move {
-            // Monitor track completion every 2 seconds
-            let mut consecutive_stopped_checks = 0;
-            loop {
-                let is_playing = audio_manager.is_playing().await;
-                if !is_playing {
-                    consecutive_stopped_checks += 1;
-
-                    // Only consider it truly completed after 3 consecutive checks (6 seconds)
-                    // This prevents triggering on temporary network issues or brief interruptions
-                    if consecutive_stopped_checks >= 3 {
-                        audio_manager
-                            .check_track_completion(track_duration_for_monitor)
-                            .await;
-                        break;
-                    }
-                } else {
-                    // Reset counter if playback resumed
-                    if consecutive_stopped_checks > 0 {
-                        consecutive_stopped_checks = 0;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        });
+        // Removed local track completion monitoring - rely entirely on SSE events from backend
+        // The backend handles track timing and advancement, then broadcasts state changes via SSE
+        println!("Audio: Playback started, relying on SSE for track progression");
 
         Ok(())
     }
@@ -605,31 +568,7 @@ impl AudioManager {
         }
     }
 
-    pub async fn set_track_end_callback<F>(&self, callback: F)
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
-        let mut callback_guard = self.track_end_callback.lock().await;
-        *callback_guard = Some(Box::new(callback));
-    }
-
-    async fn check_track_completion(&self, track_duration: Option<f64>) {
-        if let Some(_duration) = track_duration {
-            let sink_guard = self.sink.lock().await;
-            if let Some(ref sink) = *sink_guard {
-                // Check if sink is empty (track finished playing)
-                if sink.empty() && !sink.is_paused() {
-                    drop(sink_guard); // Release the lock before calling callback
-
-                    // Call the track end callback
-                    let callback_guard = self.track_end_callback.lock().await;
-                    if let Some(ref callback) = *callback_guard {
-                        callback();
-                    }
-                }
-            }
-        }
-    }
+    // Removed track end callback methods - track advancement now handled via SSE events
 }
 
 fn parse_content_range(header: Option<&HeaderValue>) -> Option<u64> {
