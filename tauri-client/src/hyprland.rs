@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 mod platform {
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
     use std::process::Command;
 
     #[derive(Debug, Serialize, Default, Clone)]
@@ -9,6 +10,29 @@ mod platform {
         pub accent_color: Option<String>,
         pub inactive_color: Option<String>,
         pub prefers_tiling: bool,
+        // Material You colors from matugen
+        pub primary: Option<String>,
+        pub primary_container: Option<String>,
+        pub secondary: Option<String>,
+        pub secondary_container: Option<String>,
+        pub tertiary: Option<String>,
+        pub background: Option<String>,
+        pub surface: Option<String>,
+        pub surface_variant: Option<String>,
+        pub outline: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct MatugenColors {
+        pub primary: String,
+        pub primary_container: String,
+        pub secondary: String,
+        pub secondary_container: String,
+        pub tertiary: String,
+        pub background: String,
+        pub surface: String,
+        pub surface_variant: String,
+        pub outline: String,
     }
 
     pub fn detect_theme() -> Option<HyprlandTheme> {
@@ -21,12 +45,38 @@ mod platform {
         let inactive = fetch_color("general:col.inactive_border")
             .or_else(|| fetch_color("decoration:col.inactive_border"));
 
+        // Load Material You colors from matugen
+        let matugen_colors = load_matugen_colors();
+
         Some(HyprlandTheme {
             is_hyprland: true,
             accent_color: accent,
             inactive_color: inactive,
             prefers_tiling: true,
+            primary: matugen_colors.as_ref().map(|c| c.primary.clone()),
+            primary_container: matugen_colors.as_ref().map(|c| c.primary_container.clone()),
+            secondary: matugen_colors.as_ref().map(|c| c.secondary.clone()),
+            secondary_container: matugen_colors.as_ref().map(|c| c.secondary_container.clone()),
+            tertiary: matugen_colors.as_ref().map(|c| c.tertiary.clone()),
+            background: matugen_colors.as_ref().map(|c| c.background.clone()),
+            surface: matugen_colors.as_ref().map(|c| c.surface.clone()),
+            surface_variant: matugen_colors.as_ref().map(|c| c.surface_variant.clone()),
+            outline: matugen_colors.as_ref().map(|c| c.outline.clone()),
         })
+    }
+
+    fn load_matugen_colors() -> Option<MatugenColors> {
+        let home = std::env::var("HOME").ok()?;
+        let colors_path = format!("{}/.local/state/quickshell/user/generated/colors.json", home);
+
+        let content = fs::read_to_string(&colors_path).ok()?;
+        let colors = serde_json::from_str::<MatugenColors>(&content).ok()?;
+
+        // Debug: Print the actual colors we're reading
+        println!("🎨 Loaded matugen colors: background={}, primary={}, surface={}",
+                 colors.background, colors.primary, colors.surface);
+
+        Some(colors)
     }
 
     fn is_hyprland() -> bool {

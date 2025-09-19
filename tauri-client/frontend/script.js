@@ -112,8 +112,10 @@ let reconnectTimeout = null;
 
 function setCssVariable(name, value) {
     if (!name || typeof value === 'undefined' || value === null) {
+        console.warn(`⚠️ Skipping invalid CSS variable: ${name} = ${value}`);
         return;
     }
+    console.log(`🎨 Setting CSS variable: ${name} = ${value}`);
     document.documentElement.style.setProperty(name, value);
 }
 
@@ -179,6 +181,8 @@ function applyHyprlandTheme(theme) {
         return;
     }
 
+    console.log('🎨 Applying Hyprland theme:', theme);
+
     const root = document.documentElement;
     root.classList.add('hyprland');
 
@@ -186,7 +190,61 @@ function applyHyprlandTheme(theme) {
         root.classList.add('hyprland-prefers-tiling');
     }
 
-    if (theme.accent_color) {
+    // Apply Material You colors if available (matugen)
+    if (theme.primary) {
+        const primary = normalizeHexColor(theme.primary);
+        if (primary) {
+            setCssVariable('--miu-accent', primary);
+            setCssVariable('--miu-success', primary);
+            setCssVariable('--miu-slider-thumb', primary);
+        }
+    }
+
+    if (theme.primary_container) {
+        const primaryContainer = normalizeHexColor(theme.primary_container);
+        if (primaryContainer) {
+            setCssVariable('--miu-accent-soft', primaryContainer);
+        }
+    }
+
+    if (theme.secondary) {
+        const secondary = normalizeHexColor(theme.secondary);
+        if (secondary) {
+            setCssVariable('--miu-secondary', secondary);
+        }
+    }
+
+    if (theme.background) {
+        const background = normalizeHexColor(theme.background);
+        if (background) {
+            setCssVariable('--miu-background-start', background);
+            setCssVariable('--miu-background-end', background);
+        }
+    }
+
+    if (theme.surface) {
+        const surface = normalizeHexColor(theme.surface);
+        if (surface) {
+            setCssVariable('--miu-surface', hexToRgba(surface, 0.8) || surface);
+        }
+    }
+
+    if (theme.surface_variant) {
+        const surfaceVariant = normalizeHexColor(theme.surface_variant);
+        if (surfaceVariant) {
+            setCssVariable('--miu-surface-border', hexToRgba(surfaceVariant, 0.3) || surfaceVariant);
+        }
+    }
+
+    if (theme.outline) {
+        const outline = normalizeHexColor(theme.outline);
+        if (outline) {
+            setCssVariable('--miu-surface-border', hexToRgba(outline, 0.4) || outline);
+        }
+    }
+
+    // Fallback to border colors if Material You colors aren't available
+    if (theme.accent_color && !theme.primary) {
         const accent = normalizeHexColor(theme.accent_color);
         if (accent) {
             setCssVariable('--miu-accent', accent);
@@ -393,6 +451,7 @@ function initializeTauriListeners() {
         console.warn('Skipping Tauri event listener registration: listen API unavailable');
         return;
     }
+    console.log('🔧 Initializing Tauri event listeners...');
     listen('player_state_updated', (event) => {
         if (event && event.payload) {
             updatePlayerState(event.payload);
@@ -402,11 +461,17 @@ function initializeTauriListeners() {
     });
 
     listen('hyprland_theme', (event) => {
+        console.log('📡 Received hyprland_theme event:', event);
         if (event && event.payload) {
+            console.log('🎨 Event payload:', event.payload);
             applyHyprlandTheme(event.payload);
+        } else {
+            console.warn('⚠️ Invalid hyprland_theme event:', event);
         }
+    }).then(() => {
+        console.log('✅ Successfully registered hyprland_theme listener');
     }).catch((error) => {
-        console.error('Failed to register hyprland_theme listener', error);
+        console.error('❌ Failed to register hyprland_theme listener:', error);
     });
 
     listen('theme_overrides', (event) => {

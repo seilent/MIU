@@ -6,7 +6,10 @@
     "dev": "concurrently \"cd frontend && npm run dev\" \"cd backend && npm run dev\"",
     "build": "concurrently \"cd frontend && npm run build\" \"cd backend && npm run build\"",
     "start": "concurrently \"cd frontend && npm run start\" \"cd backend && npm run start\"",
-    "lint": "concurrently \"cd frontend && npm run lint\" \"cd backend && npm run lint\""
+    "lint": "concurrently \"cd frontend && npm run lint\" \"cd backend && npm run lint\"",
+    "desktop:dev": "cd nodejs-client && npm run dev",
+    "desktop:build": "cd nodejs-client && npm run build",
+    "desktop:pack": "cd nodejs-client && npm run pack"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

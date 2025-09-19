@@ -246,6 +246,7 @@ impl HttpStreamReader {
         }
     }
 
+
     fn abort_fetcher(&mut self) {
         if let Some(handle) = self.fetch_task.take() {
             handle.abort();
