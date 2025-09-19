@@ -219,6 +219,25 @@ impl AppState {
         self.volume = volume.clamp(0.0, 1.0);
     }
 
+    // MPRIS convenience methods
+    pub fn set_playing(&mut self, playing: bool) {
+        if playing {
+            self.set_user_paused(false);
+            self.update_player_status(PlaybackStatus::Playing);
+        } else {
+            self.set_user_paused(true);
+            self.update_player_status(PlaybackStatus::Paused);
+        }
+    }
+
+    pub fn is_playing(&self) -> bool {
+        !self.user_paused && self.player_status == PlaybackStatus::Playing
+    }
+
+    pub fn set_position(&mut self, position: f64) {
+        self.update_sync(position, Some(self.track_duration));
+    }
+
     pub fn update_current_track(&mut self, track: Option<Track>) -> bool {
         let changed = match (&self.current_track, &track) {
             (Some(current), Some(next)) => current.youtube_id != next.youtube_id,

@@ -1,12 +1,14 @@
 use crate::audio::AudioManager;
 use crate::state::{AppState, PlaybackStatus, Track};
+#[cfg(target_os = "linux")]
+use crate::mpris::MprisManager;
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -435,6 +437,7 @@ impl ServerClient {
             let snapshot = guard.snapshot();
             drop(guard);
             let _ = app_handle.emit("player_state_updated", snapshot);
+
         }
 
         let play_result = {
@@ -465,6 +468,7 @@ impl ServerClient {
 
                             // Notify UI of track completion immediately
                             let _ = app_handle_clone.emit("player_state_updated", snapshot);
+
 
                             (backend_url, should_continue)
                         };
@@ -500,6 +504,8 @@ impl ServerClient {
             let snapshot = guard.snapshot();
             drop(guard);
             let _ = app_handle.emit("player_state_updated", snapshot);
+
+
             return Err(play_err);
         }
 
@@ -509,8 +515,36 @@ impl ServerClient {
             guard.set_user_paused(false);
             guard.update_sync(playback_position, duration_opt);
             let snapshot = guard.snapshot();
+            let backend_url = guard.backend_url();
             drop(guard);
-            let _ = app_handle.emit("player_state_updated", snapshot);
+            let _ = app_handle.emit("player_state_updated", snapshot.clone());
+
+            // Update MPRIS with final playing state
+            #[cfg(target_os = "linux")]
+            if let Some(mpris) = app_handle.try_state::<MprisManager>() {
+                if let Err(e) = mpris.update_playback_status(PlaybackStatus::Playing).await {
+                    println!("Failed to update MPRIS playing status: {}", e);
+                }
+                if let Some(track) = snapshot.current_track.as_ref() {
+                    let track_data = Track {
+                        youtube_id: track.youtube_id.clone(),
+                        title: track.title.clone(),
+                        duration: track.duration,
+                        thumbnail: track.thumbnail.clone(),
+                        requested_by: track.requested_by.clone(),
+                        channel_title: track.channel_title.clone(),
+                        requested_at: track.requested_at.clone(),
+                        is_autoplay: Some(track.is_autoplay),
+                    };
+                    if let Err(e) = mpris.update_metadata(&track_data, backend_url.as_deref()).await {
+                        println!("Failed to update MPRIS metadata: {}", e);
+                    }
+                }
+                if let Err(e) = mpris.update_position(playback_position).await {
+                    println!("Failed to update MPRIS position: {}", e);
+                }
+            }
+
         }
 
         Ok(())

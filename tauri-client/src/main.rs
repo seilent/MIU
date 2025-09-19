@@ -4,23 +4,23 @@
 mod audio;
 mod config;
 mod hyprland;
+mod mpris;
 mod server;
 mod state;
 mod theme;
-// mod mpris;
 
 use audio::AudioManager;
 use config::AppConfig;
+use mpris::MprisManager;
 use server::ServerClient;
 use state::{AppState, PlaybackStatus, PlayerSnapshot, Track};
 use theme::ThemeOverrides;
-// use mpris::MprisManager;
 // Removed unused PathBuf import
 use std::sync::Arc;
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use tokio::sync::Mutex;
 
 // Hold the tray icon handle so Linux tray implementations keep it alive.
@@ -65,9 +65,18 @@ async fn play_pause(
             snapshot.is_playing
         );
         pause_handle
-            .emit("player_state_updated", snapshot)
+            .emit("player_state_updated", snapshot.clone())
             .map_err(|e| e.to_string())?;
         println!("Event emitted successfully");
+
+        // Update MPRIS status
+        #[cfg(target_os = "linux")]
+        if let Some(mpris) = pause_handle.try_state::<MprisManager>() {
+            if let Err(e) = mpris.update_playback_status(PlaybackStatus::Paused).await {
+                println!("Failed to update MPRIS playback status: {}", e);
+            }
+        }
+
 
         // Audio stop can happen after UI update (pause = stop for streaming)
         audio_arc
@@ -112,8 +121,17 @@ async fn set_volume(
         .map_err(|e| e.to_string())?;
 
     app_handle
-        .emit("player_state_updated", snapshot)
+        .emit("player_state_updated", snapshot.clone())
         .map_err(|e| e.to_string())?;
+
+    // Update MPRIS volume
+    #[cfg(target_os = "linux")]
+    if let Some(mpris) = app_handle.try_state::<MprisManager>() {
+        if let Err(e) = mpris.update_volume(volume).await {
+            println!("Failed to update MPRIS volume: {}", e);
+        }
+    }
+
 
     // Save the new volume to config for persistence
     // Note: We should update the config through the state management system
@@ -259,7 +277,67 @@ fn main() {
                 }
             });
 
-            server_clone.spawn_background(state_clone, audio_clone, app_handle);
+            // Set up MPRIS event listeners before spawning background task
+            #[cfg(target_os = "linux")]
+            {
+                let mpris_app_handle = app_handle.clone();
+
+                app_handle.listen("mpris_play_pause", move |_| {
+                    let handle = mpris_app_handle.clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        let state_handle = handle.state::<Arc<Mutex<AppState>>>();
+                        let audio_handle = handle.state::<Arc<Mutex<AudioManager>>>();
+                        let server_handle = handle.state::<Arc<ServerClient>>();
+                        let handle_for_call = handle.clone();
+
+                        if let Err(e) = crate::play_pause(handle_for_call, state_handle, audio_handle, server_handle).await {
+                            println!("MPRIS play_pause error: {}", e);
+                        }
+                    });
+                });
+
+                let volume_handle = app_handle.clone();
+
+                app_handle.listen("mpris_volume_change", move |event| {
+                    if let Some(volume) = event.payload().parse::<f32>().ok() {
+                        let handle = volume_handle.clone();
+
+                        tauri::async_runtime::spawn(async move {
+                            let state_handle = handle.state::<Arc<Mutex<AppState>>>();
+                            let audio_handle = handle.state::<Arc<Mutex<AudioManager>>>();
+                            let handle_for_call = handle.clone();
+
+                            if let Err(e) = crate::set_volume(handle_for_call, state_handle, audio_handle, volume).await {
+                                println!("MPRIS volume change error: {}", e);
+                            }
+                        });
+                    }
+                });
+            }
+
+            // Spawn background server task after MPRIS setup
+            server_clone.spawn_background(state_clone.clone(), audio_clone.clone(), app_handle.clone());
+
+            // Initialize MPRIS on Linux
+            #[cfg(target_os = "linux")]
+            {
+                let mpris_state = state_clone.clone();
+                let mpris_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    match MprisManager::new(mpris_state, mpris_handle.clone()).await {
+                        Ok(mpris_manager) => {
+                            println!("MPRIS manager initialized successfully");
+                            mpris_handle.manage(mpris_manager);
+                            // Keep the task alive
+                            std::future::pending::<()>().await;
+                        }
+                        Err(e) => {
+                            println!("Failed to initialize MPRIS manager: {}", e);
+                        }
+                    }
+                });
+            }
 
             if hypr_theme.is_none() {
                 match init_tray(app) {
