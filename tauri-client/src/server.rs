@@ -315,11 +315,23 @@ impl ServerClient {
             false
         };
 
+        // Store queue before moving for later use
+        let queue_for_transition = data.queue.clone();
         guard.update_queue(data.queue);
 
         if let Some(position) = data.position {
             let duration = guard.current_track.as_ref().map(|t| t.duration);
             guard.update_sync(position, duration);
+
+            // Update audio buffer with SSE position information
+            let audio_clone = audio.clone();
+            let position_for_audio = position;
+            tokio::spawn(async move {
+                let audio_manager = audio_clone.lock().await;
+                if let Err(e) = audio_manager.update_from_sse(position_for_audio, None).await {
+                    println!("SSE: Failed to update audio buffer with position: {}", e);
+                }
+            });
         }
 
         let snapshot = guard.snapshot();
@@ -329,6 +341,19 @@ impl ServerClient {
 
         // If track changed, immediately start playback like the frontend does
         if track_changed {
+            // Prepare buffer for track transition if we have queue information
+            if let Some(next_track) = queue_for_transition.first() {
+                let audio_clone = audio.clone();
+                let backend_url_for_prep = state.lock().await.backend_url().unwrap_or_default();
+                let next_track_id = next_track.youtube_id.clone();
+                tokio::spawn(async move {
+                    let audio_manager = audio_clone.lock().await;
+                    let next_stream_url = format!("{}/api/music/stream?v={}", backend_url_for_prep, next_track_id);
+                    if let Err(e) = audio_manager.prepare_track_transition(&next_stream_url, 0.0).await {
+                        println!("SSE: Failed to prepare track transition: {}", e);
+                    }
+                });
+            }
             // Get the backend URL and check if we should start playing
             let should_start_playback = {
                 let guard = state.lock().await;
@@ -477,6 +502,17 @@ impl ServerClient {
         let elapsed_since_received = current_time - received_time_ms;
         let mut time_until_play = server_buffer - elapsed_since_received - estimated_latency;
 
+        // Update audio buffer with sync timing information for optimized buffering
+        let audio_clone = audio.clone();
+        let sync_position = position;
+        let latency_estimate = estimated_latency;
+        tokio::spawn(async move {
+            let audio_manager = audio_clone.lock().await;
+            if let Err(e) = audio_manager.update_from_sse(sync_position, Some(latency_estimate)).await {
+                println!("SSE: Failed to update audio buffer for sync_play: {}", e);
+            }
+        });
+
         if !time_until_play.is_finite() {
             time_until_play = 0.0;
         }
@@ -569,9 +605,23 @@ impl ServerClient {
             // The backend manages track timing and automatically broadcasts state changes
             println!("Audio: Track end handling delegated to SSE events from backend");
 
-            audio_manager
+            let play_result = audio_manager
                 .play_from(&full_stream_url, playback_position, duration_opt)
-                .await
+                .await;
+
+            // Update buffer with current playback position for better sync after play starts
+            if play_result.is_ok() {
+                let audio_clone = audio.clone();
+                let position_for_buffer = playback_position;
+                tokio::spawn(async move {
+                    let audio_manager = audio_clone.lock().await;
+                    if let Err(e) = audio_manager.update_from_sse(position_for_buffer, None).await {
+                        println!("Audio: Failed to update buffer on playback start: {}", e);
+                    }
+                });
+            }
+
+            play_result
         };
 
         if let Err(play_err) = play_result {

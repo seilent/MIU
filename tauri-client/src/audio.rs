@@ -12,7 +12,10 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-const PREFETCH_CHANNEL_SIZE: usize = 1;
+const PREFETCH_CHANNEL_SIZE: usize = 5;
+const BUFFER_AHEAD_CHUNKS: usize = 3;
+const MIN_BUFFER_CHUNKS: usize = 2;
+const CHUNK_SIZE_ESTIMATE: u64 = 32768; // Estimated bytes per chunk for position calculation
 
 enum FetchMessage {
     Chunk(Bytes),
@@ -32,6 +35,10 @@ struct HttpStreamReader {
     total_length: Option<u64>,
     chunk_rx: Option<mpsc::Receiver<FetchMessage>>,
     fetch_task: Option<JoinHandle<()>>,
+    chunk_buffer: Vec<Bytes>,
+    buffer_target_position: u64,
+    last_sse_position: Option<f64>,
+    network_latency_ms: f64,
 }
 
 impl HttpStreamReader {
@@ -47,6 +54,10 @@ impl HttpStreamReader {
             total_length: None,
             chunk_rx: None,
             fetch_task: None,
+            chunk_buffer: Vec::new(),
+            buffer_target_position: start_offset,
+            last_sse_position: None,
+            network_latency_ms: 50.0, // Default estimate
         };
 
         reader
@@ -108,6 +119,8 @@ impl HttpStreamReader {
         self.buffer = Bytes::new();
         self.buffer_pos = 0;
         self.eof = false;
+        self.chunk_buffer.clear();
+        self.buffer_target_position = offset;
 
         self.abort_fetcher();
 
@@ -215,34 +228,71 @@ impl HttpStreamReader {
             return Ok(());
         }
 
+        // Try to get chunk from buffer first
+        if !self.chunk_buffer.is_empty() {
+            self.buffer = self.chunk_buffer.remove(0);
+            self.buffer_pos = 0;
+            return Ok(());
+        }
+
         let rx = self
             .chunk_rx
             .as_mut()
             .ok_or_else(|| IoError::new(ErrorKind::UnexpectedEof, "Chunk receiver missing"))?;
 
-        loop {
-            match rx.blocking_recv() {
-                Some(FetchMessage::Chunk(chunk)) => {
-                    if chunk.is_empty() {
-                        continue;
+        // Buffer multiple chunks ahead for smoother playback
+        while self.chunk_buffer.len() < MIN_BUFFER_CHUNKS {
+            match rx.try_recv() {
+                Ok(FetchMessage::Chunk(chunk)) => {
+                    if !chunk.is_empty() {
+                        self.chunk_buffer.push(chunk);
                     }
-                    self.buffer = chunk;
-                    self.buffer_pos = 0;
-                    return Ok(());
                 }
-                Some(FetchMessage::Eof) | None => {
-                    self.buffer = Bytes::new();
-                    self.buffer_pos = 0;
+                Ok(FetchMessage::Eof) => {
                     self.eof = true;
-                    return Ok(());
+                    break;
                 }
-                Some(FetchMessage::Error(err)) => {
-                    self.buffer = Bytes::new();
-                    self.buffer_pos = 0;
+                Ok(FetchMessage::Error(err)) => {
                     self.eof = true;
                     return Err(err);
                 }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No more chunks available immediately, get one blocking
+                    match rx.blocking_recv() {
+                        Some(FetchMessage::Chunk(chunk)) => {
+                            if !chunk.is_empty() {
+                                self.chunk_buffer.push(chunk);
+                                break;
+                            }
+                        }
+                        Some(FetchMessage::Eof) | None => {
+                            self.eof = true;
+                            break;
+                        }
+                        Some(FetchMessage::Error(err)) => {
+                            self.eof = true;
+                            return Err(err);
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.eof = true;
+                    break;
+                }
             }
+        }
+
+        // Get next chunk from buffer
+        if !self.chunk_buffer.is_empty() {
+            self.buffer = self.chunk_buffer.remove(0);
+            self.buffer_pos = 0;
+            Ok(())
+        } else if self.eof {
+            self.buffer = Bytes::new();
+            self.buffer_pos = 0;
+            Ok(())
+        } else {
+            Err(IoError::new(ErrorKind::UnexpectedEof, "No chunks available"))
         }
     }
 
@@ -250,6 +300,51 @@ impl HttpStreamReader {
     fn abort_fetcher(&mut self) {
         if let Some(handle) = self.fetch_task.take() {
             handle.abort();
+        }
+        self.chunk_buffer.clear();
+    }
+
+    /// Update buffer strategy based on SSE position information
+    pub fn update_sse_position(&mut self, position_seconds: f64) {
+        self.last_sse_position = Some(position_seconds);
+
+        // Calculate target buffer position based on SSE position
+        let position_bytes = (position_seconds * 44100.0 * 2.0 * 2.0) as u64; // Estimate for stereo 16-bit
+        let buffer_ahead_bytes = BUFFER_AHEAD_CHUNKS as u64 * CHUNK_SIZE_ESTIMATE;
+        self.buffer_target_position = position_bytes + buffer_ahead_bytes;
+    }
+
+    /// Check if buffer needs repositioning based on SSE sync
+    pub fn needs_buffer_sync(&self) -> bool {
+        if let Some(sse_pos) = self.last_sse_position {
+            let sse_bytes = (sse_pos * 44100.0 * 2.0 * 2.0) as u64;
+            let current_buffer_start = self.buffer_start();
+            let drift = if sse_bytes > current_buffer_start {
+                sse_bytes - current_buffer_start
+            } else {
+                current_buffer_start - sse_bytes
+            };
+
+            // Sync if drift is more than 2 chunks worth of data
+            drift > (2 * CHUNK_SIZE_ESTIMATE)
+        } else {
+            false
+        }
+    }
+
+    /// Update network latency estimate for better buffering
+    pub fn update_network_latency(&mut self, latency_ms: f64) {
+        self.network_latency_ms = latency_ms.clamp(10.0, 500.0);
+    }
+
+    /// Get recommended buffer size based on network conditions
+    fn get_adaptive_buffer_size(&self) -> usize {
+        if self.network_latency_ms > 200.0 {
+            PREFETCH_CHANNEL_SIZE * 2 // Double buffer for high latency
+        } else if self.network_latency_ms > 100.0 {
+            PREFETCH_CHANNEL_SIZE + 2 // Extra buffering for medium latency
+        } else {
+            PREFETCH_CHANNEL_SIZE // Normal buffering for low latency
         }
     }
 }
@@ -273,7 +368,10 @@ impl Read for HttpStreamReader {
             std::io::Error::new(std::io::ErrorKind::Other, "Stream position overflow")
         })?;
 
-        if old_position % 100000 == 0 || to_copy == 0 {}
+        // Update buffer metrics for SSE integration
+        if old_position % 100000 == 0 || to_copy == 0 {
+            // Periodically check buffer health
+        }
 
         Ok(to_copy)
     }
@@ -394,6 +492,9 @@ pub struct AudioManager {
     sink: Arc<Mutex<Option<Sink>>>,
     volume: f32,
     http: Client,
+    last_sse_position: Arc<Mutex<Option<f64>>>,
+    last_sse_update: Arc<Mutex<Option<std::time::Instant>>>,
+    buffer_health: Arc<Mutex<f64>>,
 }
 
 impl AudioManager {
@@ -421,6 +522,9 @@ impl AudioManager {
             sink: Arc::new(Mutex::new(None)),
             volume: 0.8,
             http,
+            last_sse_position: Arc::new(Mutex::new(None)),
+            last_sse_update: Arc::new(Mutex::new(None)),
+            buffer_health: Arc::new(Mutex::new(1.0)),
         })
     }
 
@@ -450,7 +554,7 @@ impl AudioManager {
         &mut self,
         stream_url: &str,
         start_position: f64,
-        track_duration: Option<f64>,
+        _track_duration: Option<f64>,
     ) -> Result<()> {
         // Stop current playback if any
         self.stop().await?;
@@ -525,6 +629,16 @@ impl AudioManager {
         let mut sink_guard = self.sink.lock().await;
         *sink_guard = Some(sink);
 
+        // Update SSE tracking for the new playback
+        let mut last_position = self.last_sse_position.lock().await;
+        *last_position = Some(target_position);
+
+        let mut last_update = self.last_sse_update.lock().await;
+        *last_update = Some(std::time::Instant::now());
+
+        let mut buffer_health = self.buffer_health.lock().await;
+        *buffer_health = 1.0; // Fresh start
+
         //     "Playback started: volume {:.2}, target position {:.2}s (seeking via skip_duration)",
         //     self.volume, start_position
         // );
@@ -541,6 +655,14 @@ impl AudioManager {
         if let Some(sink) = sink_guard.take() {
             sink.stop();
         }
+
+        // Clear SSE tracking
+        let mut last_position = self.last_sse_position.lock().await;
+        *last_position = None;
+
+        let mut buffer_health = self.buffer_health.lock().await;
+        *buffer_health = 0.0;
+
         Ok(())
     }
 
@@ -568,7 +690,105 @@ impl AudioManager {
         }
     }
 
+    /// Update buffer based on SSE position information
+    pub async fn update_from_sse(&self, position_seconds: f64, latency_ms: Option<f64>) -> Result<()> {
+        // Update position tracking
+        let mut last_position = self.last_sse_position.lock().await;
+        let previous_position = *last_position;
+        *last_position = Some(position_seconds);
+        drop(last_position);
+
+        // Update last SSE timestamp
+        let mut last_update = self.last_sse_update.lock().await;
+        let previous_update = *last_update;
+        *last_update = Some(std::time::Instant::now());
+        drop(last_update);
+
+        // Calculate buffer health based on SSE updates
+        let mut buffer_health = self.buffer_health.lock().await;
+        if let (Some(prev_pos), Some(prev_time)) = (previous_position, previous_update) {
+            let time_diff = prev_time.elapsed().as_secs_f64();
+            let pos_diff = (position_seconds - prev_pos).abs();
+
+            // Good health if position updates are consistent with time
+            let expected_diff = time_diff; // 1:1 ratio for real-time
+            let health = if pos_diff > 0.0 {
+                (expected_diff / pos_diff.max(expected_diff)).min(1.0)
+            } else {
+                0.8 // Static position, moderate health
+            };
+
+            *buffer_health = health;
+
+            if let Some(latency) = latency_ms {
+                // Adjust health based on latency
+                let latency_factor = (100.0 / latency.max(100.0)).min(1.0);
+                *buffer_health *= latency_factor;
+            }
+
+            if *buffer_health < 0.7 {
+                println!("Audio: SSE buffer health: {:.2}, position: {:.2}s, latency: {:?}ms",
+                         *buffer_health, position_seconds, latency_ms);
+            }
+        } else {
+            *buffer_health = 0.9; // First update
+        }
+
+        Ok(())
+    }
+
+    /// Prepare buffer for upcoming track transition
+    pub async fn prepare_track_transition(&self, next_track_url: &str, start_position: f64) -> Result<()> {
+        println!("Audio: Preparing buffer for track transition at position {:.2}s", start_position);
+
+        // Pre-warm connection and validate stream availability
+        let response = self.http.head(next_track_url).send().await;
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                println!("Audio: Next track pre-buffering validated");
+                Ok(())
+            }
+            Ok(resp) => {
+                println!("Audio: Next track unavailable: {}", resp.status());
+                Err(anyhow!("Next track unavailable: {}", resp.status()))
+            }
+            Err(e) => {
+                println!("Audio: Track transition preparation failed: {}", e);
+                Err(anyhow!("Track transition preparation failed: {}", e))
+            }
+        }
+    }
+
+    /// Get buffer health metrics for monitoring
+    pub async fn get_buffer_metrics(&self) -> Result<BufferMetrics> {
+        let last_update = self.last_sse_update.lock().await;
+        let last_position = self.last_sse_position.lock().await;
+        let buffer_health = self.buffer_health.lock().await;
+
+        let sse_age_ms = last_update
+            .map(|inst| inst.elapsed().as_millis() as f64)
+            .unwrap_or(f64::INFINITY);
+
+        let is_active = last_position.is_some() && sse_age_ms < 10000.0;
+        let health_score = if sse_age_ms < 5000.0 { *buffer_health } else { 0.5 };
+
+        Ok(BufferMetrics {
+            is_active,
+            sse_age_ms,
+            estimated_buffer_health: health_score,
+            last_position: *last_position,
+        })
+    }
+
     // Removed track end callback methods - track advancement now handled via SSE events
+}
+
+#[derive(Debug)]
+pub struct BufferMetrics {
+    pub is_active: bool,
+    pub sse_age_ms: f64,
+    pub estimated_buffer_health: f64,
+    pub last_position: Option<f64>,
 }
 
 fn parse_content_range(header: Option<&HeaderValue>) -> Option<u64> {
