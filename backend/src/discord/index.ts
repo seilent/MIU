@@ -45,14 +45,14 @@ export async function setupDiscordBot() {
   // Auto-join voice channel when ready
   client.on('ready', async () => {
     const targetChannelId = process.env.DISCORD_DEFAULT_VOICE_CHANNEL_ID;
-    
+
     if (!targetChannelId) {
       console.warn('No default voice channel configured. Set DISCORD_DEFAULT_VOICE_CHANNEL_ID in .env');
       return;
     }
-    
+
     const channel = client.channels.cache.get(targetChannelId);
-    
+
     // Set bot status to STREAMING with the URL
     if (client.user) {
       client.user.setPresence({
@@ -63,19 +63,33 @@ export async function setupDiscordBot() {
         }],
         status: 'online'
       });
-      
+
       console.log(`🤖 Bot is ready as ${client.user.tag} with STREAMING status`);
+
+      // Initialize bot user dependent operations
+      await client.player.onReady();
     }
-    
+
     if (channel?.isVoiceBased()) {
+      console.log('Setting up voice connection');
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: channel.guild.id,
         adapterCreator: channel.guild.voiceAdapterCreator,
       });
-      
+
       client.player.setConnection(connection);
       console.log(`🎵 Joined voice channel: ${channel.name}`);
+
+      // Start autoplay after connection is established (single source of truth)
+      setTimeout(async () => {
+        try {
+          console.log('Starting initial autoplay from centralized initialization...');
+          await client.player.startInitialAutoplay();
+        } catch (error) {
+          console.error('Failed to start initial autoplay:', error);
+        }
+      }, 3000);
     } else {
       console.error('Could not find target voice channel or channel is not a voice channel');
     }

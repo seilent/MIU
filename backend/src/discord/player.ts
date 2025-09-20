@@ -211,6 +211,11 @@ export class Player {
   private readonly AUTOPLAY_BUFFER_SIZE = parseInt(process.env.AUTOPLAY_BUFFER_SIZE || '5');
   private readonly AUTOPLAY_PREFETCH_THRESHOLD = parseInt(process.env.AUTOPLAY_PREFETCH_THRESHOLD || '2');
   private readonly PLAYLIST_EXHAUSTED_THRESHOLD = parseFloat(process.env.PLAYLIST_EXHAUSTED_THRESHOLD || '0.8');
+
+  // State management for preventing race conditions
+  private isInitializingConnection: boolean = false;
+  private isStartingAutoplay: boolean = false;
+  private isInitialized: boolean = false;
   // YouTube recommendation settings
   private readonly YT_REC_POOL_SIZE = parseInt(process.env.YT_REC_POOL_SIZE || '50');
   private readonly YT_REC_FETCH_COUNT = parseInt(process.env.YT_REC_FETCH_COUNT || '10');
@@ -285,10 +290,7 @@ export class Player {
     // Validate autoplay weights
     this.validateWeights();
 
-    // Ensure bot user exists in database
-    this.ensureBotUser().catch(error => {
-      console.error('Failed to ensure bot user exists:', error);
-    });
+    // Bot user initialization will be handled in onReady method after Discord client is ready
 
     // Clean up any stuck states from previous sessions
     this.cleanupStuckStates().catch(error => {
@@ -333,22 +335,8 @@ export class Player {
       this.handlePlaybackError();
     });
 
-    // Wait for client to be ready before initializing voice connection and starting autoplay
-    if (this.client.isReady()) {
-      this.initializeVoiceConnection();
-      // Start initial autoplay after initialization
-      this.startInitialAutoplay().catch(error => {
-        console.error('Failed to start initial autoplay:', error);
-      });
-    } else {
-      this.client.once('ready', () => {
-        this.initializeVoiceConnection();
-        // Start initial autoplay after initialization
-        this.startInitialAutoplay().catch(error => {
-          console.error('Failed to start initial autoplay:', error);
-        });
-      });
-    }
+    // Voice connection and autoplay initialization is now handled by the main bot initialization
+    // to prevent duplicate setup and racing conditions
 
     // Start user presence check interval
     this.startUserPresenceCheck();
@@ -362,8 +350,7 @@ export class Player {
 
   private async ensureBotUser(): Promise<void> {
     if (!this.client.user) {
-      console.error('Bot user not available');
-      return;
+      throw new Error('Bot user not available - Discord client not ready');
     }
 
     try {
@@ -389,7 +376,15 @@ export class Player {
   }
 
   private async initializeVoiceConnection() {
+    // Prevent concurrent connection attempts
+    if (this.isInitializingConnection || this.connection) {
+      console.log('Voice connection already initializing or established');
+      return;
+    }
+
     if (!this.defaultVoiceChannelId || !this.defaultGuildId) return;
+
+    this.isInitializingConnection = true;
 
     try {
       // Try to get guild from cache first
@@ -420,18 +415,20 @@ export class Player {
       }
 
       // Check if we already have a valid connection to this channel
-      if (this.connection?.joinConfig.channelId === channel.id && 
-          this.connection?.state.status !== 'destroyed' &&
-          this.connection?.state.status !== 'disconnected') {
+      const currentConnection = this.connection as VoiceConnection | undefined;
+      if (currentConnection &&
+          currentConnection.joinConfig.channelId === channel.id &&
+          currentConnection.state.status !== VoiceConnectionStatus.Destroyed &&
+          currentConnection.state.status !== VoiceConnectionStatus.Disconnected) {
         console.log('Already connected to the correct voice channel');
         return;
       }
 
       // If we have an existing connection but it's to a different channel or in a bad state
-      if (this.connection) {
+      if (currentConnection) {
         try {
-          this.connection.removeAllListeners();
-          this.connection.destroy();
+          currentConnection.removeAllListeners();
+          currentConnection.destroy();
         } catch (error) {
           // Ignore destroy errors
           console.log('Cleaning up old connection');
@@ -484,6 +481,8 @@ export class Player {
       console.error('Failed to connect to voice channel:', error);
       // Clear connection if initialization failed
       this.connection = undefined;
+    } finally {
+      this.isInitializingConnection = false;
     }
   }
 
@@ -544,6 +543,12 @@ export class Player {
   }
 
   setConnection(connection: VoiceConnection) {
+    // Check if we already have the same connection
+    if (this.connection === connection) {
+      console.log('Already connected to the correct voice channel');
+      return;
+    }
+
     // Only clean up the old connection if it's different from the new one
     if (this.connection && this.connection !== connection) {
       try {
@@ -2667,18 +2672,26 @@ export class Player {
   }
 
   // Method to start autoplay when server starts
-  private async startInitialAutoplay(): Promise<void> {
+  public async startInitialAutoplay(): Promise<void> {
+    // Prevent multiple autoplay attempts
+    if (this.isStartingAutoplay) {
+      console.log('Autoplay already starting, skipping duplicate attempt');
+      return;
+    }
+
+    this.isStartingAutoplay = true;
+
     try {
       console.log('Starting initial autoplay...');
-      
+
       // Wait a bit for Discord connection to stabilize
       await new Promise(resolve => setTimeout(resolve, 2000));
-      
+
       // Only start autoplay if player is idle and no tracks are queued
-      if (this.audioPlayer.state.status === AudioPlayerStatus.Idle && 
-          this.queue.length === 0 && 
+      if (this.audioPlayer.state.status === AudioPlayerStatus.Idle &&
+          this.queue.length === 0 &&
           !this.currentTrack) {
-        
+
         console.log('Player is idle, starting autoplay...');
         await this.handleAutoplay();
       } else {
@@ -2686,6 +2699,21 @@ export class Player {
       }
     } catch (error) {
       console.error('Error starting initial autoplay:', error);
+    } finally {
+      this.isStartingAutoplay = false;
+    }
+  }
+
+  /**
+   * Called when Discord client is ready to handle bot user dependent operations
+   */
+  public async onReady(): Promise<void> {
+    try {
+      // Ensure bot user exists in database now that client is ready
+      await this.ensureBotUser();
+      console.log('Bot user initialization completed successfully');
+    } catch (error) {
+      console.error('Failed to complete bot user initialization:', error);
     }
   }
 
