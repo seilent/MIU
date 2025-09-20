@@ -1,7 +1,9 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useState } from 'react';
 import Image from 'next/image';
+import { XMarkIcon } from '@heroicons/react/24/solid';
 import env from '@/utils/env';
 import { useAuthStore } from '@/lib/store/authStore';
 
@@ -25,8 +27,8 @@ interface AnimatedQueueItemProps {
   onAnimationComplete?: () => void;
 }
 
-export function AnimatedQueueItem({ 
-  track, 
+export function AnimatedQueueItem({
+  track,
   position,
   showPosition = true,
   isLeaving = false,
@@ -34,7 +36,7 @@ export function AnimatedQueueItem({
 }: AnimatedQueueItemProps) {
   const { user } = useAuthStore();
   const isAdmin = user?.roles?.includes('admin') || false;
-
+  const [showBanOptions, setShowBanOptions] = useState(false);
 
   const handleBanTrack = async () => {
     try {
@@ -42,11 +44,11 @@ export function AnimatedQueueItem({
       const headers: HeadersInit = {
         'Content-Type': 'application/json'
       };
-      
+
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
+
       const response = await fetch('/backend/api/music/ban', {
         method: 'POST',
         headers,
@@ -55,7 +57,7 @@ export function AnimatedQueueItem({
           block_channel: false
         })
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to ban track');
       }
@@ -70,11 +72,11 @@ export function AnimatedQueueItem({
       const headers: HeadersInit = {
         'Content-Type': 'application/json'
       };
-      
+
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
+
       const response = await fetch('/backend/api/music/ban', {
         method: 'POST',
         headers,
@@ -83,7 +85,7 @@ export function AnimatedQueueItem({
           block_channel: true
         })
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to ban channel');
       }
@@ -92,61 +94,25 @@ export function AnimatedQueueItem({
     }
   };
 
-  // Simplified animation variants
-  const variants = {
-    enter: {
-      y: 20,
-      opacity: 0,
-      scale: 0.95
-    },
-    center: {
-      y: 0,
-      opacity: 1,
-      scale: 1,
-      transition: {
-        duration: 0.4,
-        ease: [0.4, 0, 0.2, 1], // Custom easing for fluid motion
-        scale: {
-          type: "spring",
-          damping: 15,
-          stiffness: 100
-        }
-      }
-    },
-    exit: position === 1 ? {
-      y: -20,
-      opacity: 0,
-      scale: 0.95,
-      transition: {
-        duration: 0.3,
-        ease: [0.4, 0, 0.2, 1]
-      }
-    } : {
-      x: -100,
-      opacity: 0,
-      transition: {
-        duration: 0.2,
-        ease: "easeIn"
-      }
-    }
-  };
-
   return (
     <motion.div
-      variants={variants}
-      initial="enter"
-      animate="center"
-      exit="exit"
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: isLeaving ? 0 : 1, x: isLeaving ? -100 : 0 }}
+      exit={{ opacity: 0, x: 100 }}
+      transition={{
+        duration: 0.3,
+        ease: [0.4, 0, 0.2, 1]
+      }}
       onAnimationComplete={onAnimationComplete}
       className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 mb-2
-                 hover:bg-white/10 transition-colors 
+                 hover:bg-white/10 transition-colors
                  border border-white/5 hover:border-white/10
                  relative group"
     >
       {/* Track thumbnail */}
       <div className="relative h-16 w-16 flex-shrink-0">
         <Image
-          src={env.apiUrl 
+          src={env.apiUrl
             ? `${env.apiUrl}/api/albumart/${track.youtubeId}?square=1`
             : `/api/albumart/${track.youtubeId}?square=1`}
           alt={track.title}
@@ -188,7 +154,7 @@ export function AnimatedQueueItem({
                   className="h-4 w-4 rounded-full opacity-50 ml-2"
                 />
               )}
-              
+
               {/* Display autoplay source right after avatar */}
               {track.isAutoplay && track.autoplaySource && (
                 <>
@@ -206,27 +172,60 @@ export function AnimatedQueueItem({
       {/* Admin controls */}
       {isAdmin && (
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={handleBanTrack}
-            className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30 
-                       text-red-400 hover:text-red-300 transition-colors"
-            title="Ban track"
-          >
-            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clipRule="evenodd"/>
-            </svg>
-          </button>
-          <button
-            onClick={handleBanChannel}
-            className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30 
-                       text-purple-400 hover:text-purple-300 transition-colors"
-            title="Ban channel"
-          >
-            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
-              <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367z"/>
-            </svg>
-          </button>
+          {/* Expandable Ban Button */}
+          <div className="relative">
+            <motion.div
+              className="flex items-center justify-end"
+              onHoverStart={() => setShowBanOptions(true)}
+              onHoverEnd={() => setShowBanOptions(false)}
+            >
+              {/* Expanding Ban Channel Option */}
+              <AnimatePresence>
+                {showBanOptions && (
+                  <motion.button
+                    initial={{ opacity: 0, x: 20, scale: 0.8 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    exit={{ opacity: 0, x: 20, scale: 0.8 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 300,
+                      damping: 20,
+                      duration: 0.2
+                    }}
+                    onClick={handleBanChannel}
+                    className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30
+                               text-purple-400 hover:text-purple-300 transition-colors
+                               backdrop-blur-sm border border-purple-500/30 hover:border-purple-500/50
+                               shadow-lg shadow-purple-500/10 hover:shadow-purple-500/20
+                               mr-2 relative z-0"
+                    title="Ban channel"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
+                      <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367z"/>
+                    </svg>
+                  </motion.button>
+                )}
+              </AnimatePresence>
+
+              <motion.button
+                onClick={handleBanTrack}
+                className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30
+                           text-red-400 hover:text-red-300 transition-colors
+                           backdrop-blur-sm border border-red-500/30 hover:border-red-500/50
+                           shadow-lg shadow-red-500/10 hover:shadow-red-500/20
+                           relative z-10"
+                title="Ban track"
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+              >
+                <XMarkIcon className="w-4 h-4" />
+              </motion.button>
+            </motion.div>
+
+            </div>
         </div>
       )}
 
@@ -238,4 +237,4 @@ export function AnimatedQueueItem({
       )}
     </motion.div>
   );
-} 
+}

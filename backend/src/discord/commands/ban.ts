@@ -24,12 +24,12 @@ export const data = new SlashCommandBuilder()
   .addSubcommand(subcommand =>
     subcommand
       .setName('track')
-      .setDescription('Ban a track in the queue by position')
+      .setDescription('Ban the currently playing track or a track in the queue by position')
       .addIntegerOption(option =>
         option
           .setName('position')
-          .setDescription('Position in queue (1-based)')
-          .setRequired(true)
+          .setDescription('Position in queue (1-based, omit for currently playing)')
+          .setRequired(false)
           .setMinValue(1)
       )
       .addBooleanOption(option =>
@@ -123,38 +123,56 @@ export async function ban(interaction: ChatInputCommandInteraction) {
 }
 
 async function handleTrackBan(interaction: ChatInputCommandInteraction, player: any, trackingService: TrackingService) {
-  const uiPosition = interaction.options.getInteger('position', true);
+  const uiPosition = interaction.options.getInteger('position');
   const blockChannel = interaction.options.getBoolean('block_channel') ?? false;
   const blockRecommendations = interaction.options.getBoolean('block_recommendations') ?? false;
 
-  // Convert UI position (1-based) to array index (0-based)
-  const position = uiPosition - 1;
-  
-  // Get queue and validate position
-  const queue = player.getQueue();
-  if (position < 0 || position >= queue.length) {
-    await safeReply(interaction, `Invalid position. Queue has ${queue.length} songs (positions 1-${queue.length}).`, true);
-    return;
+  let trackToBan: any;
+  let banReason: string;
+  let positionDescription: string;
+
+  if (uiPosition) {
+    // Ban by queue position
+    const position = uiPosition - 1; // Convert UI position (1-based) to array index (0-based)
+
+    // Get queue and validate position
+    const queue = player.getQueue();
+    if (position < 0 || position >= queue.length) {
+      await safeReply(interaction, `Invalid position. Queue has ${queue.length} songs (positions 1-${queue.length}).`, true);
+      return;
+    }
+
+    trackToBan = queue[position];
+    banReason = 'Banned from queue position';
+    positionDescription = `at position ${uiPosition}`;
+  } else {
+    // Ban currently playing track
+    trackToBan = player.getCurrentTrack();
+    if (!trackToBan) {
+      await safeReply(interaction, 'No track is currently playing. Use /ban track position:<number> to ban from queue.', true);
+      return;
+    }
+
+    banReason = 'Banned currently playing track';
+    positionDescription = 'currently playing';
   }
-  
-  const trackToBan = queue[position];
-  
+
   // Ban the track with options
   const options: BanOptions = {
-    reason: 'Banned from queue position',
+    reason: banReason,
     blockChannel,
     blockSeedRecommendations: blockRecommendations
   };
 
   const result = await banTrack(trackToBan.youtubeId, options, trackingService);
-  
+
   // If this was the currently playing track, skip it
   const currentTrack = player.getCurrentTrack();
   if (currentTrack && currentTrack.youtubeId === trackToBan.youtubeId) {
     await player.skip();
   }
 
-  const message = `**Banned track at position ${uiPosition}**\n${result.message}`;
+  const message = `**Banned track ${positionDescription}**\n${result.message}`;
   await safeReply(interaction, message, true);
 }
 

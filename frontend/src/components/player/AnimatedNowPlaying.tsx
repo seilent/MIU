@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
-import { PlayIcon, PauseIcon } from '@heroicons/react/24/solid';
+import { PlayIcon, PauseIcon, XMarkIcon } from '@heroicons/react/24/solid';
 import { PlayerControls } from '@/components/player/PlayerControls';
 import { useAuthStore } from '@/lib/store/authStore';
 import env from '@/utils/env';
@@ -23,13 +23,14 @@ interface AnimatedNowPlayingProps {
   onPlayPause: () => void;
 }
 
-export function AnimatedNowPlaying({ 
-  track, 
-  isPlaying, 
+export function AnimatedNowPlaying({
+  track,
+  isPlaying,
   onPlayPause
 }: AnimatedNowPlayingProps) {
   const { user } = useAuthStore();
   const isAdmin = user?.roles?.includes('admin') || false;
+  const [showBanOptions, setShowBanOptions] = useState(false);
 
   const handleSkip = async () => {
     try {
@@ -37,24 +38,24 @@ export function AnimatedNowPlaying({
       const headers: HeadersInit = {
         'Content-Type': 'application/json'
       };
-      
+
       // Only add Authorization header if token exists
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
+
       const response = await fetch('/backend/api/music/skip', {
         method: 'POST',
         headers
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to skip track');
       }
     } catch (error) {
       console.error('Error skipping track:', error);
     }
-  };;;
+  };
 
   const handleBanTrack = async () => {
     try {
@@ -62,11 +63,11 @@ export function AnimatedNowPlaying({
       const headers: HeadersInit = {
         'Content-Type': 'application/json'
       };
-      
+
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
+
       const response = await fetch('/backend/api/music/ban', {
         method: 'POST',
         headers,
@@ -74,7 +75,7 @@ export function AnimatedNowPlaying({
           block_channel: false
         })
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to ban track');
       }
@@ -89,11 +90,11 @@ export function AnimatedNowPlaying({
       const headers: HeadersInit = {
         'Content-Type': 'application/json'
       };
-      
+
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
-      
+
       const response = await fetch('/backend/api/music/ban', {
         method: 'POST',
         headers,
@@ -101,7 +102,7 @@ export function AnimatedNowPlaying({
           block_channel: true
         })
       });
-      
+
       if (!response.ok) {
         throw new Error('Failed to ban channel');
       }
@@ -111,25 +112,25 @@ export function AnimatedNowPlaying({
   };
 
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      transition={{ 
+      transition={{
         duration: 0.5,
         ease: [0.4, 0, 0.2, 1]
       }}
       className="flex flex-col md:flex-row items-center md:items-start gap-4 md:gap-1 mb-12"
     >
       {/* Album art with play/pause */}
-      <motion.div 
+      <motion.div
         className="relative w-[16rem] h-[16rem] md:w-[24rem] md:h-[24rem] flex-shrink-0 group cursor-pointer"
         onClick={onPlayPause}
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
       >
         <Image
-          src={env.apiUrl 
+          src={env.apiUrl
             ? `${env.apiUrl}/api/albumart/${track.youtubeId}`
             : `/api/albumart/${track.youtubeId}`}
           alt={track.title}
@@ -149,10 +150,10 @@ export function AnimatedNowPlaying({
 
       {/* Volume control - mobile only */}
       <div className="w-full md:hidden -mt-5">
-        <PlayerControls 
-          showVolume={true} 
-          vertical={false} 
-          size="md" 
+        <PlayerControls
+          showVolume={true}
+          vertical={false}
+          size="md"
           className="w-full h-1 bg-theme-accent/20"
         />
       </div>
@@ -161,17 +162,17 @@ export function AnimatedNowPlaying({
       <div className="hidden md:block flex-shrink-0">
         <div className="h-[24rem] flex items-center overflow-hidden">
           <div className="h-full flex items-center">
-            <PlayerControls 
-              showVolume={true} 
-              vertical={true} 
-              size="md" 
+            <PlayerControls
+              showVolume={true}
+              vertical={true}
+              size="md"
               className="h-full w-0.5 mx-4 max-h-[24rem]"
             />
           </div>
         </div>
       </div>
 
-      <motion.div 
+      <motion.div
         className="flex flex-col items-center md:items-start flex-grow mt-3 md:mt-0"
         initial={{ opacity: 0, x: -20 }}
         animate={{ opacity: 1, x: 0 }}
@@ -197,44 +198,79 @@ export function AnimatedNowPlaying({
           )}
         </div>
         {isAdmin && (
-          <div className="flex items-center gap-2 mt-2">
+          <div className="flex items-center gap-2 mt-2 relative group">
             <button
               onClick={handleSkip}
-              className="p-2 rounded-full bg-orange-500/20 hover:bg-orange-500/30 
-                         text-orange-400 hover:text-orange-300 transition-colors
-                         flex items-center justify-center"
+              className="p-2 rounded-full bg-theme-accent/20 hover:bg-theme-accent/30
+                         text-theme-accent hover:text-theme-accent transition-colors
+                         flex items-center justify-center backdrop-blur-sm
+                         border border-theme-accent/30 hover:border-theme-accent/50"
               title="Skip track"
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                 <path d="M4.555 5.168A1 1 0 003 6v8a1 1 0 001.555.832L10 11.202V14a1 1 0 001.555.832l6-4a1 1 0 000-1.664l-6-4A1 1 0 0010 6v2.798l-5.445-3.63z"/>
               </svg>
             </button>
-            <button
-              onClick={handleBanTrack}
-              className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30 
-                         text-red-400 hover:text-red-300 transition-colors
-                         flex items-center justify-center"
-              title="Ban track"
-            >
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clipRule="evenodd"/>
-              </svg>
-            </button>
-            <button
-              onClick={handleBanChannel}
-              className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30 
-                         text-purple-400 hover:text-purple-300 transition-colors
-                         flex items-center justify-center"
-              title="Ban channel"
-            >
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
-                <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 818.367 8.367z"/>
-              </svg>
-            </button>
+
+            {/* Expandable Ban Button */}
+            <div className="relative">
+              <motion.div
+                className="flex items-center justify-start"
+                onHoverStart={() => setShowBanOptions(true)}
+                onHoverEnd={() => setShowBanOptions(false)}
+              >
+                <motion.button
+                  onClick={handleBanTrack}
+                  className="p-2 rounded-full bg-red-500/20 hover:bg-red-500/30
+                             text-red-400 hover:text-red-300 transition-colors
+                             flex items-center justify-center backdrop-blur-sm
+                             border border-red-500/30 hover:border-red-500/50
+                             shadow-lg shadow-red-500/10 hover:shadow-red-500/20
+                             relative z-10"
+                  title="Ban track"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <XMarkIcon className="w-4 h-4" />
+                </motion.button>
+
+                {/* Expanding Ban Channel Option */}
+                <AnimatePresence>
+                  {showBanOptions && (
+                    <motion.button
+                      initial={{ opacity: 0, x: -20, scale: 0.8 }}
+                      animate={{ opacity: 1, x: 0, scale: 1 }}
+                      exit={{ opacity: 0, x: -20, scale: 0.8 }}
+                      transition={{
+                        type: "spring",
+                        stiffness: 300,
+                        damping: 20,
+                        duration: 0.2
+                      }}
+                      onClick={handleBanChannel}
+                      className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30
+                                 text-purple-400 hover:text-purple-300 transition-colors
+                                 flex items-center justify-center backdrop-blur-sm
+                                 border border-purple-500/30 hover:border-purple-500/50
+                                 shadow-lg shadow-purple-500/10 hover:shadow-purple-500/20
+                                 ml-2 relative z-0"
+                      title="Ban channel"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd"/>
+                        <path d="M13.477 14.89A6 6 0 715.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367z"/>
+                      </svg>
+                    </motion.button>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+
+              </div>
           </div>
         )}
       </motion.div>
     </motion.div>
   );
-} 
+}
