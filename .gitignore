@@ -38,11 +38,14 @@ Thumbs.db
 
 # Logs
 logs/
+log/
 *.log
+*.log.*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+backend.log
 
 # Testing
 coverage/
@@ -61,6 +64,12 @@ tmp/
 temp/
 *.tmp
 
+# Process and runtime files
+*.pid
+*.sock
+*.session
+*.runtime
+
 # Debug
 .debug/
 
@@ -77,9 +86,37 @@ build/Release
 
 # Project specific
 cache/
+*.cache
+cache/**/*
 audio/
 uploads/
 downloads/
+
+# Audio and media files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.webm
+
+# YouTube and media processing
+youtube_cookies.txt
+*.ytdl
+
+# System and config files
+*.conf
+*.ini
+*.cfg
+
+# Development databases
+*.sqlite-journal
+*.db-journal
+
+# Binary directories
+bin/
+bin/**/*
 
 # Next.js
 .next/
