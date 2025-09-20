@@ -311,7 +311,7 @@ export default function Home() {
   // If no track to display, show empty state
   if (displayTrack) {
     return (
-      <div className="container mx-auto px-4 py-8">
+      <div className="container mx-auto px-4 py-8 max-w-6xl">
         {/* Now Playing Section */}
         <AnimatePresence mode="wait">
           <motion.div
@@ -321,7 +321,7 @@ export default function Home() {
             exit={{ opacity: 0, y: -20 }}
             transition={{ duration: 0.3 }}
           >
-            <AnimatedNowPlaying 
+            <AnimatedNowPlaying
               track={displayTrack}
               isPlaying={isPlaying}
               onPlayPause={handlePlayPause}
@@ -345,7 +345,7 @@ export default function Home() {
           </div>
 
           <div className="relative overflow-hidden">
-            <div className="relative w-full">
+            <div className="relative w-full backdrop-blur-md bg-white/5 rounded-xl border border-white/10 p-6">
               {/* History View */}
               <motion.div
                 initial={false}
@@ -368,7 +368,7 @@ export default function Home() {
                     />
                   ))}
                   {history.length === 0 && (
-                    <div className="text-center text-gray-400 py-8">
+                    <div className="text-center text-white/60 py-8 backdrop-blur-sm bg-white/5 rounded-lg border border-white/10">
                       No history available
                     </div>
                   )}
@@ -397,7 +397,7 @@ export default function Home() {
                     />
                   ))}
                   {displayQueue.length === 0 && (
-                    <div className="text-center text-gray-400 py-8">
+                    <div className="text-center text-white/60 py-8 backdrop-blur-sm bg-white/5 rounded-lg border border-white/10">
                       Queue is empty
                     </div>
                   )}
@@ -413,7 +413,7 @@ export default function Home() {
   // If no track to display and we've waited long enough, show empty state
   if (showEmptyState) {
     return (
-      <div className="container mx-auto px-4 py-8">
+      <div className="container mx-auto px-4 py-8 max-w-4xl">
         <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
           <div className="relative w-[16rem] h-[16rem] sm:w-[20rem] sm:h-[20rem] md:w-[24rem] md:h-[24rem] mb-8">
             <Image
@@ -533,7 +533,7 @@ export default function Home() {
   
   // Show loading state during transitions
   return (
-    <div className="container mx-auto px-4 py-8 flex items-center justify-center min-h-[60vh]">
+    <div className="container mx-auto px-4 py-8 max-w-4xl flex items-center justify-center min-h-[60vh]">
       <LoadingSpinner size="lg" />
     </div>
   );

@@ -104,9 +104,9 @@ export function AnimatedQueueItem({
         ease: [0.4, 0, 0.2, 1]
       }}
       onAnimationComplete={onAnimationComplete}
-      className="flex items-center space-x-4 bg-white/5 rounded-lg p-4 mb-2
+      className="flex items-center space-x-4 bg-white/5 backdrop-blur-sm rounded-lg p-4 mb-2
                  hover:bg-white/10 transition-colors
-                 border border-white/5 hover:border-white/10
+                 border border-white/10 hover:border-white/20
                  relative group"
     >
       {/* Track thumbnail */}
