@@ -8,7 +8,6 @@ import { getYoutubeInfo, youtube, processImage } from './youtube.js';
 import { executeYoutubeApi } from './youtubeApi.js';
 import { filterBlockedMusicContent, isLikelyJapaneseSong, BLOCKED_KEYWORDS } from './contentFilter.js';
 import fetch from 'node-fetch';
-import { extractYoutubeId } from './validationHelpers.js';
 import execa from 'execa';
 import sharp from 'sharp';
 import { getKeyManager } from './YouTubeKeyManager.js';
@@ -76,14 +75,18 @@ export function getThumbnailUrl(youtubeId: string): string {
  * @param thumbnailUrl The URL of the thumbnail to download
  */
 export async function downloadAndCacheThumbnail(youtubeId: string, thumbnailUrl: string): Promise<void> {
+  // Check if we already have a cached thumbnail for this video
   const cachePath = path.join(THUMBNAIL_CACHE_DIR, `${youtubeId}.jpg`);
   
-  // Ensure cache directory exists
-  await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
+  // Check if the cache directory exists, if not create it
+  const cacheDir = path.dirname(cachePath);
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
+  }
   
-  // Check if cached thumbnail is recent (< 2 weeks old)
-  try {
-    const stats = await fs.promises.stat(cachePath);
+  // If cached thumbnail exists and is < 2 weeks old, skip download
+  if (fs.existsSync(cachePath)) {
+    const stats = fs.statSync(cachePath);
     const fileAge = Date.now() - stats.mtimeMs;
     const twoWeeks = 14 * 24 * 60 * 60 * 1000;
     
@@ -91,44 +94,29 @@ export async function downloadAndCacheThumbnail(youtubeId: string, thumbnailUrl:
       console.log(`Using cached thumbnail for ${youtubeId}`);
       return;
     }
-  } catch (error) {
-    // File doesn't exist, continue with download
   }
   
-  const downloadThumbnail = async (url: string, isOriginal: boolean = true): Promise<Buffer> => {
-    const response = await fetch(url);
+  try {
+    console.log(`Downloading thumbnail for ${youtubeId}`);
+    
+    // Download the image
+    const response = await fetch(thumbnailUrl);
     if (!response.ok) {
-      throw new Error(`Failed to download ${isOriginal ? 'original' : 'fallback'} thumbnail: ${response.statusText}`);
+      throw new Error(`Failed to download thumbnail: ${response.statusText}`);
     }
     
     const buffer = await response.arrayBuffer();
     const imageBuffer = Buffer.from(buffer);
     
-    // Process image if available, otherwise use original
-    try {
-      return await processImage(imageBuffer);
-    } catch (processError) {
-      if (isOriginal) throw processError; // Re-throw for original, fallback should accept unprocessed
-      return imageBuffer;
-    }
-  };
-  
-  try {
-    console.log(`Downloading thumbnail for ${youtubeId}`);
+    // Process the image using the processImage function from youtube.ts
+    const processedImage = await processImage(imageBuffer);
     
-    // Try original URL first, then fallback
-    let processedImage: Buffer;
-    try {
-      processedImage = await downloadThumbnail(thumbnailUrl, true);
-    } catch (error) {
-      console.log(`Original thumbnail failed, trying fallback`);
-      const fallbackUrl = `https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`;
-      processedImage = await downloadThumbnail(fallbackUrl, false);
-    }
+    // Write the processed image directly to the cache path
+    fs.writeFileSync(cachePath, processedImage);
     
-    // Write file and update database
-    await fs.promises.writeFile(cachePath, processedImage);
+    console.log(`Thumbnail downloaded and processed for ${youtubeId}`);
     
+    // Update the ThumbnailCache database entry
     const metadata = await sharp(processedImage).metadata();
     
     await prisma.thumbnailCache.upsert({
@@ -147,10 +135,54 @@ export async function downloadAndCacheThumbnail(youtubeId: string, thumbnailUrl:
       }
     });
     
-    console.log(`Thumbnail cached for ${youtubeId}`);
-    
   } catch (error) {
-    console.error(`Failed to download thumbnail for ${youtubeId}:`, error);
+    console.error(`Error downloading thumbnail for ${youtubeId}:`, error);
+    
+    // If download fails, try to use a fallback thumbnail from YouTube directly
+    try {
+      const fallbackUrl = `https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`;
+      console.log(`Trying fallback thumbnail URL: ${fallbackUrl}`);
+      
+      const response = await fetch(fallbackUrl);
+      if (response.ok) {
+        const buffer = await response.arrayBuffer();
+        const imageBuffer = Buffer.from(buffer);
+        
+        // Try to process it
+        try {
+          const processedImage = await processImage(imageBuffer);
+          fs.writeFileSync(cachePath, processedImage);
+        } catch (processError) {
+          // If processing fails, just use the original image
+          fs.writeFileSync(cachePath, imageBuffer);
+        }
+        
+        console.log(`Used fallback thumbnail for ${youtubeId}`);
+        
+        // Update the database even with fallback
+        const metadata = await sharp(fs.readFileSync(cachePath)).metadata();
+        
+        await prisma.thumbnailCache.upsert({
+          where: { youtubeId },
+          update: {
+            filePath: cachePath,
+            width: metadata.width || 0,
+            height: metadata.height || 0,
+            updatedAt: new Date()
+          },
+          create: {
+            youtubeId,
+            filePath: cachePath,
+            width: metadata.width || 0,
+            height: metadata.height || 0
+          }
+        });
+      } else {
+        throw new Error(`Fallback thumbnail not available: ${response.statusText}`);
+      }
+    } catch (fallbackError) {
+      console.error(`Failed to use fallback thumbnail for ${youtubeId}:`, fallbackError);
+    }
   }
 }
 
@@ -161,29 +193,38 @@ export async function downloadAndCacheThumbnail(youtubeId: string, thumbnailUrl:
  */
 export async function searchYoutubeMusic(query: string): Promise<SearchResult[]> {
   try {
-    // Use YouTubeAPIManager for YouTube Music search
-    const { getYouTubeAPIManager } = await import('./youtubeApiManager.js');
-    const youtubeAPI = getYouTubeAPIManager();
+    console.log('Querying YouTube Music API for:', query);
     
-    const results = await youtubeAPI.searchYoutubeMusic(query);
+    // Ensure API is initialized
+    await ensureApiInitialized();
     
-    // Apply content filtering 
-    const filteredContent = await filterBlockedMusicContent(results.map(item => ({
-      videoId: item.youtubeId,
-      name: item.title,
-      thumbnails: item.thumbnail ? [{ url: item.thumbnail }] : [],
-      duration: item.duration
-    })));
-    
-    console.log(`Found ${results.length} results, ${filteredContent.length} after filtering`);
+    // Construct search query
+    let searchQuery = query;
+    if (!/[一-龯ぁ-んァ-ン]/.test(query)) {
+      // If query doesn't contain Japanese characters, add J-pop keywords
+      searchQuery = `${query} jpop`;
+    }
 
-    // Convert back to SearchResult format
+    // Search YouTube Music
+    const searchResults = await api.search(searchQuery, 'song');
+    
+    if (!searchResults || !searchResults.content || searchResults.content.length === 0) {
+      console.log('No results from YouTube Music API');
+      return [];
+    }
+
+    // Filter blocked content using shared utility
+    const filteredContent = await filterBlockedMusicContent(searchResults.content);
+    
+    console.log(`Found ${searchResults.content.length} results, ${filteredContent.length} after filtering`);
+
+    // Process results and adapt to SearchResult type
     return filteredContent.map(item => ({
       youtubeId: item.videoId,
       title: item.name,
       thumbnail: item.thumbnails?.[0]?.url || '',
-      duration: item.duration || 0
-    }));
+      duration: item.duration || 0 // Use duration if available or default to 0
+    })).filter(result => !!result.youtubeId);
 
   } catch (error) {
     console.error('Error searching YouTube Music:', error);
@@ -204,98 +245,181 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
       return [];
     }
 
-    // Check if the seed track is Japanese
+    // First check if the seed track is Japanese
     const trackDetails = await prisma.track.findUnique({
       where: { youtubeId: seedTrackId },
       select: { title: true }
     });
     
     if (trackDetails) {
+      // Check if the track title contains Japanese characters or keywords
       if (!isLikelyJapaneseSong(trackDetails.title, '', [], [])) {
         console.log(`Seed track ${seedTrackId} "${trackDetails.title}" is not likely Japanese. Skipping YouTube Music recommendations.`);
         return [];
       }
     }
-
-    // Use YouTubeAPIManager for yt-dlp based recommendations
-    const { getYouTubeAPIManager } = await import('./youtubeApiManager.js');
-    const youtubeAPI = getYouTubeAPIManager();
     
-    const rawRecommendations = await youtubeAPI.getYoutubeRecommendations(seedTrackId, {
-      maxResults: 20
-    });
-    
-    if (rawRecommendations.length > 0) {
-      // Filter recommendations through content filters
-      const processedItems = rawRecommendations.map(rec => ({
-        name: rec.title || '',
-        artist: { name: (rec as any).channelTitle || '' },
-        videoId: rec.youtubeId
-      }));
-      
-      const filteredContent = await filterBlockedMusicContent(processedItems);
-      
-      // Apply Japanese-only filtering
-      const japaneseContent = filteredContent.filter(item => 
-        isLikelyJapaneseSong(item.name, item.artist?.name || '', [], [])
-      );
-      
-      const recommendations = japaneseContent
-        .slice(0, 20)
-        .map(item => ({ youtubeId: item.videoId }));
-      
-      console.log(`Returning ${recommendations.length} YouTube Music recommendations after filtering`);
-      return recommendations;
+    // Check if cookies file exists
+    const cookiesPath = path.join(process.cwd(), 'youtube_cookies.txt');
+    let cookiesExist = false;
+    try {
+      await fs.promises.access(cookiesPath, fs.constants.R_OK);
+      cookiesExist = true;
+      console.log('Using cookies for YouTube Music recommendations');
+    } catch (error) {
+      console.log('No cookies file found, recommendations may be limited');
     }
     
-    // Fallback to YouTube Music API method if yt-dlp fails
-    console.log('Falling back to YouTube Music API method');
+    // Try to get recommendations using yt-dlp with cookies
+    if (cookiesExist) {
+      try {
+        const ytdlpPath = path.join(process.cwd(), 'node_modules/yt-dlp-exec/bin/yt-dlp');
+        
+        // Get the radio/mix playlist for this track
+        const radioUrl = `https://music.youtube.com/watch?v=${seedTrackId}&list=RDAMVM${seedTrackId}`;
+        
+        console.log(`Fetching YouTube Music recommendations for ${seedTrackId}`);
+        
+        // Use yt-dlp to extract the playlist info
+        const result = await execa(ytdlpPath, [
+          radioUrl,
+          '--cookies', cookiesPath,
+          '--flat-playlist',
+          '--dump-json',
+          '--no-download'
+        ]);
+        
+        // Parse the JSON output to get video IDs and metadata
+        const items = result.stdout.split('\n')
+          .filter(line => line.trim())
+          .map(line => JSON.parse(line));
+        
+        console.log(`Found ${items.length} tracks in the recommendation playlist`);
+        
+        // Filter out the seed track
+        let filteredItems = items.filter(item => item.id && item.id !== seedTrackId);
+        
+        // Apply content filtering
+        const processedItems = filteredItems.map(item => ({
+          name: item.title || '',
+          artist: { name: item.uploader || '' },
+          channelId: item.channel_id || '',
+          videoId: item.id
+        }));
+        
+        // Apply shared filtering utility
+        const filteredContent = await filterBlockedMusicContent(processedItems);
+        
+        // Apply Japanese-only filtering
+        const japaneseContent = filteredContent.filter(item => 
+          isLikelyJapaneseSong(item.name, item.artist?.name || '', [], [])
+        );
+        
+        // Limit to 20 results and map to the expected format
+        const recommendations = japaneseContent
+          .slice(0, 20)
+          .map(item => ({ youtubeId: item.videoId }));
+        
+        console.log(`Returning ${recommendations.length} YouTube Music recommendations after filtering`);
+        return recommendations;
+      } catch (ytdlpError) {
+        console.error('Failed to get recommendations using yt-dlp:', ytdlpError);
+        // Fall back to the original method
+      }
+    }
+    
+    // If yt-dlp method failed or no cookies, fall back to the original method
+    console.log('Falling back to original YouTube Music API method');
+    
+    // Ensure API is initialized
     await ensureApiInitialized();
     
-    // Try radio playlist first
+    // First try to get the watch playlist (radio)
     try {
+      // YouTube Music uses "RDAMVM" prefix for radio/mix playlists based on a video
       const response = await api.getPlaylist(`RDAMVM${seedTrackId}`);
       
       if (response && response.content && response.content.length > 0) {
+        // Filter out the seed track
         const filteredTracks = response.content
           .filter((track: any) => track.videoId && track.videoId !== seedTrackId);
           
+        // Apply content filtering from shared utility
         const filteredContent = await filterBlockedMusicContent(filteredTracks);
         
+        // Apply Japanese-only filtering
         const japaneseContent = filteredContent.filter((track: any) => 
-          isLikelyJapaneseSong(track.name || '', track.artist?.name || '', [], [])
+          isLikelyJapaneseSong(
+            track.name || '', 
+            track.artist?.name || '', 
+            [], 
+            [track.album?.name || '']
+          )
         );
         
-        return japaneseContent.map((track: any) => ({ youtubeId: track.videoId }));
+        // Map to the required format
+        const recommendations = japaneseContent
+          .map((track: any) => ({ youtubeId: track.videoId }));
+        
+        return recommendations;
       }
     } catch (error) {
-      console.log(`Failed to get radio playlist, trying search fallback`);
+      console.log(`Failed to get radio playlist for ${seedTrackId}, trying alternative method`);
     }
     
-    // Search fallback
-    if (trackDetails) {
-      const searchQuery = trackDetails.title
-        .replace(/【.*?】|\[.*?\]|feat\.|ft\./gi, '')
-        .replace(/\(.*?\)/g, '')
-        .trim();
+    // If radio playlist fails, try to search for similar songs
+    try {
+      // Get track details to use as search query
+      const trackDetails = await prisma.track.findUnique({
+        where: { youtubeId: seedTrackId },
+        select: { title: true }
+      });
       
-      const searchResults = await api.search(`${searchQuery} Japanese`, 'song');
-      
-      if (searchResults && searchResults.content && searchResults.content.length > 0) {
-        const filteredTracks = searchResults.content
-          .filter((track: any) => track.videoId && track.videoId !== seedTrackId);
+      if (trackDetails) {
+        // Clean up the title for better search results
+        const searchQuery = trackDetails.title
+          .replace(/【.*?】|\[.*?\]|feat\.|ft\./gi, '') // Remove brackets and featuring
+          .replace(/\(.*?\)/g, '')                     // Remove parentheses
+          .trim();
         
-        const filteredContent = await filterBlockedMusicContent(filteredTracks);
+        // Add "Japanese" to the search query to bias towards Japanese results
+        const enhancedQuery = `${searchQuery} Japanese`;
         
-        const japaneseContent = filteredContent.filter((track: any) => 
-          isLikelyJapaneseSong(track.name || '', track.artist?.name || '', [], [])
-        );
+        // Search for similar songs
+        const searchResults = await api.search(enhancedQuery, 'song');
         
-        return japaneseContent.slice(0, 10).map((track: any) => ({ youtubeId: track.videoId }));
+        if (searchResults && searchResults.content && searchResults.content.length > 0) {
+          // Filter out the seed track
+          const filteredTracks = searchResults.content
+            .filter((track: any) => track.videoId && track.videoId !== seedTrackId);
+          
+          // Apply content filtering from shared utility
+          const filteredContent = await filterBlockedMusicContent(filteredTracks);
+          
+          // Apply Japanese-only filtering
+          const japaneseContent = filteredContent.filter((track: any) => 
+            isLikelyJapaneseSong(
+              track.name || '', 
+              track.artist?.name || '', 
+              [], 
+              [track.album?.name || '']
+            )
+          );
+          
+          // Limit to 10 results and map to the required format
+          const recommendations = japaneseContent
+            .slice(0, 10)
+            .map((track: any) => ({ youtubeId: track.videoId }));
+          
+          console.log(`Found ${searchResults.content.length} search results, ${recommendations.length} after filtering`);
+          return recommendations;
+        }
       }
+    } catch (searchError) {
+      console.error('Failed to search for similar songs:', searchError);
     }
     
-    console.log('No recommendations available');
+    console.log('No recommendations from YouTube Music API');
     return [];
   } catch (error) {
     console.error('YouTube Music recommendations failed:', error);
@@ -306,40 +430,6 @@ export async function getYoutubeMusicRecommendations(seedTrackId: string): Promi
 // Function to check if a URL is a YouTube Music URL
 export function isYoutubeMusicUrl(url: string): boolean {
   return url.includes('music.youtube.com');
-}
-
-export async function resolveToRegularYoutube(input: string): Promise<{ resolvedId: string; isMusicUrl: boolean }> {
-  const isMusicUrl = isYoutubeMusicUrl(input);
-  
-  // Extract YouTube ID from the input (whether it's a URL or just an ID)
-  let youtubeId: string;
-  
-  if (isMusicUrl) {
-    // For YouTube Music URLs, extract the video ID
-    const musicUrlMatch = input.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-    if (musicUrlMatch) {
-      youtubeId = musicUrlMatch[1];
-    } else {
-      // Try to resolve Music ID to regular YouTube ID
-      const resolved = await resolveYouTubeMusicId(input);
-      if (!resolved) {
-        throw new Error('Could not resolve YouTube Music URL');
-      }
-      youtubeId = resolved;
-    }
-  } else {
-    // For regular YouTube URLs or IDs, extract the ID
-    const extractedId = extractYoutubeId(input);
-    if (!extractedId) {
-      throw new Error('Invalid YouTube URL or ID');
-    }
-    youtubeId = extractedId;
-  }
-  
-  return {
-    resolvedId: youtubeId,
-    isMusicUrl
-  };
 }
 
 // Function to resolve a YouTube Music ID to a regular YouTube ID

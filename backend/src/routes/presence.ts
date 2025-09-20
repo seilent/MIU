@@ -16,9 +16,8 @@ interface WebPresenceWithUser {
 
 const router = Router();
 
-// Apply optional auth middleware to allow anonymous presence
-import { optionalAuthMiddleware } from '../middleware/auth.js';
-router.use(optionalAuthMiddleware);
+// Apply auth middleware to all routes
+router.use(authMiddleware);
 
 /**
  * @swagger
@@ -37,41 +36,39 @@ router.use(optionalAuthMiddleware);
 router.post('/heartbeat', async (req: Request, res: Response) => {
   try {
     const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
     const keepPlaying = req.headers['x-keep-playing'] === 'true';
     const player = getPlayer();
 
-    // For authenticated users, track presence in database
-    if (userId) {
-      // Check if this is a new presence or update
-      const existingPresence = await prisma.webPresence.findUnique({
-        where: { userId },
-        include: { user: true }
-      });
+    // Check if this is a new presence or update
+    const existingPresence = await prisma.webPresence.findUnique({
+      where: { userId },
+      include: { user: true }
+    });
 
-      // Update or create web presence record
-      await prisma.webPresence.upsert({
-        where: { userId },
-        create: {
-          userId,
-          lastSeen: new Date()
-        },
-        update: {
-          lastSeen: new Date()
-        }
-      });
-
-      // Only log new web user joins or state changes
-      if (!existingPresence) {
-        logger.info(`🌐 Web user joined: ${userId}`);
+    // Update or create web presence record
+    await prisma.webPresence.upsert({
+      where: { userId },
+      create: {
+        userId,
+        lastSeen: new Date()
+      },
+      update: {
+        lastSeen: new Date()
       }
+    });
+
+    // Only log new web user joins or state changes
+    if (!existingPresence) {
+      logger.info(`🌐 Web user joined: ${userId}`);
     }
 
-    // Update player web presence for both authenticated and anonymous users
+    // Update player web presence
     if (keepPlaying && player.hasCurrentTrack()) {
       player.setWebPresence(true);
-      if (!userId) {
-        logger.info(`🌐 Anonymous web user active`);
-      }
     } else {
       player.setWebPresence(false);
     }

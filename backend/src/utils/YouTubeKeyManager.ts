@@ -302,9 +302,5 @@ export function getKeyManager(): YouTubeKeyManager {
   return keyManager;
 }
 
-// Export the singleton instance getter for direct access
-export const youtubeKeyManager = {
-  get instance() {
-    return getKeyManager();
-  }
-}; 
+// Export a new instance for direct access to avoid circular dependencies
+export const youtubeKeyManager = new YouTubeKeyManager(); 
