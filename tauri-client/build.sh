@@ -63,6 +63,7 @@ if [ "$TARGET" = "windows" ]; then
         sudo rm -f /srv/http/miu.gacha.boo/dl/miu.exe
         sudo rm -f /srv/http/miu.gacha.boo/dl/WebView2Loader.dll
         sudo rm -f /srv/http/miu.gacha.boo/dl/miu.ico
+        sudo rm -f /srv/http/miu.gacha.boo/dl/README.txt
         sudo rm -f /srv/http/miu.gacha.boo/dl/miu-player-windows.zip
 
         # Get file sizes

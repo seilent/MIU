@@ -94,7 +94,6 @@ const albumArtContainer = document.getElementById('album-art-container');
 const playIcon = document.getElementById('play-icon');
 const trackTitle = document.getElementById('track-title');
 const requesterName = document.getElementById('requester-name');
-const requesterAvatar = document.getElementById('requester-avatar');
 
 const volumeSlider = document.getElementById('volume-slider');
 const volumeIndicator = document.getElementById('volume-indicator');
@@ -633,17 +632,8 @@ function updateTrackDisplay(track) {
 
     if (track.requestedBy) {
         requesterName.textContent = track.requestedBy.username || 'Unknown';
-
-        if (track.requestedBy.avatar) {
-            const avatarUrl = `https://cdn.discordapp.com/avatars/${track.requestedBy.id}/${track.requestedBy.avatar}.png`;
-            requesterAvatar.src = avatarUrl;
-            requesterAvatar.classList.remove('hidden');
-        } else {
-            requesterAvatar.classList.add('hidden');
-        }
     } else {
         requesterName.textContent = '—';
-        requesterAvatar.classList.add('hidden');
     }
 
     let fallbackUsed = false;

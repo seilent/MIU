@@ -195,12 +195,6 @@ body {
     color: var(--miu-text-dim);
 }
 
-.requester-avatar {
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    opacity: 0.6;
-}
 
 .volume-container {
     display: flex;
