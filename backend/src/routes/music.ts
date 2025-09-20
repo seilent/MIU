@@ -5,11 +5,11 @@ import { getDiscordClient } from '../discord/client.js';
 import fs from 'fs';
 import { getYoutubeId, getYoutubeInfo, searchYoutube, parseDuration, downloadYoutubeAudio } from '../utils/youtube.js';
 import { MAX_DURATION } from '../config.js';
-import { 
-  songsPlayedCounter, 
-  audioStreamRequestsCounter, 
-  audioStreamBytesCounter, 
-  audioStreamLatencyHistogram 
+import {
+  songsPlayedCounter,
+  audioStreamRequestsCounter,
+  audioStreamBytesCounter,
+  audioStreamLatencyHistogram
 } from '../metrics.js';
 import { Readable, PassThrough } from 'stream';
 import path from 'path';
@@ -19,6 +19,7 @@ import { spawn } from 'child_process';
 import getEnv from '../utils/env.js';
 import crypto from 'crypto';
 import { getThumbnailUrl } from '../utils/youtubeMusic.js';
+import { authMiddleware } from '../middleware/auth.js';
 
 const env = getEnv();
 
@@ -250,17 +251,13 @@ router.get('/queue', (req, res) => {
  *       400:
  *         description: Invalid request
  */
-router.post('/queue', async (req: Request, res: Response) => {
+router.post('/queue', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
     const userId = req.user?.id;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
-    }
-
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
     }
 
     const client = getDiscordClient();
@@ -563,7 +560,7 @@ router.post('/playback', async (req: Request, res: Response) => {
  *       401:
  *         description: Unauthorized
  */
-router.post('/skip', async (req: Request, res: Response) => {
+router.post('/skip', authMiddleware, async (req: Request, res: Response) => {
   try {
     const client = getDiscordClient();
     if (!client) {
@@ -606,12 +603,9 @@ router.post('/skip', async (req: Request, res: Response) => {
  *       403:
  *         description: Forbidden - Admin permissions required
  */
-router.post('/ban', async (req: Request, res: Response) => {
+router.post('/ban', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = req.user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
 
     // Check if user has admin role
     const user = await prisma.user.findUnique({
@@ -873,7 +867,7 @@ async function applyBanPenalty(youtubeId: string) {
  *       401:
  *         description: Unauthorized
  */
-router.post('/volume', async (req, res) => {
+router.post('/volume', authMiddleware, async (req, res) => {
   try {
     const { volume } = req.body;
     if (typeof volume !== 'number' || volume < 0 || volume > 1) {
@@ -1001,9 +995,6 @@ function getSharedStream(youtubeId: string, filePath: string): Readable {
 // New secure direct streaming endpoint
 router.get('/secure-stream/:token', async (req, res) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
 
     const { token } = req.params;
     const session = streamSessions.get(token);
@@ -1124,9 +1115,6 @@ router.get('/secure-stream/:token', async (req, res) => {
 // Endpoint to get secure stream token for a track
 router.get('/secure-token/:youtubeId', async (req, res) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
 
     const { youtubeId } = req.params;
     
@@ -1160,9 +1148,6 @@ router.get('/secure-token/:youtubeId', async (req, res) => {
 // New streaming endpoint
 router.get('/stream', async (req, res) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
 
     const client = getDiscordClient();
     if (!client) {
@@ -1387,11 +1372,6 @@ router.get('/state/live', (req: Request, res: Response) => {
   let keepAliveInterval: NodeJS.Timeout | undefined;
 
   try {
-    // Check authentication from query parameter or user session
-    const token = req.query.token as string;
-    if (!req.user && !token) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
 
     const headers = {
       'Content-Type': 'text/event-stream',
@@ -1494,9 +1474,6 @@ export function broadcastPlayerState(data: any) {
 // HLS Endpoints
 router.get('/hls/:youtubeId/playlist.m3u8', async (req: Request, res: Response) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
 
     const { youtubeId } = req.params;
     const filePath = path.join(env.getString('CACHE_DIR'), 'audio', `${youtubeId}.m4a`);
@@ -1536,9 +1513,6 @@ router.get('/hls/:youtubeId/playlist.m3u8', async (req: Request, res: Response) 
 
 router.get('/hls/:youtubeId/segment_:index.ts', async (req: Request, res: Response) => {
   try {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
 
     const { youtubeId, index } = req.params;
     const filePath = path.join(env.getString('CACHE_DIR'), 'audio', `${youtubeId}.m4a`);
@@ -1699,7 +1673,7 @@ router.get('/current', async (_req: Request, res: Response) => {
 });
 
 // Block tracks based on seedTrackId in YoutubeRecommendation
-router.post('/block-by-seed', async (req: Request, res: Response) => {
+router.post('/block-by-seed', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { seedTrackId } = req.body;
 

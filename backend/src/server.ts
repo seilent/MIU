@@ -147,7 +147,7 @@ export async function createServer() {
 
   // API Routes
   app.use('/api/auth', authRouter);
-  app.use('/api/music', authMiddleware, musicRouter);
+  app.use('/api/music', musicRouter);
   app.use('/api/admin', authMiddleware, adminRouter);
   app.use('/api/history', authMiddleware, historyRouter);
   app.use('/api/presence', authMiddleware, presenceRouter);
