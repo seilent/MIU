@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState } from 'react';
 import Image from 'next/image';
@@ -27,7 +28,7 @@ interface AnimatedQueueItemProps {
   onAnimationComplete?: () => void;
 }
 
-export function AnimatedQueueItem({
+export const AnimatedQueueItem = React.memo(function AnimatedQueueItem({
   track,
   position,
   showPosition = true,
@@ -100,7 +101,7 @@ export function AnimatedQueueItem({
       animate={{ opacity: isLeaving ? 0 : 1, x: isLeaving ? -100 : 0 }}
       exit={{ opacity: 0, x: 100 }}
       transition={{
-        duration: 0.3,
+        duration: 0.2,
         ease: [0.4, 0, 0.2, 1]
       }}
       onAnimationComplete={onAnimationComplete}
@@ -119,6 +120,8 @@ export function AnimatedQueueItem({
           fill
           className="object-cover rounded-md filter-thumbnail"
           unoptimized={false}
+          loading="lazy"
+          sizes="64px"
         />
         {track.isAutoplay && (
           <div className="absolute top-0 right-0 bg-black/40 backdrop-blur-sm text-[9px] w-4 h-4
@@ -187,10 +190,8 @@ export function AnimatedQueueItem({
                     animate={{ opacity: 1, x: 0, scale: 1 }}
                     exit={{ opacity: 0, x: 20, scale: 0.8 }}
                     transition={{
-                      type: "spring",
-                      stiffness: 300,
-                      damping: 20,
-                      duration: 0.2
+                      duration: 0.15,
+                      ease: "easeOut"
                     }}
                     onClick={handleBanChannel}
                     className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30
@@ -237,4 +238,4 @@ export function AnimatedQueueItem({
       )}
     </motion.div>
   );
-}
+});

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import env from '@/utils/env';
@@ -10,7 +10,7 @@ interface FrostedBackgroundProps {
   className?: string;
 }
 
-export function FrostedBackground({ className = '' }: FrostedBackgroundProps) {
+export const FrostedBackground = React.memo(function FrostedBackground({ className = '' }: FrostedBackgroundProps) {
   const { currentTrack } = usePlayerStore();
   const [imageUrl, setImageUrl] = useState('/images/DEFAULT.jpg');
 
@@ -43,8 +43,10 @@ export function FrostedBackground({ className = '' }: FrostedBackgroundProps) {
               alt="Background"
               fill
               className="object-cover filter blur-[5px]"
-              priority
+              priority={false}
+              loading="lazy"
               quality={75}
+              sizes="100vw"
             />
           </div>
 
@@ -58,4 +60,4 @@ export function FrostedBackground({ className = '' }: FrostedBackgroundProps) {
       </AnimatePresence>
     </div>
   );
-} 
+}); 

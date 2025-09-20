@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, createContext, useContext, useRef, useEffect } from 'react';
+import React, { useState, createContext, useContext, useRef, useEffect } from 'react';
 import { ArrowPathRoundedSquareIcon, ClockIcon } from '@heroicons/react/24/outline';
 import { useAuthStore } from '@/lib/store/authStore';
 import { useAuth } from '@/providers/AuthProvider';
@@ -38,7 +38,7 @@ interface SearchResult {
   duration: number;
 }
 
-export function AppShell({ children }: AppShellProps) {
+export const AppShell = React.memo(function AppShell({ children }: AppShellProps) {
   const { user } = useAuthStore();
   const { logout } = useAuth();
   const pathname = usePathname();
@@ -455,4 +455,4 @@ export function AppShell({ children }: AppShellProps) {
       </BackgroundLayout>
     </ViewContext.Provider>
   );
-}
+});

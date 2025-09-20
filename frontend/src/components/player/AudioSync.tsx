@@ -900,16 +900,37 @@ export default function AudioSync() {
   // Cleanup effect
   useEffect(() => {
     return () => {
+      // Clean up all timers and intervals
+      if (trackEndTimerRef.current) {
+        clearInterval(trackEndTimerRef.current);
+        trackEndTimerRef.current = null;
+      }
+
+      // Clean up audio context
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
+
       // Clean up crossfade audio
       if (crossfadeAudioRef.current) {
         crossfadeAudioRef.current.pause();
         crossfadeAudioRef.current.src = '';
         crossfadeAudioRef.current = null;
       }
+
+      // Clean up wake lock
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(console.warn);
+        wakeLockRef.current = null;
+      }
+
+      // Reset all refs
+      positionSyncInProgressRef.current = false;
+      bufferingCompensationAppliedRef.current = false;
+      hasInitialSyncRef.current = false;
+      loadingRef.current = false;
+      mountedRef.current = false;
     };
   }, []);
 

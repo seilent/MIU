@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PlayIcon, PauseIcon, XMarkIcon } from '@heroicons/react/24/solid';
@@ -23,7 +23,7 @@ interface AnimatedNowPlayingProps {
   onPlayPause: () => void;
 }
 
-export function AnimatedNowPlaying({
+export const AnimatedNowPlaying = React.memo(function AnimatedNowPlaying({
   track,
   isPlaying,
   onPlayPause
@@ -117,7 +117,7 @@ export function AnimatedNowPlaying({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
       transition={{
-        duration: 0.5,
+        duration: 0.3,
         ease: [0.4, 0, 0.2, 1]
       }}
       className="flex flex-col md:flex-row items-center md:items-start gap-4 md:gap-1 mb-12"
@@ -136,7 +136,9 @@ export function AnimatedNowPlaying({
           alt={track.title}
           fill
           className="object-cover rounded-lg shadow-xl ring-1 ring-theme-accent/50"
-          priority
+          priority={false}
+          loading="lazy"
+          sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
         />
         {/* Play/Pause Overlay */}
         <div className="absolute inset-0 bg-theme-background/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex items-center justify-center">
@@ -242,10 +244,8 @@ export function AnimatedNowPlaying({
                       animate={{ opacity: 1, x: 0, scale: 1 }}
                       exit={{ opacity: 0, x: -20, scale: 0.8 }}
                       transition={{
-                        type: "spring",
-                        stiffness: 300,
-                        damping: 20,
-                        duration: 0.2
+                        duration: 0.15,
+                        ease: "easeOut"
                       }}
                       onClick={handleBanChannel}
                       className="p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/30
@@ -273,4 +273,4 @@ export function AnimatedNowPlaying({
       </motion.div>
     </motion.div>
   );
-}
+});

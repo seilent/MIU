@@ -1398,17 +1398,8 @@ router.get('/state/live', optionalAuthMiddleware, (req: Request, res: Response) 
     const currentTrack = player.getCurrentTrack();
     const queuedTracks = player.getQueue();
 
-    // Debug logging for SSE initial state
-    logger.info(`SSE Client ${clientId}: Sending initial state`, {
-      status: player.getStatus(),
-      currentTrack: currentTrack ? {
-        youtubeId: currentTrack.youtubeId,
-        title: currentTrack.title
-      } : null,
-      queueLength: queuedTracks.length,
-      position: player.getPosition()
-    });
-
+    
+    
     const initialState = {
       status: player.getStatus(),
       currentTrack: currentTrack ? formatTrack(queueItemToRequestWithTrack({
@@ -1448,7 +1439,6 @@ router.get('/state/live', optionalAuthMiddleware, (req: Request, res: Response) 
 
     // Handle client disconnect
     req.on('close', () => {
-      console.log(`SSE client ${clientId} disconnected`);
       cleanup(keepAliveInterval);
     });
 

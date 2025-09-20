@@ -10,7 +10,7 @@ interface Position {
   playbackRate: number;
 }
 
-export function AudioPlayer() {
+export const AudioPlayer = React.memo(function AudioPlayer() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -150,4 +150,4 @@ export function AudioPlayer() {
       </div>
     </div>
   );
-} 
+}); 

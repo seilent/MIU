@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { debounce } from 'lodash-es';
 import { useAuthStore } from '@/lib/store/authStore';
 import { usePlayerStore } from '@/lib/store/playerStore';
 import env from '@/utils/env';
@@ -22,12 +23,68 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Stable references for callbacks to prevent unnecessary re-renders
   const setPlayerStateRef = useRef(setPlayerState);
   const setQueueRef = useRef(setQueue);
-  
+
+  // Debounced state update handler to prevent excessive re-renders
+  const debouncedStateUpdate = useRef(debounce((data: any) => {
+    console.log('PlayerProvider: Debounced state update received', {
+      status: data.status,
+      track: data.currentTrack ? {
+        id: data.currentTrack.youtubeId,
+        title: data.currentTrack.title
+      } : null
+    });
+
+    // Update all state at once to prevent race conditions
+    if (data.currentTrack) {
+      setPlayerStateRef.current({
+        status: data.status,
+        position: data.position,
+        currentTrack: {
+          ...data.currentTrack,
+          requestedBy: data.currentTrack.requestedBy ? {
+            id: data.currentTrack.requestedBy.id,
+            username: data.currentTrack.requestedBy.username,
+            avatar: data.currentTrack.requestedBy.avatar || undefined,
+            hasAvatar: !!data.currentTrack.requestedBy.avatar
+          } : null,
+          requestedAt: data.currentTrack.requestedAt || new Date().toISOString()
+        }
+      });
+    } else {
+      setPlayerStateRef.current({
+        status: data.status,
+        position: data.position,
+        currentTrack: undefined
+      });
+    }
+
+    // Process queue data from state event if available
+    if (data.queue && Array.isArray(data.queue)) {
+      console.log('PlayerProvider: Queue update from state event', {
+        queueLength: data.queue.length
+      });
+
+      const processedQueue = data.queue.map((track: any) => ({
+        ...track,
+        requestedBy: track.requestedBy ? {
+          id: track.requestedBy.id,
+          username: track.requestedBy.username,
+          avatar: track.requestedBy.avatar || undefined,
+          hasAvatar: !!track.requestedBy.avatar
+        } : null,
+        requestedAt: track.requestedAt || new Date().toISOString(),
+        isAutoplay: !!track.isAutoplay
+      }));
+
+      setQueueRef.current(processedQueue);
+    }
+  }, 100)); // Debounce for 100ms to prevent rapid updates
+
   // Update refs when the functions change
   useEffect(() => {
     setPlayerStateRef.current = setPlayerState;
   }, [setPlayerState]);
-  
+
   useEffect(() => {
     setQueueRef.current = setQueue;
   }, [setQueue]);
@@ -38,61 +95,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const sseManager = SSEManager.getInstance();
     sseConnectionRef.current = true;
-    
+
     // Handle state updates (current track, status, position)
     const handleState = (data: any) => {
-      console.log('PlayerProvider: State update received', {
-        status: data.status,
-        track: data.currentTrack ? {
-          id: data.currentTrack.youtubeId,
-          title: data.currentTrack.title
-        } : null
-      });
-      
-      // Update all state at once to prevent race conditions
-      if (data.currentTrack) {
-        setPlayerStateRef.current({
-          status: data.status,
-          position: data.position,
-          currentTrack: {
-            ...data.currentTrack,
-            requestedBy: data.currentTrack.requestedBy ? {
-              id: data.currentTrack.requestedBy.id,
-              username: data.currentTrack.requestedBy.username,
-              avatar: data.currentTrack.requestedBy.avatar || undefined,
-              hasAvatar: !!data.currentTrack.requestedBy.avatar
-            } : null,
-            requestedAt: data.currentTrack.requestedAt || new Date().toISOString()
-          }
-        });
-      } else {
-        setPlayerStateRef.current({
-          status: data.status,
-          position: data.position,
-          currentTrack: undefined
-        });
-      }
-      
-      // Process queue data from state event if available
-      if (data.queue && Array.isArray(data.queue)) {
-        console.log('PlayerProvider: Queue update from state event', { 
-          queueLength: data.queue.length 
-        });
-        
-        const processedQueue = data.queue.map((track: any) => ({
-          ...track,
-          requestedBy: track.requestedBy ? {
-            id: track.requestedBy.id,
-            username: track.requestedBy.username,
-            avatar: track.requestedBy.avatar || undefined,
-            hasAvatar: !!track.requestedBy.avatar
-          } : null,
-          requestedAt: track.requestedAt || new Date().toISOString(),
-          isAutoplay: !!track.isAutoplay
-        }));
-        
-        setQueueRef.current(processedQueue);
-      }
+      debouncedStateUpdate.current(data);
     };
     
     // Handle heartbeat for connection status
@@ -121,6 +127,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       sseManager.removeEventListener('state', handleState);
       sseManager.removeEventListener('heartbeat', handleHeartbeat);
       sseManager.removeErrorListener(handleConnectionError);
+
+      // Cancel any pending debounced updates
+      if (debouncedStateUpdate.current) {
+        debouncedStateUpdate.current.cancel();
+      }
     };
   }, []); // Remove token dependency to prevent reconnections
 
