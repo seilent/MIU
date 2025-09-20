@@ -183,15 +183,9 @@ async fn connect_to_server(
 
     let backend_url = backend_url.ok_or_else(|| "Invalid server URL".to_string())?;
 
-    server
-        .inner()
-        .clone()
-        .fetch_and_apply_status(&backend_url, state.inner().clone(), app_handle)
-        .await
-        .map(|_| {
-            println!("Initial status fetch succeeded for {}", backend_url);
-        })
-        .map_err(|e| e.to_string())
+    // SSE will provide initial state - no need for separate minimal-status call
+    println!("SSE connection started for {}", backend_url);
+    Ok(())
 }
 
 #[tauri::command]

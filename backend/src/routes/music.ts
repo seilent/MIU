@@ -1154,18 +1154,14 @@ router.get('/stream', async (req, res) => {
       return res.status(500).json({ error: 'Discord client not available' });
     }
 
-    const currentTrack = await prisma.request.findFirst({
-      where: { status: RequestStatus.PLAYING },
-      include: { track: true }
-    });
-
+    const currentTrack = client.player.getCurrentTrack();
     if (!currentTrack) {
       return res.status(404).json({ error: 'No track playing' });
     }
 
     // Get cached audio file
     const audioCache = await prisma.audioCache.findUnique({
-      where: { youtubeId: currentTrack.track.youtubeId }
+      where: { youtubeId: currentTrack.youtubeId }
     });
 
     if (!audioCache || !fs.existsSync(audioCache.filePath)) {
@@ -1197,8 +1193,8 @@ router.get('/stream', async (req, res) => {
         'X-Content-Type-Options': 'nosniff',
         'X-Initial-Position': client.player.getPosition(),
         'X-Playback-Start': Date.now(),
-        'X-Track-Id': currentTrack.track.youtubeId,
-        'X-Track-Duration': currentTrack.track.duration,
+        'X-Track-Id': currentTrack.youtubeId,
+        'X-Track-Duration': currentTrack.duration,
         'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length, Content-Range'
       });
 
@@ -1227,8 +1223,8 @@ router.get('/stream', async (req, res) => {
         'X-Content-Type-Options': 'nosniff',
         'X-Initial-Position': client.player.getPosition(),
         'X-Playback-Start': Date.now(),
-        'X-Track-Id': currentTrack.track.youtubeId,
-        'X-Track-Duration': currentTrack.track.duration,
+        'X-Track-Id': currentTrack.youtubeId,
+        'X-Track-Duration': currentTrack.duration,
         'Access-Control-Expose-Headers': 'X-Initial-Position, X-Playback-Start, X-Track-Id, X-Track-Duration, Accept-Ranges, Content-Length'
       });
 

@@ -333,9 +333,11 @@ export class Player {
     // Wait for client to be ready before initializing voice connection
     if (this.client.isReady()) {
       this.initializeVoiceConnection();
+      this.initializeAutoplayOnStartup();
     } else {
       this.client.once('ready', () => {
         this.initializeVoiceConnection();
+        this.initializeAutoplayOnStartup();
       });
     }
 
@@ -473,6 +475,27 @@ export class Player {
       console.error('Failed to connect to voice channel:', error);
       // Clear connection if initialization failed
       this.connection = undefined;
+    }
+  }
+
+  private async initializeAutoplayOnStartup(): Promise<void> {
+    try {
+      // Wait a moment to ensure everything is initialized
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Check if autoplay should start on startup
+      if (this.autoplayEnabled && !this.currentTrack && this.queue.length === 0 && this.autoplayQueue.length === 0) {
+        console.log('[AUTOPLAY] Starting autoplay on bot startup');
+
+        // Only start if we have a voice channel configured
+        if (this.defaultVoiceChannelId && this.defaultGuildId) {
+          await this.handleAutoplay();
+        } else {
+          console.log('[AUTOPLAY] No voice channel configured, skipping autoplay startup');
+        }
+      }
+    } catch (error) {
+      console.error('[AUTOPLAY] Failed to start autoplay on startup:', error);
     }
   }
 

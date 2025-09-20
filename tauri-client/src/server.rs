@@ -5,7 +5,7 @@ use crate::state::{AppState, PlaybackStatus, Track};
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::Value;
+// Removed serde_json::Value - SSE provides complete data
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -29,26 +29,7 @@ impl ServerClient {
         }
     }
 
-    pub async fn get_status(&self, backend_url: &str) -> Result<Value> {
-        let url = format!("{}/api/music/minimal-status", backend_url);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch status: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!("Status request failed with {}", response.status()));
-        }
-
-        let data = response
-            .json::<Value>()
-            .await
-            .map_err(|e| anyhow!("Failed to parse status JSON: {}", e))?;
-
-        Ok(data)
-    }
+    // Removed get_status - SSE provides complete data
 
     pub fn spawn_background(
         self: Arc<Self>,
@@ -410,27 +391,7 @@ impl ServerClient {
         let play_at = data.play_at.unwrap_or(received_time_ms);
 
         // Ensure we have fresh metadata for the announced track before we resume playback.
-        let metadata_ready = {
-            let guard = state.lock().await;
-            guard
-                .current_track
-                .as_ref()
-                .map(|track| track.youtube_id == track_id)
-                .unwrap_or(false)
-        };
-
-        if !metadata_ready {
-            if let Err(err) = self
-                .fetch_and_apply_status(&backend_url, state.clone(), app_handle.clone())
-                .await
-            {
-                println!(
-                    "Failed to refresh player status before sync_play for {}: {}",
-                    track_id, err
-                );
-            }
-        }
-
+        // SSE state events provide complete metadata - no fallback needed
         let metadata_ready = {
             let guard = state.lock().await;
             guard
@@ -697,53 +658,7 @@ impl ServerClient {
             .await
     }
 
-    pub async fn fetch_and_apply_status(
-        &self,
-        backend_url: &str,
-        state: Arc<Mutex<AppState>>,
-        app_handle: AppHandle,
-    ) -> Result<()> {
-        let payload = self.get_status(backend_url).await?;
-        let status: MinimalStatus = serde_json::from_value(payload)?;
-
-        let mut guard = state.lock().await;
-        guard.update_server_status(&status.status);
-        // Don't auto-start playback on initial status fetch - keep player stopped until user clicks play
-        // Only sync player status if we're already playing (not on startup)
-        if !guard.user_paused && guard.player_status == PlaybackStatus::Playing {
-            guard.update_player_status(PlaybackStatus::from_str(&status.status));
-        }
-
-        if let Some(track) = status.track {
-            guard.update_current_track(Some(track));
-        } else {
-            guard.update_current_track(None);
-            guard.clear_sync();
-        }
-
-        if let Some(position) = status.position {
-            let duration = guard.current_track.as_ref().map(|t| t.duration);
-            guard.update_sync(position, duration);
-        }
-
-        guard.update_queue(Vec::new());
-
-        let snapshot = guard.snapshot();
-        drop(guard);
-
-        println!(
-            "Emitted player snapshot: status={:?}, track_present={}, position={:.2}, volume={:.2}",
-            snapshot.player_status,
-            snapshot.current_track.is_some(),
-            snapshot.position,
-            snapshot.volume
-        );
-        let _ = app_handle.emit("player_state_updated", snapshot.clone());
-
-        // TODO: Add autoplay logic when server is playing
-
-        Ok(())
-    }
+    // Removed fetch_and_apply_status - SSE provides complete initial state and real-time updates
 
     // Removed ensure_track_metadata - SSE state events provide complete metadata
 }
@@ -769,12 +684,7 @@ struct SyncPlayEventPayload {
     play_at: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct MinimalStatus {
-    status: String,
-    track: Option<Track>,
-    position: Option<f64>,
-}
+// Removed MinimalStatus struct - SSE provides complete data
 
 fn current_time_millis() -> f64 {
     SystemTime::now()
@@ -783,38 +693,4 @@ fn current_time_millis() -> f64 {
         .unwrap_or(0.0)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn minimal_status_parses_sample_payload() {
-        let json = r#"{
-            "status": "playing",
-            "track": {
-                "youtubeId": "G2NdmbXG6w4",
-                "title": "Fragment",
-                "thumbnail": "undefined/api/albumart/G2NdmbXG6w4",
-                "duration": 323,
-                "requestedBy": {
-                    "id": "398152425212739584",
-                    "username": "MIU",
-                    "avatar": "fba71bb1a77141401de7366bf6174ff8"
-                }
-            },
-            "position": 213.68,
-            "timestamp": 1758133265949,
-            "activeClients": 0
-        }"#;
-
-        let status: MinimalStatus = serde_json::from_str(json).expect("should parse");
-        assert_eq!(status.status, "playing");
-        let track = status.track.expect("track present");
-        assert_eq!(track.youtube_id, "G2NdmbXG6w4");
-        assert!(track.thumbnail.is_some());
-        assert_eq!(track.duration, 323.0);
-        let requester = track.requested_by.expect("requested by present");
-        assert_eq!(requester.username, "MIU");
-        assert_eq!(status.position.unwrap(), 213.68);
-    }
-}
+// Removed tests for MinimalStatus - SSE provides complete data
